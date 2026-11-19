@@ -1,5 +1,5 @@
 Feature: Storage
-  A PersistentVolumeClaim gets a volume from Git alone: LINSTOR, run by the Piraeus operator under Flux on the workers' data volumes, replicates it on two workers by default, keeps it on the pod's node on request, and takes snapshots of it. LINSTOR's controller takes an API request only from a caller that presents a certificate the storage cluster's own API authority signed, which the operator issues to itself and to each of its components that calls the API, and keeps serving its metrics to the scrape.
+  A PersistentVolumeClaim gets a volume from Git alone: LINSTOR, run by the Piraeus operator under Flux on the workers' data volumes, replicates it on two workers by default, keeps it on the pod's node on request, and takes snapshots of it. LINSTOR's controller takes an API request only from a caller that presents a certificate the storage cluster's own API authority signed, which the operator issues to itself and to each of its components that calls the API, and keeps serving its metrics to the scrape. The satellites run in their node's network namespace, so DRBD replicates between the nodes' own addresses, which every node's firewall admits, on connections that stay up while a satellite pod is replaced.
 
   One scenario needs a docker daemon, which the CI containers do not have: "The pinned LINSTOR controller refuses an API request without its authority's client certificate and keeps serving its metrics". Its proof runs the controller from the image the pinned chart's image list names, without network, without a capability, as a user that is not root and on a read-only root, with the configuration the operator writes for it, and removes the container with what it made. It runs with the other proofs of tests/storage.bats wherever a docker daemon answers, on a developer's machine or an agent's, and skips, saying why, where none does, as under just ci and in CI, which run every other proof.
 
@@ -17,6 +17,16 @@ Feature: Storage
     Given the operator's satellite DaemonSet at the version the pinned chart runs, and the nodes' machine configurations rendered offline
     When the satellite configuration is applied to it as the operator applies it
     Then no init container loads a kernel module or installs the shutdown guard, no systemd path is mounted, LVM's configuration comes from the ConfigMap that keeps backups and archives, written under /var/etc/lvm, and LINSTOR runs only on nodes without the control-plane role label, which Talos gives every control plane and no worker, without naming a node
+
+  Scenario: Satellites run in their node's network namespace and register the node's address
+    Given linstor-cluster as Flux applies it, and the operator's satellite DaemonSet and source at the version the pinned chart runs
+    When every satellite configuration is applied to the DaemonSet as the operator applies it
+    Then the satellite's pod is on the host network and keeps the default DNS policy, set by one configuration that selects every satellite and sets nothing else, no container of the pod names the controller's address or a cluster name, and the operator at that version registers each node's interface default-ipv4 from the ready pod's addresses, which on the host network are the node's own, modifying an existing interface of that name in place and deleting neither it nor the node
+
+  Scenario: Every node admits the satellites, DRBD's replication and the DRBD reactor from those who use them
+    Given the satellite's pod as the operator's DaemonSet at the version the pinned chart runs and every satellite configuration of linstor-cluster make it, the nodes' firewall inventory, and linstor-cluster as Flux applies it
+    When the ports the pod declares and LINSTOR's DRBD port range are read
+    Then each port the pod's containers and init containers declare, LINSTOR's satellite port 3366 and the DRBD reactor's 9942, is admitted by exactly one rule of the inventory, a TCP rule every node has, over 3366-3367 for the satellite, as the operator registers a satellite on either, and over 9942 alone for the reactor, that accepts the nodes' own addresses and the pod range and nothing else; LINSTOR's default DRBD port range, 7000-7999, is the ports of exactly one rule, a TCP rule every node has that accepts the nodes' own addresses alone, and no other TCP rule admits a port of it; and no file under kubernetes/ sets TcpPortAutoRange or PrefNic, so nothing in the tree moves LINSTOR's range or its choice of interface
 
   Scenario: Each worker's data device is an LVM-thin storage pool
     Given the satellite configuration and the workers' machine configurations rendered offline

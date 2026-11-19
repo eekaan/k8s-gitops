@@ -233,8 +233,8 @@ overlapping() {
       checked=$((checked + 1))
     done
   done
-  # Thirteen rules on each control plane, seven on each worker.
-  [ "$checked" -eq 60 ]
+  # Sixteen rules on each control plane, ten on each worker.
+  [ "$checked" -eq 78 ]
 }
 
 @test "etcd accepts control planes only" {
@@ -261,7 +261,7 @@ overlapping() {
   members=$(yq '.nodes[].private_address' "$FIXTURE")
   [ "$(wc -l <<< "$members")" -eq 6 ]
   reached=$(yq '.listeners[] | select(.from[] == "pods") | .name' "$INVENTORY" | sort -u)
-  for listener in etcd-metrics kube-controller-manager kube-scheduler kubelet hubble node-exporter cilium-agent-metrics; do
+  for listener in etcd-metrics kube-controller-manager kube-scheduler kubelet hubble node-exporter cilium-agent-metrics linstor-satellite drbd-reactor; do
     grep -qxF "$listener" <<< "$reached"
   done
 
@@ -284,8 +284,8 @@ overlapping() {
       checked=$((checked + 1))
     done
   done
-  # Eight on each control plane, four on each worker.
-  [ "$checked" -eq 36 ]
+  # Ten on each control plane, six on each worker.
+  [ "$checked" -eq 48 ]
 }
 
 @test "Cilium's overlay and health checks accept the nodes' own addresses only" {
@@ -425,8 +425,8 @@ unnamed_ports() {
   run unnamed_ports "$ROOT/docs/cluster.md"
   echo "$output"
   [ "$status" -eq 0 ]
-  # Thirteen rules, each of one port or one range.
-  [ "$output" = "13 ports looked for" ]
+  # Sixteen rules, each of one port or one range.
+  [ "$output" = "16 ports looked for" ]
 
   # The same on copies of the page with one change each to the section: a port gone, a port there
   # only inside a longer number, and a range with one end gone. The table under "What each node
@@ -438,13 +438,13 @@ unnamed_ports() {
   }
   page gone 'gsub(/8472/, "")'
   run unnamed_ports "$BATS_TEST_TMPDIR/gone.md"
-  [ "$output" = "8472 of cilium-vxlan"$'\n'"13 ports looked for" ]
+  [ "$output" = "8472 of cilium-vxlan"$'\n'"16 ports looked for" ]
   page longer 'gsub(/50001/, "150001")'
   run unnamed_ports "$BATS_TEST_TMPDIR/longer.md"
-  [ "$output" = "50001 of trustd"$'\n'"13 ports looked for" ]
+  [ "$output" = "50001 of trustd"$'\n'"16 ports looked for" ]
   page range 'gsub(/2379-2380/, "2379")'
   run unnamed_ports "$BATS_TEST_TMPDIR/range.md"
-  [ "$output" = "2379-2380 of etcd"$'\n'"13 ports looked for" ]
+  [ "$output" = "2379-2380 of etcd"$'\n'"16 ports looked for" ]
   for port in 8472 50001 2379-2380; do
     section "$BATS_TEST_TMPDIR/gone.md" '### What each node admits' | grep -qwF -- "$port"
   done

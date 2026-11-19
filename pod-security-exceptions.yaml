@@ -55,7 +55,11 @@ exceptions:
     workload: DaemonSet/linstor-satellite
     created-by: LinstorCluster/linstorcluster
     level: privileged
-    reason: the satellites manage each node's storage devices and the DRBD kernel module, so they run privileged, in the host's IPC namespace and with host paths
+    reason: >-
+      the satellites manage each node's storage devices and the DRBD kernel module, so they run
+      privileged, in the host's IPC namespace and with host paths, and in the host's network
+      namespace, as DRBD's connections belong to the namespace that configured them and the node's
+      outlives every satellite pod
   - namespace: piraeus-datastore
     workload: DaemonSet/linstor-csi-node
     created-by: LinstorCluster/linstorcluster

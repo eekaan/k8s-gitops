@@ -525,21 +525,22 @@ monitoring DaemonSet/kube-prometheus-stack-prometheus-node-exporter tcp 9100: no
 kube-system DaemonSet/cilium udp 6061: no rule of the inventory admits it and the exceptions file does not list it under no-rule
 monitoring DaemonSet/kube-prometheus-stack-prometheus-node-exporter udp 9100: no rule of the inventory admits it and the exceptions file does not list it under no-rule' ]
 
-  # A workload of each other kind that moves to the host network, with the ports it declares.
+  # A workload of each other kind that moves to the host network, with the ports it declares, on
+  # ports no rule of the inventory admits.
   copy moved
   yq -i '.spec.template.spec.hostNetwork = true' "$(object Deployment.apps_kube-system_hubble-relay.yaml)"
   yq -i '.spec.template.spec.hostNetwork = true' "$(object StatefulSet.apps_openbao_openbao.yaml)"
   yq -i '.spec.jobTemplate.spec.template.spec.hostNetwork = true
-    | .spec.jobTemplate.spec.template.spec.containers[0].ports = [{"containerPort": 7001}]' "$(object CronJob.batch_etcd-snapshots_etcd-snapshots.yaml)"
+    | .spec.jobTemplate.spec.template.spec.containers[0].ports = [{"containerPort": 8001}]' "$(object CronJob.batch_etcd-snapshots_etcd-snapshots.yaml)"
   yq -i '.spec.template.spec.hostNetwork = true
-    | .spec.template.spec.containers[0].ports = [{"containerPort": 7002}]' "$(object Job.batch_cert-manager_cert-manager-startupapicheck.yaml)"
-  yq -i '.spec.hostNetwork = true | .spec.containers[0].ports = [{"containerPort": 7003}]' "$(object Pod_kube-system_spegel-cleanup-wait.yaml)"
+    | .spec.template.spec.containers[0].ports = [{"containerPort": 8002}]' "$(object Job.batch_cert-manager_cert-manager-startupapicheck.yaml)"
+  yq -i '.spec.hostNetwork = true | .spec.containers[0].ports = [{"containerPort": 8003}]' "$(object Pod_kube-system_spegel-cleanup-wait.yaml)"
   on_copy listeners
   [ "$status" -eq 1 ]
-  [ "$output" = 'cert-manager Job/cert-manager-startupapicheck tcp 7002: no rule of the inventory admits it and the exceptions file does not list it under no-rule
-etcd-snapshots CronJob/etcd-snapshots tcp 7001: no rule of the inventory admits it and the exceptions file does not list it under no-rule
+  [ "$output" = 'cert-manager Job/cert-manager-startupapicheck tcp 8002: no rule of the inventory admits it and the exceptions file does not list it under no-rule
+etcd-snapshots CronJob/etcd-snapshots tcp 8001: no rule of the inventory admits it and the exceptions file does not list it under no-rule
 kube-system Deployment/hubble-relay tcp 4245: no rule of the inventory admits it and the exceptions file does not list it under no-rule
-kube-system Pod/spegel-cleanup-wait tcp 7003: no rule of the inventory admits it and the exceptions file does not list it under no-rule
+kube-system Pod/spegel-cleanup-wait tcp 8003: no rule of the inventory admits it and the exceptions file does not list it under no-rule
 openbao StatefulSet/openbao tcp 8200: no rule of the inventory admits it and the exceptions file does not list it under no-rule
 openbao StatefulSet/openbao tcp 8201: no rule of the inventory admits it and the exceptions file does not list it under no-rule
 openbao StatefulSet/openbao tcp 8202: no rule of the inventory admits it and the exceptions file does not list it under no-rule' ]
@@ -627,7 +628,10 @@ cilium-vxlan: no-pod
 cilium-health: no-pod
 hubble: kube-system DaemonSet/cilium tcp 4244
 node-exporter: monitoring DaemonSet/kube-prometheus-stack-prometheus-node-exporter tcp 9100
-cilium-agent-metrics: kube-system DaemonSet/cilium tcp 9962'
+cilium-agent-metrics: kube-system DaemonSet/cilium tcp 9962
+linstor-satellite: no-pod
+drbd: no-pod
+drbd-reactor: no-pod'
   diff <(echo "$served") <(echo "$output")
 
   copy same
@@ -1108,7 +1112,7 @@ kube-system Deployment/cilium-operator tcp 9234: no rule of the inventory admits
 kube-system Deployment/cilium-operator tcp 9963: no rule of the inventory admits it and the exceptions file does not list it under no-rule' ]
   on_copy rules
   [ "$status" -eq 1 ]
-  [ "$(grep -c 'a stale rule, or a listener to name there$' <<< "$output")" -eq 10 ]
+  [ "$(grep -c 'a stale rule, or a listener to name there$' <<< "$output")" -eq 13 ]
   on_copy monitors
   [ "$status" -eq 1 ]
   [ "$output" = 'the exceptions file does not exist' ]
@@ -1148,7 +1152,7 @@ no-pod entry 1 has the unknown key port'
   malformed 'the exceptions file has no list no-rule'
   copy not-a-map
   yq -i '.["no-pod"] += ["apid"]' "$COPY/exceptions.yaml"
-  malformed 'no-pod entry 11 is not a map of rule, reason'
+  malformed 'no-pod entry 14 is not a map of rule, reason'
   copy not-lists
   echo '[]' > "$COPY/exceptions.yaml"
   malformed 'the exceptions file is not a map of the lists no-rule and no-pod'

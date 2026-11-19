@@ -33,12 +33,14 @@ spec:
 ---
 # yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/podmonitor-monitoring-v1.json
 # The satellites' DRBD reactor, which runs beside each satellite and serves the state of each DRBD
-# resource and device on the port prometheus of the satellite's pod, 9942 on the pod's own address
+# resource and device on the port prometheus of the satellite's pod, 9942
 # (pkg/resources/satellite/satellite/config.yaml and daemonset.yaml of the operator, with enums on, so
 # a device's state is a series for each state): drbd_device_state, drbd_device_quorum and the like
-# (doc/prometheus.md and src/plugin/prometheus.rs of drbd-reactor v1.12.0). The satellites run on the
-# pod network, so no rule of the nodes' firewall is involved. DRBD's series carry no node, so the
-# monitor adds the worker the pod runs on, which is the name LINSTOR gives the node.
+# (doc/prometheus.md and src/plugin/prometheus.rs of drbd-reactor v1.12.0). The satellites run on
+# their node's network (linstor-cluster's host-network.yaml), so the reactor serves 9942 on the
+# node's address, which the rule drbd-reactor of the nodes' firewall admits from the nodes and the
+# pod range (talos/firewall.yaml), and a target's instance is the node's address. DRBD's series carry
+# no node, so the monitor adds the worker the pod runs on, which is the name LINSTOR gives the node.
 apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor
 metadata:

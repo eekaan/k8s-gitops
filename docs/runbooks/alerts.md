@@ -433,8 +433,10 @@ resync of a large volume takes a while, and the alert waits 15 minutes for it. T
 
 Usually: the node was down or unreachable and the replica is catching up, which clears by itself;
 the connection between two nodes is lost, so the replica cannot sync, as when a satellite is offline
-([LinstorSatelliteOffline](#linstorsatelliteoffline)) or Cilium's tunnel between them is down; or the
-node's data volume returns I/O errors, which the node's kernel log shows (`talosctl dmesg`).
+([LinstorSatelliteOffline](#linstorsatelliteoffline)) or the nodes' firewall drops DRBD's ports
+between them, as a node without the rule `drbd` does
+([cluster.md](../cluster.md#what-each-node-admits)); or the node's data volume returns I/O errors,
+which the node's kernel log shows (`talosctl dmesg`).
 
 ## DrbdResourceWithoutQuorum
 
@@ -466,7 +468,9 @@ linstor node list`, whose state says OFFLINE, or a version mismatch or an authen
 
 Usually: the node is down, rebooting or drained, which clears when it is back; the satellite's pod
 crashes, which its log shows, `kubectl --namespace piraeus-datastore logs <pod>`; or the controller
-cannot reach the satellite over the pod network, on TCP 3366 or 3367.
+cannot reach the satellite at its node's address, on TCP 3366 or 3367, as when the node lacks the
+rule `linstor-satellite` of the nodes' firewall, which `just cluster-talos`'s dry run then shows as
+a change it would make ([cluster.md](../cluster.md#what-each-node-admits)).
 
 ## LinstorStoragePoolFilling
 

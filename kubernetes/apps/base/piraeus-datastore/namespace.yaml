@@ -10,7 +10,8 @@ metadata:
   labels:
     # LINSTOR's satellites run privileged, in the host's IPC namespace, with the host's /dev and
     # other host paths, and so do the CSI node plugin, the NFS server and the HA controller the
-    # operator runs beside them; only the privileged level admits them. pod-security-exceptions.yaml
+    # operator runs beside them; the satellites and the CSI node plugin also run in the host's
+    # network namespace. Only the privileged level admits them. pod-security-exceptions.yaml
     # lists them, and the check that reads it (docs/kubernetes.md, Pod Security) requires the
     # operator's own pod, the only one here the render holds, to pass restricted, and audit and warn
     # at restricted at the cluster's Kubernetes minor, which records and reports any pod the

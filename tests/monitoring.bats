@@ -496,7 +496,7 @@ flux_controllers() {
 }
 
 @test "The storage layer is scraped" {
-  local ks dir recorded operator candidates scraped service monitors
+  local ks dir recorded operator candidates scraped service monitors cluster listeners
   dir="$REPO/kubernetes/apps/base/piraeus-datastore/linstor-monitoring"
   ks="$(overlay_ks linstor-monitoring)"
   [ "$(yq -p json '.spec.path' <<<"$ks")" = ./apps/base/piraeus-datastore/linstor-monitoring/app ]
@@ -528,15 +528,24 @@ flux_controllers() {
   monitors="$BUILT"
   built_app piraeus-datastore linstor-cluster
   [ "$(yq -N 'select(.kind == "LinstorCluster") | .spec.apiTLS.certManager.name // "none"' "$BUILT")" != none ]
+  cluster="$BUILT"
   BUILT="$monitors"
-  # The satellites' DRBD reactor serves the state of each DRBD resource on its own port, in the
-  # satellite's pod, which no configuration of the tree puts on the node's network, so no node
-  # firewall rule is involved; the monitor names the node a satellite runs on, as that is a worker.
+  # The satellites' DRBD reactor serves the state of each DRBD resource on its port in the
+  # satellite's pod, 9942 (pkg/resources/satellite/satellite/daemonset.yaml), and a configuration of
+  # linstor-cluster puts that pod on its node's network, so Prometheus scrapes it at the node's
+  # address: the nodes' firewall admits the port on every node from the nodes, as a scrape from
+  # another node arrives from its node's address, and from the pods, as one from the node itself
+  # arrives from the pod's. The monitor names the node a satellite runs on, as that is a worker.
   scraped="$(selected "$(monitor PodMonitor linstor-satellite)" "$(jq -c '[.[] | select(.name | startswith("Pod/"))]' <<<"$candidates")")"
   echo "PodMonitor linstor-satellite scrapes: ${scraped:-nothing}"
   [ "$scraped" = Pod/linstor-satellite ]
   [ "$(monitor PodMonitor linstor-satellite | yq -p json '.spec.podMetricsEndpoints[0].relabelings[] | select(.targetLabel == "job") | .replacement')" = linstor-satellite ]
   [ "$(monitor PodMonitor linstor-satellite | yq -p json '.spec.podMetricsEndpoints[0].relabelings[] | select(.targetLabel == "node") | .sourceLabels[0]')" = __meta_kubernetes_pod_node_name ]
-  [ -z "$(yq -N 'select(.kind == "LinstorSatelliteConfiguration") | .spec.podTemplate.spec.hostNetwork | select(. == true)' \
-    "$REPO/kubernetes/apps/base/piraeus-datastore/linstor-cluster/app/talos.yaml" "$REPO/kubernetes/apps/base/piraeus-datastore/linstor-cluster/app/storage-pool.yaml")" ]
+  [ -n "$(yq -N 'select(.kind == "LinstorSatelliteConfiguration") | .spec.podTemplate.spec.hostNetwork | select(. == true)' "$cluster")" ]
+  listeners="$(yq -o json -I0 '.listeners' "$REPO/talos/firewall.yaml" | jq -c '[.[] | select(.protocol == "tcp"
+    and any(.ports[]; tostring | split("-") | map(tonumber) | .[0] <= 9942 and 9942 <= .[-1]))]')"
+  echo "the firewall's listeners on 9942: $listeners"
+  [ "$(jq 'length' <<<"$listeners")" -eq 1 ]
+  [ "$(jq -r '.[0].nodes' <<<"$listeners")" = all ]
+  [ "$(jq -r '.[0].from | sort | join(" ")' <<<"$listeners")" = "members pods" ]
 }

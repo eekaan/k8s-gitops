@@ -645,7 +645,7 @@ once it is not, and the agents' rendered configuration agrees.
 | `flux-system` | listed | the controllers' flows are not yet enumerated as allows; Flux's own network policies, which the operator makes at run time, and the operator's for its web interface, `flux-operator-web`, which the check reads and passes because the namespace is listed ([What the check refuses](#what-the-check-refuses)); Pod Security, node firewall. |
 | `monitoring` | listed | Prometheus scrapes every namespace and the nodes, the node exporter runs in the host's network namespace, the API server calls the operator's webhook, VictoriaLogs takes the proxies on 9428 for the route `logs`, Alertmanager reaches the resolver and, outside the cluster, each of its two destinations on the port of its URL, hosts that are deployment values and so are named by no policy ([Where alerts go](#where-alerts-go)), the blackbox exporter takes Prometheus on 9115 and reaches the resolver and the public Gateway's proxies on 10080 and 10443, the other flows are not yet enumerated. The proxies reach VictoriaLogs' 9428 alone there and forward only the route's reads, behind the cluster's sign-in, Pod Security, node firewall. |
 | `openbao`, `external-secrets`, `cert-manager`, `cnpg-system`, `keda`, `volsync-system` | listed | flows not yet enumerated: webhooks and APIs the API server calls, the store's clients, scrapes, the PostgreSQL operator's calls to the Barman Cloud plugin. Each entry says which, and what covers it. |
-| `piraeus-datastore` | listed | the CSI node plugin runs in the host's network namespace; the satellites replicate over the pod network, and their flows are not yet enumerated. LINSTOR's API, which takes only clients holding a certificate its own authority signs ([Who may call LINSTOR](#who-may-call-linstor)), Pod Security, node firewall. |
+| `piraeus-datastore` | listed | the CSI node plugin and the satellites run in the host's network namespace, and DRBD replicates between the nodes' addresses; the other flows are not yet enumerated. LINSTOR's API, which takes only clients holding a certificate its own authority signs ([Who may call LINSTOR](#who-may-call-linstor)), Pod Security, node firewall. |
 | `cilium-secrets` | listed | holds no pod. |
 | `kyverno`, `gatekeeper-system` | listed | flows not yet enumerated: the API server calls each policy engine's webhooks from the control planes' host network, the controllers reach the API server, Prometheus scrapes them ([Admission policy](#admission-policy)). Pod Security, node firewall. |
 
@@ -1008,8 +1008,8 @@ namespace.
 ### What policy does not cover
 
 Pods in the host's network namespace (Cilium's agent, its Envoy and its operator, the storage's
-CSI node plugin, the node exporter) are not selected by a pod policy; the node firewall is their
-layer. The nodes' own listeners are the node firewall's
+CSI node plugin and satellites, the node exporter) are not selected by a pod policy; the node
+firewall is their layer. The nodes' own listeners are the node firewall's
 ([ADR 0017](adr/0017-nodes-firewall-themselves-with-talos-ingress-firewall.md)). The listed
 namespaces take and send what they did before. Policy is connection-level: no layer 7 rule, no
 mutual authentication, no encryption.
@@ -1907,8 +1907,12 @@ cluster runs.
   DRBD resource, which is the volume's `pvc-<id>`), `volume`, `minor` and the state, and
   `drbd_device_quorum` and `drbd_device_client`, which is 1 for a device that is diskless on purpose, a
   client or a tiebreaker (`doc/prometheus.md` and `src/plugin/prometheus.rs` of drbd-reactor). The
-  monitor names the job `linstor-satellite` and adds the node. The satellites run on the pod
-  network, so no rule of the nodes' firewall is involved.
+  satellites run on their node's network
+  ([Replication between the nodes](#replication-between-the-nodes)), so the reactor serves 9942 on
+  the node's address, which the rule `drbd-reactor` of the nodes' firewall admits from the nodes and
+  the pod range ([cluster.md](cluster.md#what-each-node-admits)), and a target's `instance` is the
+  node's address. The monitor names the job `linstor-satellite` and adds the node, from the pod's
+  node name.
 
 The operator publishes alert rules of its own, `config/extras/monitoring/alerts.yaml` in its
 repository, to be applied by hand. They are not loaded: they set no summary and no runbook, and some
@@ -3848,7 +3852,8 @@ the chart makes no disruption budget. Its chart serves no metrics and has no mon
 Persistent volumes come from LINSTOR, run by the Piraeus operator, on the workers' data volumes
 (ADR 0011). Two applications in `apps/base/piraeus-datastore/` hold it; their namespace admits
 privileged pods, as LINSTOR's satellites, the CSI node plugin, the NFS server and the HA controller
-run privileged with host paths; they are its entries in `pod-security-exceptions.yaml`. The
+run privileged with host paths, and the satellites and the CSI node plugin on the host network;
+they are its entries in `pod-security-exceptions.yaml`. The
 operator's own pod, the only one the render holds, passes restricted, and the LinstorCluster gives
 the LINSTOR controller, the CSI controller and the affinity controller the security context
 restricted requires ([Pod Security](#pod-security)).
@@ -3903,6 +3908,45 @@ systemd, of the kernel's modules and of its sources, which Talos does not have; 
 configuration from the ConfigMap `talos-lvm-config`, which keeps the metadata backups and archives
 that Talos's own configuration turns off. The satellite writes them under `/var/etc/lvm`, as `/etc`
 is read-only on Talos.
+
+### Replication between the nodes
+
+The satellites run in their node's network namespace: `host-network.yaml` gives every satellite's
+pod the host network and nothing else, as Piraeus' how-to does
+([Piraeus](https://github.com/piraeusdatastore/piraeus-operator/blob/v2.12.1/docs/how-to/drbd-host-networking.md)).
+The satellite calls no API and resolves no cluster name, so its pod keeps the default DNS policy,
+which on the host network is the node's resolver. Once a satellite's pod is ready, the operator
+registers its node in LINSTOR at the pod's address, as the interface `default-ipv4`, and changes that
+interface in place when the address changes
+([Piraeus](https://github.com/piraeusdatastore/piraeus-operator/blob/v2.12.1/internal/controller/linstorsatellite_controller.go#L411-L480),
+[its client](https://github.com/piraeusdatastore/piraeus-operator/blob/v2.12.1/pkg/linstorhelper/client.go#L233-L318)).
+On the host network the pod's address is the node's own, the first of its internal addresses
+([Kubernetes](https://github.com/kubernetes/kubernetes/blob/v1.37.1/pkg/kubelet/kubelet_pods.go#L2024-L2050),
+[the order](https://github.com/kubernetes/kubernetes/blob/v1.37.1/pkg/util/node/node.go#L65-L95)),
+which is its address on the node network (`talos/patches/all/node-ip.yaml`). LINSTOR takes every
+resource's address on a node from that interface, as no `PrefNic` is set and it is the node's only
+one ([LINSTOR](https://github.com/LINBIT/linstor-server/blob/v1.35.3/satellite/src/main/java/com/linbit/linstor/layer/drbd/resfiles/ConfFileBuilder.java#L910-L971)),
+so DRBD replicates between the nodes' own addresses.
+
+DRBD's connections belong to the network namespace that configured them: when a namespace ends,
+DRBD disconnects every connection configured from it and removes its paths
+([DRBD](https://github.com/LINBIT/drbd/blob/drbd-9.3.4/drbd/drbd_main.c#L3208-L3276)). The node's
+namespace never ends, so replacing a satellite's pod, as an update of the operator or a change to a
+satellite configuration does, leaves every connection and every volume's I/O as it is, and the new
+satellite takes them over.
+
+The LINSTOR controller reaches each satellite at its node's address on TCP 3366; DRBD listens at the
+node's address on a port of 7000-7999 for each volume on each node that holds it, and its peers
+connect from theirs; the DRBD reactor serves its metrics on 9942. The nodes' firewall admits each
+([cluster.md](cluster.md#what-each-node-admits)).
+
+Taking `host-network.yaml` out does not move the connections back: their paths stay in the node's
+namespace, and DRBD refuses a satellite on the pod network that configures such a connection from
+its own ([DRBD](https://github.com/LINBIT/drbd/blob/drbd-9.3.4/drbd/drbd_nl.c#L5389-L5395)).
+Moving back takes the steps of Piraeus' how-to on every satellite first, `drbdadm suspend-io`,
+`disconnect --force` and `del-path`, after which the configuration goes and the operator replaces
+every satellite; every volume's I/O is suspended from the first of those steps until the satellites
+are back and connected.
 
 ### Who may call LINSTOR
 
@@ -3996,21 +4040,27 @@ stack: `just cluster-destroy` destroys them with the stack, and every volume's d
 ([cluster.md](cluster.md#recipes)).
 
 `tests/storage.bats` builds the three applications as Flux applies them; applies the satellite
-configuration to the operator's own satellite DaemonSet at the version the pinned chart runs; renders
-the nodes' machine configurations offline to check which nodes LINSTOR selects and which device the
-pool takes; reads the StorageClasses and the VolumeSnapshotClass; renders the operator's chart to
-check that its definitions are kept; reads the `LinstorCluster`'s `apiTLS`, the issuers and the
-authority it names, and the operator's source at the version the chart runs, to check that every
-component that calls the API gets a client certificate from that issuer and dials HTTPS at a name
-the controller's certificate holds, and that no podTemplate or patch of the storage cluster's
-objects writes over that wiring; and, where a docker daemon answers, runs the controller from the
-image the chart's image list names, offline, with the configuration the operator writes and
-certificates made as the issuers make them, to check that it refuses an API request without the
-authority's client certificate or with another authority's, redirects the API on 3370 and keeps
-serving its metrics and health check there. Without docker, as under `just ci` and in CI, that
-proof skips, so CI does not show that a newer operator's controller still refuses such a request;
-`bats tests/storage.bats` where a docker daemon answers does, and a person runs it before merging an
-update of the operator's chart.
+configurations to the operator's own satellite DaemonSet at the version the pinned chart runs, to
+check that one configuration alone puts the satellites on the host network and that no container of
+their pod dials a cluster name, and reads the operator's source at that version to check that it
+registers each node at the ready pod's address and changes that interface in place; reads the ports
+that pod declares and LINSTOR's default DRBD port range against the nodes' firewall inventory, to
+check that one rule of every node admits each, over the satellite's two ports, the reactor's one or
+the range and no more, from those who use it, and that no file sets LINSTOR's
+port range or preferred interface; renders the nodes' machine configurations offline to check which
+nodes LINSTOR selects and which device the pool takes; reads the StorageClasses and the
+VolumeSnapshotClass; renders the operator's chart to check that its definitions are kept; reads the
+`LinstorCluster`'s `apiTLS`, the issuers and the authority it names, and the operator's source at
+the version the chart runs, to check that every component that calls the API gets a client
+certificate from that issuer and dials HTTPS at a name the controller's certificate holds, and that
+no podTemplate or patch of the storage cluster's objects writes over that wiring; and, where a docker
+daemon answers, runs the controller from the image the chart's image list names, offline, with the
+configuration the operator writes and certificates made as the issuers make them, to check that it
+refuses an API request without the authority's client certificate or with another authority's,
+redirects the API on 3370 and keeps serving its metrics and health check there. Without docker, as
+under `just ci` and in CI, that proof skips, so CI does not show that a newer operator's controller
+still refuses such a request; `bats tests/storage.bats` where a docker daemon answers does, and a
+person runs it before merging an update of the operator's chart.
 
 ## Volume backups
 
