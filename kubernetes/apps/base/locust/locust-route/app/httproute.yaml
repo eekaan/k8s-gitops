@@ -1,0 +1,75 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/gateway.networking.k8s.io/httproute_v1.json
+# Locust's interface at locust under the cluster's domain, on the public Gateway's https listener,
+# which this namespace reaches through its k8s-gitops/gateway label, to the master's web port. The
+# SecurityPolicy of components/sso covers the rule by the route's name, so a request without a session
+# goes to sign-in and the master receives nothing.
+#
+# The rule admits by allowlist, the requests the interface makes and no other. The interface is at the
+# host's root, as no --web-base-path is set (the blueprint's url_prefix, web.py line 172), and its page
+# and bundle ask for everything relative to the page.
+# - GET and HEAD of any path: the page, / (line 206), and its files under /assets/ (196); the reads the
+#   page polls, /stats/requests (477), /tasks (573), /exceptions (548), /logs (593) and /worker-count
+#   (620); and the report, /stats/report (393), and the CSVs it links (439, 447, 469, 565). None of
+#   them changes anything, and CORS(app) (160) lets no other origin read an answer to a request sent
+#   with the session, as it does not allow credentials.
+# - POST of /swarm (221), /stop (373) and /stats/reset (384), exactly, the page's three posts, each only
+#   with the Origin of the route's own host. A browser sends Origin with every POST and a page cannot
+#   set it. The session cookie goes with a page's request from any host under the cluster's domain, the
+#   same site, and Locust checks no origin, so without the check another host's page could post a
+#   form that starts a test, and /swarm takes the host the workers load from that form (288-291).
+# /user (610) matches nothing: it sets any attribute of a user class (locust/env.py, line 211), and the
+# page posts it only from the user-class picker, which --class-picker turns on and the master does not
+# set. Any other request matches no rule, and the Gateway answers it itself, 404 (docs/kubernetes.md,
+# Locust). The record below is the release these paths were read from, which tests/locust.bats holds
+# to the tag of the master's image.
+# Source: https://github.com/locustio/locust/blob/2.47.0/locust/web.py
+# locust-paths: 2.47.0
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: ${SSO_ROUTE}
+spec:
+  parentRefs:
+    - name: public
+      namespace: envoy-gateway-system
+      sectionName: https
+  hostnames:
+    - ${SSO_HOSTNAME}.${CLUSTER_DOMAIN}
+  rules:
+    - matches:
+        - method: GET
+          path:
+            type: PathPrefix
+            value: /
+        - method: HEAD
+          path:
+            type: PathPrefix
+            value: /
+        - method: POST
+          path:
+            type: Exact
+            value: /swarm
+          headers:
+            - type: Exact
+              name: Origin
+              value: https://${SSO_HOSTNAME}.${CLUSTER_DOMAIN}
+        - method: POST
+          path:
+            type: Exact
+            value: /stop
+          headers:
+            - type: Exact
+              name: Origin
+              value: https://${SSO_HOSTNAME}.${CLUSTER_DOMAIN}
+        - method: POST
+          path:
+            type: Exact
+            value: /stats/reset
+          headers:
+            - type: Exact
+              name: Origin
+              value: https://${SSO_HOSTNAME}.${CLUSTER_DOMAIN}
+      backendRefs:
+        - name: locust-master
+          port: 8089
