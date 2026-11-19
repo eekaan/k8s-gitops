@@ -1,0 +1,21 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/catalog-info.json
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: robot-ascender
+  description: Robot Framework's browser suite of Ascender's sign-in page and the runner's flow to Ascender's web pods, for a cluster that runs Ascender; it reads the page and signs in nowhere.
+  links:
+    - url: https://github.com/eekaan/k8s-gitops/blob/main/docs/kubernetes.md#robot-framework
+      title: Documentation
+    - url: https://github.com/eekaan/k8s-gitops/tree/main/kubernetes/apps/base/robot/robot-ascender
+      title: Manifests
+spec:
+  type: service
+  lifecycle: experimental
+  owner: group:default/operators
+  system: applications
+  dependsOn:
+    - component:default/ascender
+    - component:default/cilium
+    - component:default/robot

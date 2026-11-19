@@ -540,8 +540,9 @@ EDGE_FILE=infra/openstack/stacks/sto2/edge/variables.tf
   done
   # Leaving the Gateway, the applications that have a route on it, the DNS records of their routes
   # and the dashboard of those records, and CrowdSec, whose agent reads the Gateway's proxies, out
-  # builds: nothing else names them.
-  tree_without gateway-public hello-route n8n kromgo external-dns open-webui hello-sso dex oauth2-proxy backstage crowdsec crowdsec-gateway-logs victoria-logs-route external-dns-dashboard ascender
+  # builds: nothing else names them but Robot Framework's suite of Ascender's sign-in page,
+  # robot-ascender, which names ascender and goes with it.
+  tree_without gateway-public hello-route n8n kromgo external-dns open-webui hello-sso dex oauth2-proxy backstage crowdsec crowdsec-gateway-logs victoria-logs-route external-dns-dashboard ascender robot-ascender
   run "$REPO/scripts/kubernetes-check" "$TREE"
   echo "$output"
   [ "$status" -eq 0 ]

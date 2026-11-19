@@ -378,15 +378,16 @@ docs() {
   echo "$output"
   [ "$status" -eq 0 ]
   # With only the namespace directory's entry, the cluster builds the namespace, its defaults and
-  # its default deny, and nothing of Ascender.
-  tree_without '/ascender/ascender-operator/ks.yaml$' '/ascender/ascender/ks.yaml$'
+  # its default deny, and nothing of Ascender. Robot Framework's suite of Ascender's sign-in page,
+  # robot-ascender, names ascender, so it goes too.
+  tree_without '/ascender/ascender-operator/ks.yaml$' '/ascender/ascender/ks.yaml$' '/robot/robot-ascender/ks.yaml$'
   run "$REPO/scripts/kubernetes-check" "$TREE"
   echo "$output"
   [ "$status" -eq 0 ]
   overlay "$TREE/kubernetes/apps/overlays/lab-sto2"
   [ "$(of_namespace "$OVERLAY")" = ConfigMap/ascender/app-template-defaults,Namespace/-/ascender,NetworkPolicy/ascender/default-deny ]
-  # With none, nothing of the namespace.
-  tree_without '/ascender(/|$)'
+  # With none, nothing of the namespace; robot-ascender, which names ascender, goes with them.
+  tree_without '/ascender(/|$)' '/robot/robot-ascender/ks.yaml$'
   run "$REPO/scripts/kubernetes-check" "$TREE"
   echo "$output"
   [ "$status" -eq 0 ]
@@ -646,10 +647,12 @@ docs() {
   [ "$(container "$RENDERED" awx-manager | yq '[.livenessProbe.httpGet.port, .readinessProbe.httpGet.port] | unique | join(" ")')" = 6789 ]
   [ "$(rule_peers "$OPERATOR_BUILT" ascender-operator ingress)" = "@host -> 6789/TCP" ]
   [ "$(rule_peers "$OPERATOR_BUILT" ascender-operator egress)" = "@kube-apiserver -> 443/TCP 6443/TCP" ]
-  # The web pods take the proxies, the kubelet's readiness probe and the task pods' relay on 8052.
+  # The web pods take the proxies, the kubelet's readiness probe and the task pods' relay on 8052,
+  # and Robot Framework's runner, whose suite opens the sign-in page from inside the cluster.
   [ "$(rule_peers "$APP_BUILT" ascender-web ingress | LC_ALL=C sort)" = "$(printf '%s\n' \
     "@host -> 8052/TCP" \
     "$task_labels -> 8052/TCP" \
+    "app.kubernetes.io/component=runner,app.kubernetes.io/name=robot,k8s:io.kubernetes.pod.namespace=robot -> 8052/TCP" \
     "app.kubernetes.io/component=proxy,app.kubernetes.io/managed-by=envoy-gateway,app.kubernetes.io/name=envoy,gateway.envoyproxy.io/owning-gateway-name=public,gateway.envoyproxy.io/owning-gateway-namespace=envoy-gateway-system,k8s:io.kubernetes.pod.namespace=envoy-gateway-system -> 8052/TCP" | LC_ALL=C sort)" ]
   [ -z "$(rule_peers "$APP_BUILT" ascender-web egress)" ]
   # The task pods reach the web pods and the API server, and the world on 443 and on 22, each world

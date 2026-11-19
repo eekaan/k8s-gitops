@@ -4,7 +4,7 @@ Feature: Network policy
   Scenario: An application namespace denies ingress and egress by default
     Given the render of the tree, with its real charts
     When just network-policy-check runs
-    Then every namespace the overlay deploys into either holds a default deny of both directions that selects every pod, or is listed in network-policy-exceptions.yaml with its reason, and backstage, crowdsec, demo, envoy-gateway-system, kromgo, locust, open-feature-operator, security-system and sso-system are the namespaces that hold the default deny
+    Then every namespace the overlay deploys into either holds a default deny of both directions that selects every pod, or is listed in network-policy-exceptions.yaml with its reason, and ascender, backstage, crowdsec, demo, envoy-gateway-system, kromgo, locust, open-feature-operator, robot, security-system and sso-system are the namespaces that hold the default deny
 
   Scenario: A namespace without the posture fails the check unless it is listed with its reason
     Given a render whose namespaces hold a default deny, or are listed with a reason

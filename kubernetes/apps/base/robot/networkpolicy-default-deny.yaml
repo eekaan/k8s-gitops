@@ -1,0 +1,14 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/yannh/kubernetes-json-schema/master/master-standalone-strict/networkpolicy-networking-v1.json
+# The namespace's posture: no pod of it takes or sends a connection unless a policy beside the
+# application that needs the flow allows it (docs/kubernetes.md, Network policy). Every pod is
+# selected, so a pod added without a policy of its own reaches nothing and is reached by nothing.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress

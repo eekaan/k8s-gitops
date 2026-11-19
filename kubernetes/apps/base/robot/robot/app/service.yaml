@@ -1,0 +1,16 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/yannh/kubernetes-json-schema/master/master-standalone-strict/service-v1.json
+# The report server, for just robot's port forward. Of the cluster alone: no route names it and
+# nothing announces it.
+apiVersion: v1
+kind: Service
+metadata:
+  name: robot-reports
+spec:
+  selector:
+    app.kubernetes.io/name: robot
+    app.kubernetes.io/component: reports
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

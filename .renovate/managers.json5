@@ -122,5 +122,12 @@
       matchPackageNames: ["docker.io/locustio/locust"],
       allowedVersions: "/^[0-9]+\\.[0-9]+\\.[0-9]+$/",
     },
+    {
+      // The Browser library's registry tags each release as x.y.z and also holds the moving tags of
+      // its major and minor, such as 21 and 21.0, and latest, which follow the newest release.
+      description: "Robot Framework's Browser library image: its releases, not the moving tags",
+      matchPackageNames: ["docker.io/marketsquare/robotframework-browser"],
+      allowedVersions: "/^[0-9]+\\.[0-9]+\\.[0-9]+$/",
+    },
   ],
 }

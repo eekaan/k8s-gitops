@@ -146,6 +146,8 @@ kubernetes/apps/base/openbao/openbao/app/values.yaml	helm-values	ghcr.io/fluxcd/
 kubernetes/apps/base/openbao/openbao/app/values.yaml	regex	ghcr.io/fluxcd/flux-cli	image
 kubernetes/apps/base/piraeus-datastore/piraeus-operator/app/ocirepository.yaml	flux	ghcr.io/piraeusdatastore/piraeus-operator/piraeus	tag
 kubernetes/apps/base/piraeus-datastore/piraeus-operator/app/ocirepository.yaml	regex	ghcr.io/piraeusdatastore/piraeus-operator/piraeus	tag
+kubernetes/apps/base/robot/robot/app/cronjob.yaml	kubernetes	docker.io/marketsquare/robotframework-browser	-
+kubernetes/apps/base/robot/robot/app/deployment-reports.yaml	kubernetes	docker.io/library/busybox	-
 kubernetes/apps/base/security-system/falco/app/ocirepository.yaml	flux	ghcr.io/falcosecurity/charts/falco	tag
 kubernetes/apps/base/security-system/falco/app/ocirepository.yaml	regex	ghcr.io/falcosecurity/charts/falco	tag
 kubernetes/apps/base/security-system/falco/app/values.yaml	regex	docker.io/falcosecurity/falco	tag

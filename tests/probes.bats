@@ -1028,9 +1028,10 @@ lab-sto2: the application kromgo declares a Probe and its Kustomization does not
   # Without the Gateway and what needs it, CrowdSec's reader of its access logs and CrowdSec, which
   # needs the reader, and external-dns's dashboard, which needs external-dns, among them, the
   # exporter alone builds: it probes nothing, and nothing alerts on that (ProbeNotRunning reads the
-  # scrapes of declared Probes).
+  # scrapes of declared Probes). Robot Framework's suite of Ascender's sign-in page, robot-ascender,
+  # names ascender and goes with it.
   tree_without gateway-public hello-route n8n kromgo open-webui external-dns external-dns-dashboard hello-sso dex \
-    oauth2-proxy backstage crowdsec-gateway-logs crowdsec victoria-logs-route ascender
+    oauth2-proxy backstage crowdsec-gateway-logs crowdsec victoria-logs-route ascender robot-ascender
   run "$REPO/scripts/kubernetes-check" "$TREE"
   echo "$output"
   [ "$status" -eq 0 ]

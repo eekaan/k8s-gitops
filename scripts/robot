@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+# Forwards a local port to Robot Framework's report server on a cluster until it is interrupted:
+# kubectl port-forward, through the cluster's kubeconfig as scripts/cluster-env finds it, from
+# ROBOT_PORT, 8090 when unset, on 127.0.0.1 only, to port 8080 of the Service robot-reports in the
+# namespace robot. It changes nothing on the cluster and reads no Secret. Once kubectl reports the
+# forward, it prints the local URL and that the reports hold screenshots and whatever the suites
+# print and are served to anything on this machine while the forward runs; none of kubectl's own
+# output is shown, as its errors can name the API server's address. The forward ends with the
+# script, however that ends: Ctrl-C, SIGTERM or SIGHUP; kubectl not reporting the forward within
+# ROBOT_WAIT seconds, 20 when unset; kubectl stopping; or a failure.
+# Usage: scripts/robot [cluster]
+set -euo pipefail
+
+here=$(dirname "$0")
+# shellcheck source=scripts/lib/cluster.sh
+. "$here/lib/cluster.sh"
+
+if (($# > 1)) || [[ ${1-} == -* ]]; then
+  infra_error "usage: robot [cluster]"
+  exit 2
+fi
+
+# shellcheck source=scripts/cluster-env
+. "$here/cluster-env" "${1-}"
+port=${ROBOT_PORT:-8090} seconds=${ROBOT_WAIT:-20}
+complete=1
+require_kubeconfig || complete=0
+require_commands kubectl || complete=0
+if [[ ! $port =~ ^[1-9][0-9]{0,4}$ ]] || ((port > 65535)); then
+  infra_error "ROBOT_PORT is not a port number from 1 to 65535"
+  complete=0
+fi
+if [[ ! $seconds =~ ^[1-9][0-9]{0,3}$ ]]; then
+  infra_error "ROBOT_WAIT is not a whole number of seconds from 1 to 9999"
+  complete=0
+fi
+((complete))
+
+forward_pid='' forward_out=''
+# end STATUS: stops kubectl while it still runs and removes what it printed, then exits with
+# STATUS. A failure names the step it happened in, as in every cluster recipe; an interruption says
+# the forward has ended.
+# shellcheck disable=SC2329 # It runs from the EXIT trap.
+end() {
+  local status=$1
+  if [[ -n $forward_pid ]]; then
+    kill "$forward_pid" 2> /dev/null || true
+    wait "$forward_pid" 2> /dev/null || true
+  fi
+  if [[ -n $forward_out ]]; then
+    rm -f -- "$forward_out"
+  fi
+  case $status in
+    129 | 130 | 143) echo "The forward to Robot Framework's reports has ended." ;;
+    *) failed_step "$status" ;;
+  esac
+  exit "$status"
+}
+trap 'end $?' EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+step="starting kubectl port-forward"
+forward_out=$(mktemp -t robot.XXXXXXXXXX)
+# Run in the background, kubectl ignores the Ctrl-C the terminal sends; the trap above ends it.
+# kubectl is the process whose id forward_pid holds, which a function would put one process below.
+(exec_tool kubectl port-forward --address 127.0.0.1 --namespace robot service/robot-reports "$port:8080") \
+  > "$forward_out" 2> /dev/null &
+forward_pid=$!
+
+step="waiting for kubectl to report the forward"
+ticks=$((seconds * 10))
+until grep -q '^Forwarding from ' "$forward_out"; do
+  if ! kill -0 "$forward_pid" 2> /dev/null; then
+    status=0
+    wait "$forward_pid" || status=$?
+    forward_pid=''
+    infra_error "kubectl port-forward stopped with status $status before it forwarded; check that local port $port is free and that the cluster runs Robot Framework's report server"
+    exit 1
+  fi
+  if ((ticks-- == 0)); then
+    infra_error "kubectl port-forward did not report the forward within $seconds seconds"
+    exit 1
+  fi
+  sleep 0.1
+done
+
+step="forwarding"
+cat << EOF
+Robot Framework's reports: http://127.0.0.1:$port
+The reports hold screenshots and whatever the suites print, and are served to anything on this machine while the forward runs.
+Ctrl-C ends the forward.
+EOF
+status=0
+wait "$forward_pid" || status=$?
+forward_pid=''
+infra_error "kubectl port-forward stopped with status $status"
+exit 1

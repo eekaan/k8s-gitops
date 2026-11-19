@@ -1,8 +1,8 @@
 ---
 # yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
 # What hello lets through, on top of the namespace's default deny: connections from the public
-# Gateway's proxies and from Locust's workers to the port its Service targets, and the kubelet's
-# readiness probe. hello opens no connection of its own.
+# Gateway's proxies, from Locust's workers and from Robot Framework's runner to the port its Service
+# targets, and the kubelet's readiness probe. hello opens no connection of its own.
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
 metadata:
@@ -46,6 +46,19 @@ spec:
             "k8s:io.kubernetes.pod.namespace": locust
             app.kubernetes.io/name: locust
             app.kubernetes.io/component: worker
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
+    # Robot Framework's runner, whose suites check hello over HTTP and in a browser from inside the
+    # cluster through its Service (docs/kubernetes.md, Robot Framework): by the runner's labels in
+    # robot, so the report server and any other pod there are not admitted. While no run runs it
+    # admits nothing.
+    - fromEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": robot
+            app.kubernetes.io/name: robot
+            app.kubernetes.io/component: runner
       toPorts:
         - ports:
             - port: "8080"
