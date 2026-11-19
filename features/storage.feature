@@ -1,10 +1,12 @@
 Feature: Storage
-  A PersistentVolumeClaim gets a volume from Git alone: LINSTOR, run by the Piraeus operator under Flux on the workers' data volumes, replicates it on two workers by default, keeps it on the pod's node on request, and takes snapshots of it.
+  A PersistentVolumeClaim gets a volume from Git alone: LINSTOR, run by the Piraeus operator under Flux on the workers' data volumes, replicates it on two workers by default, keeps it on the pod's node on request, and takes snapshots of it. LINSTOR's controller takes an API request only from a caller that presents a certificate the storage cluster's own API authority signed, which the operator issues to itself and to each of its components that calls the API, and keeps serving its metrics to the scrape.
+
+  One scenario needs a docker daemon, which the CI containers do not have: "The pinned LINSTOR controller refuses an API request without its authority's client certificate and keeps serving its metrics". Its proof runs the controller from the image the pinned chart's image list names, without network, without a capability, as a user that is not root and on a read-only root, with the configuration the operator writes for it, and removes the container with what it made. It runs with the other proofs of tests/storage.bats wherever a docker daemon answers, on a developer's machine or an agent's, and skips, saying why, where none does, as under just ci and in CI, which run every other proof.
 
   Scenario: The storage applications are enabled and wait for what they need
     Given the cluster's overlay
     When it is built as Flux applies it
-    Then it enables snapshot-controller, piraeus-operator and linstor-cluster, each builds with Flux's strict substitution, the first two are Ready only once what they install is, linstor-cluster waits for both and is Ready only once the operator reports the storage cluster Available and every satellite configuration Applied, and the namespace admits the satellites' privileged pods
+    Then it enables snapshot-controller, piraeus-operator and linstor-cluster, each builds with Flux's strict substitution, the first two are Ready only once what they install is, linstor-cluster waits for both and for cert-manager, whose issuers sign its certificates, and is Ready only once the operator reports the storage cluster Available and every satellite configuration Applied, and the namespace admits the satellites' privileged pods
 
   Scenario: The storage cluster's Kustomization waits long enough for a first install
     Given the cluster's overlay
@@ -40,3 +42,13 @@ Feature: Storage
     Given the pinned operator chart rendered with the repository's values, and the snapshot-controller application
     When their objects and Kustomizations are read
     Then no application applies a definition itself, Helm keeps every definition of the operator's release, and the snapshot definitions are neither pruned nor deleted with their Kustomization
+
+  Scenario: Only holders of a certificate from the storage cluster's API authority call LINSTOR's API
+    Given linstor-cluster as Flux applies it and the operator's source at the version the pinned chart runs
+    When the storage cluster's TLS settings and the issuers they name are read
+    Then apiTLS names by cert-manager an Issuer of the same build in the operator's namespace, of kind CA, signing from the Secret of an isCA Certificate that the build's self-signed Issuer issues, which signs authorities alone, with no Secret name or CA reference overridden, linstor-cluster names cert-manager in dependsOn, and every component of the operator that dials the controller, the operator itself and the CLI in the controller's pod included, gets a client certificate from that issuer and dials HTTPS at a name the API's certificate holds
+
+  Scenario: The pinned LINSTOR controller refuses an API request without its authority's client certificate and keeps serving its metrics
+    Given the controller image the pinned chart's image list names, and the HTTPS and client configuration the operator writes for apiTLS at the version the chart runs
+    When the controller runs offline as its pod runs it, with its certificates made as the build's issuers make them, and is called from inside its container
+    Then over HTTPS a request without a client certificate, or with one another authority of the same name signed, fails the handshake, and one with the API authority's answers the version; over plain HTTP a request for the API answers no version and is redirected to the HTTPS port, and one that would create a resource definition creates none, while the metrics answer with LINSTOR's series and the health check answers 200; and the CLI in the container reaches the API with the client configuration the operator writes

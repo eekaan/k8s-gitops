@@ -256,7 +256,7 @@ Feature: Alerts
   Scenario: The storage layer is scraped
     Given the linstor-monitoring application, enabled in the cluster's overlay after the monitoring definitions, and the Piraeus operator at the version whose templates the monitors' selectors were read from
     When it is built as Flux applies it and the monitors are matched against the labels and ports the operator gives the LINSTOR controller and the satellites
-    Then a ServiceMonitor selects the controller's metrics port, which serves LINSTOR's own state, and a PodMonitor selects the satellites' DRBD reactor port, which serves each DRBD resource's state, and the monitors carry the node that runs a satellite
+    Then a ServiceMonitor selects the controller's metrics port, which serves LINSTOR's own state and is scraped over plain HTTP on the port that keeps serving it while the API takes client certificates on its HTTPS port, and a PodMonitor selects the satellites' DRBD reactor port, which serves each DRBD resource's state, and the monitors carry the node that runs a satellite
 
   @by:rules-check
   Scenario: The alert DrbdReplicaNotUpToDate fires after its time in the failing case and stays quiet in the healthy one

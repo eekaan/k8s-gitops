@@ -496,7 +496,7 @@ flux_controllers() {
 }
 
 @test "The storage layer is scraped" {
-  local ks dir recorded operator candidates scraped service
+  local ks dir recorded operator candidates scraped service monitors
   dir="$REPO/kubernetes/apps/base/piraeus-datastore/linstor-monitoring"
   ks="$(overlay_ks linstor-monitoring)"
   [ "$(yq -p json '.spec.path' <<<"$ks")" = ./apps/base/piraeus-datastore/linstor-monitoring/app ]
@@ -515,15 +515,20 @@ flux_controllers() {
   [ -n "$recorded" ]
   [ "$recorded" = "$operator" ]
   candidates="$(linstor_targets)"
-  # The controller's REST port serves LINSTOR's own metrics at /metrics over plain HTTP: the
-  # LinstorCluster configures no TLS for it.
+  # The controller serves LINSTOR's own metrics at /metrics on its port api over plain HTTP, and keeps
+  # doing so while the LinstorCluster's apiTLS has its API take client certificates on the port
+  # secure-api: tests/storage.bats runs the controller so.
   service="$(monitor ServiceMonitor linstor-controller)"
   scraped="$(selected "$service" "$(jq -c '[.[] | select(.name | startswith("Service/"))]' <<<"$candidates")")"
   echo "ServiceMonitor linstor-controller scrapes: ${scraped:-nothing}"
   [ "$scraped" = Service/linstor-controller ]
+  [ "$(yq -p json '.spec.endpoints[0].port' <<<"$service")" = api ]
   [ "$(yq -p json '.spec.endpoints[0].path' <<<"$service")" = /metrics ]
   [ "$(yq -p json '.spec.endpoints[0].scheme // "http"' <<<"$service")" = http ]
-  [ "$(yq '.spec.apiTLS // "none"' "$REPO/kubernetes/apps/base/piraeus-datastore/linstor-cluster/app/linstorcluster.yaml")" = none ]
+  monitors="$BUILT"
+  built_app piraeus-datastore linstor-cluster
+  [ "$(yq -N 'select(.kind == "LinstorCluster") | .spec.apiTLS.certManager.name // "none"' "$BUILT")" != none ]
+  BUILT="$monitors"
   # The satellites' DRBD reactor serves the state of each DRBD resource on its own port, in the
   # satellite's pod, which no configuration of the tree puts on the node's network, so no node
   # firewall rule is involved; the monitor names the node a satellite runs on, as that is a worker.

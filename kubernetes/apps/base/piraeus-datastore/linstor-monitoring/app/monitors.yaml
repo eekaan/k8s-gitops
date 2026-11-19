@@ -9,11 +9,15 @@
 # piraeus-operator-templates: v2.12.1
 #
 # The controller serves LINSTOR's own state at /metrics on its REST port, named api in
-# pkg/resources/cluster/controller/controller-service.yaml, over plain HTTP as the LinstorCluster sets
-# no TLS for it: linstor_node_state (2 for a satellite that is online), the storage pools' capacities
-# and the like (controller/src/main/java/com/linbit/linstor/prometheus/PrometheusBuilder.java of
-# linstor-server v1.35.3, which is the controller image of the operator's version). The job is the
-# Service's name. Tests: tests/rules/linstor-monitoring.yaml.
+# pkg/resources/cluster/controller/controller-service.yaml, over plain HTTP, which it keeps doing
+# while the LinstorCluster's apiTLS has its API take client certificates on the port secure-api
+# (controller/src/main/java/com/linbit/linstor/api/rest/v1/config/GrizzlyHttpService.java of
+# linstor-server v1.35.3 redirects /v1 and /ui of that port to HTTPS, and /metrics only when a
+# controller property the tree does not set says so): linstor_node_state (2 for a satellite that is
+# online), the storage pools' capacities and the like
+# (controller/src/main/java/com/linbit/linstor/prometheus/PrometheusBuilder.java of linstor-server
+# v1.35.3, which is the controller image of the operator's version). The job is the Service's name.
+# Tests: tests/rules/linstor-monitoring.yaml.
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:

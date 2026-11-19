@@ -645,7 +645,7 @@ once it is not, and the agents' rendered configuration agrees.
 | `flux-system` | listed | the controllers' flows are not yet enumerated as allows; Flux's own network policies, which the operator makes at run time, and the operator's for its web interface, `flux-operator-web`, which the check reads and passes because the namespace is listed ([What the check refuses](#what-the-check-refuses)); Pod Security, node firewall. |
 | `monitoring` | listed | Prometheus scrapes every namespace and the nodes, the node exporter runs in the host's network namespace, the API server calls the operator's webhook, VictoriaLogs takes the proxies on 9428 for the route `logs`, Alertmanager reaches the resolver and, outside the cluster, each of its two destinations on the port of its URL, hosts that are deployment values and so are named by no policy ([Where alerts go](#where-alerts-go)), the blackbox exporter takes Prometheus on 9115 and reaches the resolver and the public Gateway's proxies on 10080 and 10443, the other flows are not yet enumerated. The proxies reach VictoriaLogs' 9428 alone there and forward only the route's reads, behind the cluster's sign-in, Pod Security, node firewall. |
 | `openbao`, `external-secrets`, `cert-manager`, `cnpg-system`, `keda`, `volsync-system` | listed | flows not yet enumerated: webhooks and APIs the API server calls, the store's clients, scrapes, the PostgreSQL operator's calls to the Barman Cloud plugin. Each entry says which, and what covers it. |
-| `piraeus-datastore` | listed | the CSI node plugin runs in the host's network namespace; the satellites replicate over the pod network, and their flows are not yet enumerated. |
+| `piraeus-datastore` | listed | the CSI node plugin runs in the host's network namespace; the satellites replicate over the pod network, and their flows are not yet enumerated. LINSTOR's API, which takes only clients holding a certificate its own authority signs ([Who may call LINSTOR](#who-may-call-linstor)), Pod Security, node firewall. |
 | `cilium-secrets` | listed | holds no pod. |
 | `kyverno`, `gatekeeper-system` | listed | flows not yet enumerated: the API server calls each policy engine's webhooks from the control planes' host network, the controllers reach the API server, Prometheus scrapes them ([Admission policy](#admission-policy)). Pod Security, node firewall. |
 
@@ -1894,7 +1894,8 @@ records (`piraeus-operator-templates`) and `tests/monitoring.bats` holds equal t
 cluster runs.
 
 - A ServiceMonitor, `linstor-controller`, scrapes the controller's `api` port, 3370, at `/metrics`,
-  over plain HTTP, as the `LinstorCluster` sets no TLS for its REST API: LINSTOR's own state,
+  over plain HTTP, which the controller keeps serving there while its API takes only client
+  certificates on 3371 ([Who may call LINSTOR](#who-may-call-linstor)): LINSTOR's own state,
   `linstor_node_state` (2 for a satellite that is online), the storage pools' free and total
   capacity, `linstor_storage_pool_capacity_free_bytes` and `linstor_storage_pool_capacity_total_bytes`,
   with the labels `node`, `nodetype`, `storage_pool`, `driver` and `backing_pool`, and for a node
@@ -3539,10 +3540,12 @@ the session and the answers, is not proved offline; the first sign-in is the pro
 `apps/base/cert-manager/cert-manager/` installs cert-manager, which issues and renews the TLS
 certificates applications and gateways ask for, from the issuers they name (ADR 0006). The
 namespaced issuers serve their own application alone: `cluster-ca-bootstrap` signs the cluster's
-own CA, below; OpenBao's own issuers sign OpenBao's listener certificate ([OpenBao](#openbao)); and
-the Barman Cloud plugin's self-signed `Issuer` signs the plugin's two certificates
-([PostgreSQL](#postgresql)). The issuers any namespace may name are the cluster's three
-`ClusterIssuer`s: `cluster-ca` and the ACME issuers `letsencrypt-staging` and
+own CA, below; OpenBao's own issuers sign OpenBao's listener certificate ([OpenBao](#openbao)); the
+storage cluster's `linstor-ca-bootstrap` and `linstor-api-ca` sign the authority of LINSTOR's API
+and, from it, the certificates of the controller and its clients ([Who may call
+LINSTOR](#who-may-call-linstor)); and the Barman Cloud plugin's self-signed `Issuer` signs the
+plugin's two certificates ([PostgreSQL](#postgresql)). The issuers any namespace may name are the
+cluster's three `ClusterIssuer`s: `cluster-ca` and the ACME issuers `letsencrypt-staging` and
 `letsencrypt-production`, below.
 
 It runs in its own namespace, `cert-manager`, at the restricted Pod Security level, from the
@@ -3857,18 +3860,22 @@ restricted requires ([Pod Security](#pod-security)).
   `helm.sh/resource-policy: keep`, so Helm leaves them when the release is uninstalled. Its
   `ks.yaml` sets `wait`: it is Ready once the operator is.
 - `linstor-cluster` holds the storage cluster: the `LinstorCluster`, the
-  `LinstorSatelliteConfiguration`s, the StorageClasses and the VolumeSnapshotClass. It names
-  `piraeus-operator` and `snapshot-controller` in `dependsOn`, as the operator's webhooks validate
-  its objects and every StorageClass of LINSTOR's driver, and the VolumeSnapshotClass needs the
-  snapshot definitions ([Resource definitions](#resource-definitions)). Its `ks.yaml` sets `wait`
-  and health check expressions, as the operator gives these kinds no Ready condition and no
+  `LinstorSatelliteConfiguration`s, the StorageClasses, the VolumeSnapshotClass, and the authority
+  and the issuers of LINSTOR's API ([Who may call LINSTOR](#who-may-call-linstor)). It names
+  `cert-manager`, `piraeus-operator` and `snapshot-controller` in `dependsOn`, as its issuers and
+  the authority's certificate are cert-manager's kinds, the operator's webhooks validate its objects
+  and every StorageClass of LINSTOR's driver, and the VolumeSnapshotClass needs the snapshot
+  definitions ([Resource definitions](#resource-definitions)). Its `ks.yaml` sets `wait` and health
+  check expressions, as the operator gives these kinds no Ready condition and no
   `status.observedGeneration`, so kstatus alone would count them Current at once: it is Ready once
-  what it applies exists, the operator reports the `LinstorCluster` `Available`, its controller
-  answering, and every `LinstorSatelliteConfiguration` `Applied` to the satellites it selects,
-  each at the generation the object holds. That is what the applications that name it in
-  `dependsOn` wait for. It does not wait for every satellite to run, so a node down does not hold
-  them back; a satellite that never starts shows as the storage cluster's `Configured` condition,
-  which the check leaves out, and in the satellite counts of its status. It carries
+  what it applies exists, the authority is issued and its issuers are Ready, the operator reports
+  the `LinstorCluster` `Available`, its controller answering, which it does only once the
+  certificates those issuers sign are issued, and every
+  `LinstorSatelliteConfiguration` `Applied` to the satellites it selects, each at the generation the
+  object holds. That is what the applications that name it in `dependsOn` wait for. It does not
+  wait for every satellite to run, so a node down does not hold them back; a satellite that never
+  starts shows as the storage cluster's `Configured` condition, which the check leaves out, and in
+  the satellite counts of its status. It carries
   `k8s-gitops/timeout: long`: on a first install the storage controller can take longer than the
   root's default 3m to report `Available`, and the health check would fail every minute until it
   does.
@@ -3892,6 +3899,55 @@ systemd, of the kernel's modules and of its sources, which Talos does not have; 
 configuration from the ConfigMap `talos-lvm-config`, which keeps the metadata backups and archives
 that Talos's own configuration turns off. The satellite writes them under `/var/etc/lvm`, as `/etc`
 is read-only on Talos.
+
+### Who may call LINSTOR
+
+The LINSTOR controller serves its API over HTTPS on 3371, the port `secure-api` of its Service, and
+takes a request only from a client that presents a certificate the storage cluster's API authority
+signed: the `LinstorCluster`'s `apiTLS` names the authority's issuer, and the controller's
+truststore holds that authority and nothing else. The authority is made in the namespace by
+cert-manager, in `linstor-cluster`'s `tls.yaml`, as OpenBao's is: the self-signed `Issuer`
+`linstor-ca-bootstrap` signs the `Certificate` `linstor-api-ca`, a CA (`isCA`) of ECDSA P-256,
+valid for ten years and renewed in the last one with its key kept, which cert-manager keeps in the
+Secret `linstor-api-ca`; the `Issuer` `linstor-api-ca`, of kind CA, signs with it. Both issuers are
+namespaced, so no other namespace can ask them for a certificate, and the authority signs the
+storage cluster's API certificates alone, so a client certificate the cluster's own CA or any other
+authority signed is not accepted.
+
+The operator asks that issuer for the controller's certificate, `linstor-api-tls`, and for a client
+certificate for each caller of the API, each in a Secret of the same name, with the authority beside
+it as `ca.crt`:
+
+- the operator itself, `linstor-client-tls`, which the LINSTOR CLI in the controller's pod also
+  uses, so the runbooks' commands, `kubectl --namespace piraeus-datastore exec
+  deployment/linstor-controller -- linstor ...`, work as they are;
+- the CSI controller, `linstor-csi-controller-tls`;
+- the CSI node plugin, `linstor-csi-node-tls`;
+- the affinity controller, `linstor-affinity-controller-tls`;
+- the NFS server, `linstor-csi-nfs-server-tls`.
+
+Each dials `https://linstor-controller:3371`, and the operator
+`linstor-controller.piraeus-datastore.svc:3371`, names the controller's certificate holds. The HA
+controller and the satellites call no API.
+
+Port 3370, the port `api`, serves the controller's metrics at `/metrics` and its health check at
+`/health` over plain HTTP, which the scrape ([Storage monitoring](#storage-monitoring)) and the
+controller's liveness probe read, and answers a request for the API, any path under `/v1`, with a
+redirect to 3371, serving none of it.
+
+cert-manager renews each of these certificates before it expires. The controller loads its own when
+it starts, and its liveness probe restarts it once the certificate on disk is no longer the one it
+loaded. The cert-manager alerts cover these Certificates as every other ([Alerts](#alerts)).
+Turning `apiTLS` on or off replaces the controller's pod and rolls the CSI controller, the CSI node
+plugin, the affinity controller and the NFS server; volumes in use keep serving meanwhile, and
+provisioning, snapshots, attaching and detaching wait until the controller answers again.
+
+This makes the storage cluster depend on cert-manager. The operator applies these Certificates
+through cert-manager's webhook at each reconcile of the `LinstorCluster` and ends a reconcile at its
+first error, retrying it (`internal/controller/linstorcluster_controller.go`), so while the webhook
+does not answer no reconcile completes: nothing is deleted, and what runs and every volume stay as
+they are. While cert-manager's Kustomization is not Ready, `linstor-cluster` and every application
+that names it in `dependsOn` wait for it.
 
 ### The storage pool
 
@@ -3938,8 +3994,19 @@ stack: `just cluster-destroy` destroys them with the stack, and every volume's d
 `tests/storage.bats` builds the three applications as Flux applies them; applies the satellite
 configuration to the operator's own satellite DaemonSet at the version the pinned chart runs; renders
 the nodes' machine configurations offline to check which nodes LINSTOR selects and which device the
-pool takes; reads the StorageClasses and the VolumeSnapshotClass; and renders the operator's chart
-to check that its definitions are kept.
+pool takes; reads the StorageClasses and the VolumeSnapshotClass; renders the operator's chart to
+check that its definitions are kept; reads the `LinstorCluster`'s `apiTLS`, the issuers and the
+authority it names, and the operator's source at the version the chart runs, to check that every
+component that calls the API gets a client certificate from that issuer and dials HTTPS at a name
+the controller's certificate holds, and that no podTemplate or patch of the storage cluster's
+objects writes over that wiring; and, where a docker daemon answers, runs the controller from the
+image the chart's image list names, offline, with the configuration the operator writes and
+certificates made as the issuers make them, to check that it refuses an API request without the
+authority's client certificate or with another authority's, redirects the API on 3370 and keeps
+serving its metrics and health check there. Without docker, as under `just ci` and in CI, that
+proof skips, so CI does not show that a newer operator's controller still refuses such a request;
+`bats tests/storage.bats` where a docker daemon answers does, and a person runs it before merging an
+update of the operator's chart.
 
 ## Volume backups
 

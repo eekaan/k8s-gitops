@@ -36,17 +36,19 @@ selected() {
 # select, as candidates for selected, read from the operator's templates at the version the monitors
 # record (pkg/resources/cluster/controller/controller-service.yaml and
 # pkg/resources/satellite/satellite/daemonset.yaml), with the pods of the other components it makes,
-# which a monitor must not select.
+# which a monitor must not select. The controller's Service and pod carry the port secure-api beside
+# api, which the template's patch for the LinstorCluster's apiTLS adds
+# (pkg/resources/cluster/patches/api-tls.yaml).
 linstor_targets() {
   echo '[
     {"name": "Service/linstor-controller", "ns": "piraeus-datastore",
-     "labels": {"app.kubernetes.io/component": "linstor-controller"}, "ports": ["api"]},
+     "labels": {"app.kubernetes.io/component": "linstor-controller"}, "ports": ["api", "secure-api"]},
     {"name": "Pod/linstor-satellite", "ns": "piraeus-datastore",
      "labels": {"app.kubernetes.io/component": "linstor-satellite"}, "ports": ["prometheus"]},
     {"name": "Pod/linstor-csi-controller", "ns": "piraeus-datastore",
      "labels": {"app.kubernetes.io/component": "linstor-csi-controller"}, "ports": ["metrics"]},
     {"name": "Pod/linstor-controller", "ns": "piraeus-datastore",
-     "labels": {"app.kubernetes.io/component": "linstor-controller"}, "ports": ["api"]}]'
+     "labels": {"app.kubernetes.io/component": "linstor-controller"}, "ports": ["api", "secure-api"]}]'
 }
 
 # cnpg_targets: what the CloudNativePG operator makes at run time that the PodMonitor of
