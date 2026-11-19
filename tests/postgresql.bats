@@ -1234,3 +1234,35 @@ accepted() {
   [ -n "$old" ] && [ -n "$new" ] && [ "$old" != "$new" ]
   [ "$new" = "$(yq '.metadata.name' "$manifest")" ]
 }
+
+# suspended FILE: each of the two objects the hold suspends in the JSON list of built objects FILE, the
+# dump CronJob of orders-db and its ScheduledBackup, as its kind and name, the type of spec.suspend
+# and its value, one per line.
+suspended() {
+  jq -r '.[] | select((.kind == "CronJob" and .metadata.name == "orders-db-pgdump") or (.kind == "ScheduledBackup" and .metadata.name == "orders-db"))
+    | "\(.kind)/\(.metadata.name) \(.spec.suspend | type) \(.spec.suspend)"' "$1" | sort
+}
+
+@test "A database held for a restore takes no dump and no base backup, and nothing else of it changes" {
+  local open="$BATS_TEST_TMPDIR/open.json" held="$BATS_TEST_TMPDIR/held.json" readers
+  local others='map(if (.kind == "CronJob" and .metadata.name == "orders-db-pgdump") or (.kind == "ScheduledBackup" and .metadata.name == "orders-db")
+    then del(.spec.suspend) else . end)'
+  database orders orders-db
+  yq -N -o json -I0 'select(. != null)' "$BUILT" | jq -s . >"$open"
+  echo "without the variable: $(suspended "$open" | paste -sd, -)"
+  [ "$(suspended "$open")" = $'CronJob/orders-db-pgdump boolean false\nScheduledBackup/orders-db boolean false' ]
+  # The hold, as an application sets it in its ks.yaml for a restore.
+  yq -i '.spec.postBuild.substitute.CNPG_BACKUPS_SUSPENDED = "true"' "$TREE/kubernetes/apps/base/demo/orders/ks.yaml"
+  built demo orders
+  yq -N -o json -I0 'select(. != null)' "$BUILT" | jq -s . >"$held"
+  echo "held: $(suspended "$held" | paste -sd, -)"
+  [ "$(suspended "$held")" = $'CronJob/orders-db-pgdump boolean true\nScheduledBackup/orders-db boolean true' ]
+  # Everything else is what it was, field for field: the Cluster and its archiver, the ObjectStore
+  # and its retention, the ExternalSecrets, the PodMonitor and the dump job's scripts.
+  [ "$(jq -r '[.[].kind] | unique | join(" ")' "$held")" = "Cluster ConfigMap CronJob ExternalSecret ObjectStore PodMonitor ScheduledBackup" ]
+  diff <(jq -S "$others" "$open") <(jq -S "$others" "$held")
+  # Nothing else of the component reads the variable: one line in each of the two manifests.
+  readers="$(cd "$REPO/$COMPONENT" && grep -r 'CNPG_BACKUPS_SUSPENDED' . | grep -v '^[^:]*:[[:space:]]*#' | sort)"
+  echo "read by: $readers"
+  [ "$readers" = $'./cronjob.yaml:  suspend: ${CNPG_BACKUPS_SUSPENDED:=false}\n./scheduledbackup.yaml:  suspend: ${CNPG_BACKUPS_SUSPENDED:=false}' ]
+}

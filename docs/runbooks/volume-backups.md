@@ -25,9 +25,12 @@ After `just bao-seed-volsync <file>`, each of these only reads:
 - `kubectl --namespace demo get pvc volsync-demo`: `Bound`, as the claim is made from that snapshot
   and the pod that uses it is scheduled.
 - `kubectl --namespace demo get replicationsource volsync-demo --output jsonpath='{.status.lastSyncTime}'`:
-  set after the first run at the schedule's time, 03:17, and `{.status.latestMoverStatus.result}`
-  says `Successful` for it. The Kustomization owns the object, so nothing here triggers a run
-  sooner.
+  set once the first backup has ended, and `{.status.latestMoverStatus.result}` says `Successful`
+  for it. VolSync starts the first backup of a new ReplicationSource at once, whatever its
+  schedule, so it runs once the Secret holds the key and the claim is bound, and every later one at
+  the schedule's time, 03:17. `just cluster-last-copies`, before a cluster is taken down, runs a
+  backup of every volume now, by VolSync's manual trigger while the Kustomization is suspended
+  ([cluster.md](../cluster.md#recipes)).
 - `just bao-volsync-password <file> volsync-demo restic snapshots`: the repository lists a snapshot,
   with restic installed on the operator's machine.
 
@@ -130,7 +133,11 @@ the store is seeded from it, never with a new one:
 3. Check as in [Checking the first backup](#checking-the-first-backup): each ExternalSecret
    `SecretSynced`, each ReplicationDestination's `status.latestImage` set by a restore of the latest
    backup, each claim `Bound`, and `just bao-volsync-password <file> <app> restic snapshots` listing
-   the backups the application had.
+   the backups the application had. On a rebuilt cluster the listing does not check the restore:
+   each rebuilt ReplicationSource backs its claim up as soon as it is bound, and on the day of the
+   last backup the retention, which keeps the newest backup of each day, then forgets that backup's
+   snapshot. Check each claim by its ReplicationDestination instead, as step 6 of
+   [Building it again](rebuild.md#building-it-again) does.
 
 An empty store cannot tell a rebuilt cluster from a new one, so a seeding given a new file there
 makes a new master; its usage and the last line it prints say that a store that held the key before

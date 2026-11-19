@@ -168,6 +168,11 @@ the volumes either way, and comes back with the key.
    the key it replaces to a new file, `<file>.replaced-<time>.age`, encrypted to the Talos age key
    and opened again with it, in case that key, not the file's, sealed the storage; when it cannot,
    it deletes nothing. Keep that file with the other until the members unseal.
+   `just bao-seal-restore <file> --check` only compares, and writes nothing: it says that the Secret
+   holds the key in `<file>` and exits 0, or fails naming a Secret that holds another key or does not
+   exist, or a file that holds no seal key; with `--replace` as well it refuses.
+   `just cluster-last-copies` runs it before the cluster is taken down
+   ([rebuild.md](rebuild.md#taking-it-down)).
 2. Delete the members that do not start; each starts again and unseals. External Secrets leaves the
    Secret alone: it has synced the ExternalSecret already, and an ExternalSecret made again finds an
    immutable Secret and keeps its key.
@@ -361,7 +366,7 @@ operator's, so that `just bao-root` can run the restore:
    key alone, and replaces another only with `--replace`,
    [above](#bringing-the-seal-key-back)).
    - With the cluster running and only the volumes lost, the Secret is there; check it with
-     `just bao-seal-restore <file>`, which changes nothing when it matches.
+     `just bao-seal-restore <file> --check`, which changes nothing.
    - In a rebuilt cluster the Secret has to exist before the first member starts, or External Secrets makes a new
      key. Once Flux has made the namespace `openbao`, and before it applies the application
      (`flux get kustomization openbao` shows it waiting for its dependencies),

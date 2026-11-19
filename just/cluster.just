@@ -63,6 +63,11 @@ cluster-snapshot cluster='lab-sto2':
 cluster-snapshots cluster='lab-sto2':
     scripts/cluster-snapshots {{ quote(cluster) }}
 
+# Before a cluster is taken down, take and check a last copy of everything the rebuild restores from, as just cluster-last-copies <openbao file> <volsync file> <postgres file> [cluster] [--check]: first compare the Talos and Flux age keys and the three custody files with what the cluster holds, reading only, then print the plan (--check: stop there), then take an OpenBao snapshot and check it, a dump of each database, checked, and its WAL archived through a segment switched now, and a backup of each volume by VolSync's manual trigger with its Kustomization suspended meanwhile; prints one line per copy, nothing of a key, password, address or bucket; every wait bounded by LAST_COPIES_TIMEOUT; see docs/runbooks/rebuild.md
+[positional-arguments]
+cluster-last-copies *args:
+    scripts/cluster-last-copies "$@"
+
 # List a PostgreSQL database's dumps in the postgres backup bucket, newest first, by name and size, reading only; with no database named (just postgres-dumps [cluster]) list the databases that have a dump, as <namespace>/<name>; the namespace and name are those of the database's Cluster
 [positional-arguments]
 postgres-dumps *args:

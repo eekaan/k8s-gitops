@@ -111,6 +111,11 @@ Feature: OpenBao
     When bao-seal-restore runs, and runs with --replace
     Then a missing Secret is made immutable from the file's key, one holding the same key is left alone, one holding another key is kept unless --replace is given, a key it replaces is first kept in a new file beside the custody file, encrypted to and opened with the operator's age key, never over another file, nothing is deleted when it cannot be kept, as when no hard link to that file can be made, which ln's own error says, and no key is printed or passed on a command line
 
+  Scenario: bao-seal-restore --check compares the Secret's seal key with the custody file and writes nothing
+    Given a fake cluster whose seal Secret holds the file's key, holds another key, or does not exist, and a custody file that holds no seal key
+    When bao-seal-restore runs with --check, and with --check and --replace together
+    Then it exits 0 saying that the Secret holds the key in the file only when it does, and otherwise exits non-zero naming the Secret that holds another key, the Secret that does not exist or the file that holds no seal key, it refuses --check with --replace before it reads anything, and in no case does it create, delete or write anything, ask the cluster for more than the Secret, or print a key or pass one on a command line
+
   Scenario: Seeding writes the master to the custody file, checks it opens, and only then writes the store's key
     Given a fake cluster and a fake OpenBao that hold no key volsync and answer the operator's token as OpenBao does, the cluster's S3 key in the environment, and the Talos age key's recipient
     When bao-seed-volsync writes its custody file outside the repository, again, and again when the recipient is one the operator's age key does not open, the file opens to something else than was written, or no hard link to the file can be made

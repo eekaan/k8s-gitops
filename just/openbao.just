@@ -13,7 +13,7 @@ bao-recovery *args:
 bao-root *args:
     scripts/bao-root "$@"
 
-# Write OpenBao's seal key back into its Secret from bao-recovery's file, as just bao-seal-restore <file> [--replace]; a Secret holding another key is replaced only with --replace
+# Write OpenBao's seal key back into its Secret from bao-recovery's file, as just bao-seal-restore <file> [--replace|--check]; a Secret holding another key is replaced only with --replace, and --check compares the Secret's key with the file's and writes nothing, failing for a Secret that holds another key or does not exist
 [positional-arguments]
 bao-seal-restore *args:
     scripts/bao-seal-restore "$@"

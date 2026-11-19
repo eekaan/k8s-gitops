@@ -1276,6 +1276,52 @@ take one now, `kubectl --namespace etcd-snapshots create job --from=cronjob/etcd
   `cluster-check` fails until it is. The probe keeps its counts in memory and writes no file; it is
   stopped, with the kubectl or sleep it is waiting for, on every exit of the recipe, a failed or
   interrupted run included. It needs what `cluster-talos` needs and the kubeconfig.
+- `just cluster-last-copies <openbao file> <volsync file> <postgres file> [cluster] [--check]` takes
+  and checks, before the cluster is taken down, a last copy of everything the rebuild restores from
+  ([runbooks/rebuild.md](runbooks/rebuild.md#taking-it-down)). The files are the custody files of
+  `bao-recovery`, `bao-seed-volsync` and `bao-seed-postgres`. First, before anything runs, it names
+  each thing it needs that is missing: the kubeconfig, the Talos age key, the Flux age key, what
+  `openbao-snapshot-check`, `postgres-dump-check` and `bao-volsync-password` need, and each file there
+  and where only this user can have written it, each file named by its role. Then, reading only, it
+  compares: each age key with the recipient its `.sops.yaml` names; the seal key in the OpenBao file
+  with the Secret `openbao-seal-1` (`bao-seal-restore <file> --check`); for every ReplicationSource,
+  the password the volume backups' file derives for its application with its Secret's
+  (`bao-volsync-password`), by the hashes of the two; and the customer key in the PostgreSQL file
+  with every database's backup Secret, by digest. It also needs every Cluster's primary, archiver
+  plugin and dump CronJob, and on every ReplicationSource the labels of the Kustomization that owns
+  it, which must not be suspended already, as the run resumes what it suspends and a hold set by
+  hand would end with it. Nothing is taken until all of that holds, and it prints the plan, each
+  copy by namespace and name; `--check` stops there, having created, patched and suspended nothing.
+  Then, in order: a Job, named `last-<start in Unix seconds>-<CronJob>`, from
+  `openbao/openbao-snapshots`, waited for, and `openbao-snapshot-check latest`; for every database a
+  Job from its CronJob `<name>-pgdump`, waited for, `postgres-dump-check <namespace> <name> latest`,
+  then `psql` in the primary's `postgres` container switches the WAL and names the newest complete
+  segment, and `pg_stat_archiver` is read until the archiver has archived it, and the database's
+  `ObjectStore` must report a recovery window; for every ReplicationSource, the Kustomization that
+  owns it suspended with the flux CLI, so that its next apply does not drop the trigger, then, once
+  no backup of it runs, `spec.trigger.manual` set to `last-<start>` and the backup waited for until
+  `status.lastManualSync` is that tag and its mover's result `Successful`, then the Kustomization
+  resumed. The trigger is the one field the run writes to an object Flux owns, for one backup while
+  its Kustomization is suspended; the next apply takes it away, so the cluster is again what the
+  tree holds. Each snapshot and dump must be named for a time no earlier than the run's start, to
+  the second. The start is read from the operator's clock and each name is stamped by the clock of
+  the pod that took the copy, so the comparison takes the two clocks to agree: an operator's clock
+  ahead of the cluster's by more than a Job takes to start and name its copy fails every run, on the
+  snapshot, as not taken by this run. Every wait is bounded by `LAST_COPIES_TIMEOUT` seconds, five
+  between two reads, and every kubectl call the run makes itself but `exec` by 30 seconds; a `psql`
+  in a pod is bounded by neither, as kubectl gives the stream of an exec no deadline, nor is the read
+  of the seal Secret that `bao-seal-restore --check` makes. A copy that fails, fails its check, is
+  older than the run or outlasts the wait fails the run, naming the copy and why, and no later copy
+  is taken. Every run uploads a snapshot and a dump of each database it reaches, a run that fails
+  later included, and the buckets keep the newest 56 snapshots and 14 dumps of each database, so
+  each run pushes the oldest of them out. Every Kustomization it suspended is resumed on every exit,
+  and the last line names one it could not resume, with the `flux resume kustomization` command. Its
+  last lines are the summary, one per copy: the snapshot's name, each database's dump and the segment and time its WAL
+  is archived through, and each volume's backup time. It prints nothing of a key, a password, an
+  address, the endpoint or a bucket's name, and passes none as an argument: of kubectl's and the
+  flux CLI's output it shows only their errors, through the filter of
+  [What the recipes print](#what-the-recipes-print). It runs on lab-sto2 alone, as
+  `bao-seal-restore` and `bao-volsync-password` compare with that cluster only.
 - `just cluster-destroy [cluster] [--yes] [--unreachable]` destroys the cluster stack,
   `sto2/cluster`, as `just infra-destroy sto2/cluster` does
   ([infrastructure.md](infrastructure.md#recipes)): it shows the plan's summary, destroys once the
@@ -1372,7 +1418,9 @@ to hand it to kubectl and age-keygen on standard input.
   etcd bucket, `postgres-dumps` and `postgres-dump-check` the postgres bucket, and
   `openbao-snapshots` and `openbao-snapshot-check` the OpenBao bucket, through rclone,
   configured as the infrastructure recipes configure it
-  ([infrastructure.md](infrastructure.md#s3-keys-and-backup-buckets)). `cluster-bootstrap`,
+  ([infrastructure.md](infrastructure.md#s3-keys-and-backup-buckets)). `cluster-last-copies` needs
+  them for the two checks it runs, and the cluster's S3 key, `CLUSTER_S3_ACCESS_KEY_ID` and
+  `CLUSTER_S3_SECRET_ACCESS_KEY`, for `bao-volsync-password`. `cluster-bootstrap`,
   `cluster-config` and `cluster-flux` need the prefix as well, which becomes `BACKUP_BUCKET_PREFIX`
   in `cluster-config`.
 - `TMPDIR`: where `cluster-snapshot`, both upgrade recipes and `cluster-restore` make their private
@@ -1403,8 +1451,11 @@ to hand it to kubectl and age-keygen on standard input.
   longer value, which 64-bit arithmetic would wrap into a short, a negative or an endless wait, or
   anything that is not digits, is refused before anything runs, naming the variable and the bound.
 - `FLUX_AGE_KEY_FILE`: the path of the Flux age key, outside the repository. In CI, `FLUX_AGE_KEY`
-  holds the key itself instead. `cluster-bootstrap`, `cluster-config` and `cluster-flux` need one
-  of them.
+  holds the key itself instead. `cluster-bootstrap`, `cluster-config`, `cluster-flux` and
+  `cluster-last-copies` need one of them.
+- `LAST_COPIES_TIMEOUT`: how many seconds each wait of `cluster-last-copies` may take, for a Job, the
+  archiver, a backup that runs already or the run's own backup, 3600 when unset; a whole number of
+  at most nine digits, refused otherwise before anything runs.
 - `CLUSTER_DOMAIN`: the domain the cluster's applications are published under, a lower-case DNS
   name, which becomes `CLUSTER_DOMAIN` in `cluster-config`; `cluster-bootstrap`, `cluster-config`
   and `cluster-flux` need it.

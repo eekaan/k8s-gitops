@@ -111,6 +111,11 @@ Feature: PostgreSQL
     When each field and value is looked up in the definition's schema
     Then each field is defined there, and the recovery reads the ObjectStore of the old cluster by the old cluster's name and writes the new cluster's archive under its own name
 
+  Scenario: A database held for a restore takes no dump and no base backup, and nothing else of it changes
+    Given an application whose Kustomization names the cnpg-cluster component
+    When it is built as Flux applies it without CNPG_BACKUPS_SUSPENDED, and with CNPG_BACKUPS_SUSPENDED "true" in its postBuild.substitute
+    Then without it the dump CronJob <name>-pgdump and the ScheduledBackup <name> carry suspend false, with it both carry suspend true, each a boolean, every other field of every object the two builds yield is the same, and no other line of the component reads the variable
+
   Scenario: A PostgreSQL cluster from the component is dumped daily and only the encrypted dump is uploaded, to a path of its own
     Given an application whose Kustomization names the cnpg-cluster component, built as Flux applies it, and the job's scripts run with a stand-in for pg_dump and a recording stand-in for the S3 client
     When the job's steps run in order

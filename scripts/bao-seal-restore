@@ -8,18 +8,26 @@
 # the operator knows the storage was sealed with the file's key; its key is first kept in a new file
 # beside the custody file. Nothing of either key is printed or passed as an argument; each reaches
 # kubectl or age on standard input.
-# Usage: scripts/bao-seal-restore <file> [--replace]
+# With --check it only compares: it says that the Secret holds the file's key and exits 0, and
+# otherwise fails naming the Secret that holds another key or does not exist, and writes nothing in
+# any case, as before the cluster is taken down (scripts/cluster-last-copies).
+# Usage: scripts/bao-seal-restore <file> [--replace|--check]
 set -euo pipefail
 
 here=$(dirname "$0")
 # shellcheck source=scripts/lib/openbao.sh
 . "$here/lib/openbao.sh"
 
-replace=0
-if (($# == 2)) && [[ $2 == --replace ]]; then
+replace=0 check=0
+if (($# == 3)) && [[ " $2 $3 " == *" --check "* && " $2 $3 " == *" --replace "* ]]; then
+  echo "bao-seal-restore: --check compares and writes nothing, and --replace writes; give one of them" >&2
+  exit 1
+elif (($# == 2)) && [[ $2 == --replace ]]; then
   replace=1
+elif (($# == 2)) && [[ $2 == --check ]]; then
+  check=1
 elif (($# != 1)); then
-  echo "bao-seal-restore: give the custody file bao-recovery wrote: just bao-seal-restore <file> [--replace]" >&2
+  echo "bao-seal-restore: give the custody file bao-recovery wrote: just bao-seal-restore <file> [--replace|--check]" >&2
   exit 1
 fi
 file=$1
@@ -48,12 +56,25 @@ if ! printf '%s' "$custody" | jq -e --arg secret "$bao_seal_secret" \
 fi
 
 step="reading the Secret $bao_seal_secret"
-existing=$(kubectl get secret "$bao_seal_secret" --namespace "$bao_namespace" --output json --ignore-not-found)
+# kubectl's errors can name the API server, so they are shown without its address (bao_kubectl).
+existing=$(bao_kubectl get secret "$bao_seal_secret" --namespace "$bao_namespace" --output json --ignore-not-found)
+if [[ -z $existing ]] && ((check)); then
+  infra_error "the Secret $bao_seal_secret does not exist in $bao_namespace"
+  exit 1
+fi
 if [[ -n $existing ]]; then
   if [[ $(printf '%s' "$existing" | jq -r '.data.key // "" | @base64d' | sha256sum) == \
     "$(printf '%s' "$custody" | jq -r '.seal.key' | sha256sum)" ]]; then
-    echo "bao-seal-restore: the Secret $bao_seal_secret holds the key in $file already; nothing to do"
+    if ((check)); then
+      echo "bao-seal-restore: the Secret $bao_seal_secret holds the key in $file"
+    else
+      echo "bao-seal-restore: the Secret $bao_seal_secret holds the key in $file already; nothing to do"
+    fi
     exit 0
+  fi
+  if ((check)); then
+    infra_error "the Secret $bao_seal_secret holds another key than $file"
+    exit 1
   fi
   if ((!replace)); then
     infra_error "the Secret $bao_seal_secret holds another key than $file; once the members fail to unseal with it, run this again with --replace"
