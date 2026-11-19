@@ -68,6 +68,11 @@ cluster-snapshots cluster='lab-sto2':
 cluster-last-copies *args:
     scripts/cluster-last-copies "$@"
 
+# Before a cluster and the edge stack are taken down, take the cluster's DNS records out of the zone, as just cluster-dns-remove [cluster] [--check] [--yes]: refuse an external-dns without the TXT registry, sync or an owner id of its cluster; list, by a dry-run Job of external-dns with no source, every record and TXT entry of its owner it would delete (--check: stop there); then, once the cluster's name is typed back (--yes: without asking), suspend Flux's Kustomization and HelmRelease external-dns, each read back as suspended, scale it to 0, delete them with the same Job without --dry-run, and plan again to prove none is left; external-dns stays stopped, and the run prints how to start it again, after the edge stack's destroy only once the edges are built again, just cluster-config has run and flux reconcile kustomization gateway-public has applied the Gateway again; every wait bounded by DNS_REMOVE_TIMEOUT; prints no domain, address, zone identifier or token; see docs/runbooks/rebuild.md
+[positional-arguments]
+cluster-dns-remove *args:
+    scripts/cluster-dns-remove "$@"
+
 # List a PostgreSQL database's dumps in the postgres backup bucket, newest first, by name and size, reading only; with no database named (just postgres-dumps [cluster]) list the databases that have a dump, as <namespace>/<name>; the namespace and name are those of the database's Cluster
 [positional-arguments]
 postgres-dumps *args:

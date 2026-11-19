@@ -1,0 +1,103 @@
+# The Deployment external-dns/external-dns as the pinned chart renders it with the tree's values:
+# helm template of external-dns 1.23.0 (oci://ghcr.io/home-operations/charts-mirror/external-dns)
+# with the values of kubernetes/apps/base/external-dns/external-dns/app/values.yaml and the
+# HelmRelease's own values over them, the application built with the lab-sto2 overlay, whose owner id
+# is lab-sto2, and the example key lists of kubernetes/clusters/lab-sto2, whose domain and zone are
+# example.com; tests/external-dns.bats renders it the same way and fails while this file's selector
+# or pod spec differs from the render. The fake kubectl answers it, as JSON, from the test's state.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: external-dns
+  namespace: external-dns
+  labels:
+    helm.sh/chart: external-dns-1.23.0
+    app.kubernetes.io/name: external-dns
+    app.kubernetes.io/instance: external-dns
+    app.kubernetes.io/version: "0.23.0"
+    app.kubernetes.io/managed-by: Helm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: external-dns
+      app.kubernetes.io/instance: external-dns
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: external-dns
+        app.kubernetes.io/instance: external-dns
+    spec:
+      automountServiceAccountToken: true
+      serviceAccountName: external-dns
+      securityContext:
+        fsGroup: 65534
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: external-dns
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            privileged: false
+            readOnlyRootFilesystem: true
+            runAsGroup: 65532
+            runAsNonRoot: true
+            runAsUser: 65532
+          image: registry.k8s.io/external-dns/external-dns:v0.23.0
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: CF_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  key: api-token
+                  name: external-dns-cloudflare
+          args:
+            - --log-level=info
+            - --log-format=text
+            - --interval=1m
+            - --events
+            - --source=gateway-httproute
+            - --policy=sync
+            - --registry=txt
+            - --txt-owner-id=lab-sto2
+            - --txt-prefix=extdns-%{record_type}.
+            - --gateway-namespace=envoy-gateway-system
+            - --managed-record-types=A
+            - --provider=cloudflare
+            - "--gateway-name=public"
+            - "--min-event-sync-interval=30s"
+            - "--min-ttl=300s"
+            - "--regex-domain-filter=\\A(example\\.com|(.+\\.)?example\\.com)\\z"
+          ports:
+            - name: http
+              protocol: TCP
+              containerPort: 7979
+          livenessProbe:
+            failureThreshold: 2
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            successThreshold: 1
+            timeoutSeconds: 5
+          readinessProbe:
+            failureThreshold: 6
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            successThreshold: 1
+            timeoutSeconds: 5
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi

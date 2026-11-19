@@ -24,7 +24,7 @@ infra-talman stack='sto2/cluster':
 infra-output stack name:
     scripts/infra-output {{ quote(stack) }} {{ quote(name) }}
 
-# Destroy the cluster stack, then the plumbing stack, each once its name is typed back (--yes: without asking); the cluster is asked first for the load balancers and volumes it owns outside the stack, and is not destroyed while it owns any or cannot be asked (--unreachable: unless the API does not answer); given one stack, or sto2/ci or sto2/edge, which only their names destroy, that one only; the plumbing stack is not destroyed while another stack still holds a resource
+# Destroy the cluster stack, then the plumbing stack, each once its name is typed back (--yes: without asking); the cluster is asked first for the load balancers and volumes it owns outside the stack, and is not destroyed while it owns any or cannot be asked (--unreachable: unless the API does not answer); given one stack, or sto2/ci or sto2/edge, which only their names destroy, that one only; the plumbing stack is not destroyed while another stack still holds a resource, and the edge stack not while a name the tree's routes publish under CLUSTER_DOMAIN resolves at the public resolver to one of its addresses or cannot be looked up, each named by its label, nor while its addresses are not known (--ignore-dns, with sto2/edge alone: destroyed all the same, the names still listed); --check makes every refusal and stops before each plan, planning and destroying nothing
 [positional-arguments]
 infra-destroy *args:
     scripts/infra-destroy "$@"

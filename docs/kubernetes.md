@@ -640,7 +640,7 @@ once it is not, and the agents' rendered configuration agrees.
 | `robot` | default deny | Robot Framework's runner takes nothing and reaches the resolver, `hello`'s pods in `demo` on 8080 and Ascender's web pods in `ascender` on 8052; the report server takes the kubelet's probe on 8080 and sends nothing. |
 | `ai-system` | listed | applications whose allows are not written, not a namespace that cannot have the posture. n8n takes the proxies on 5678 and reaches its database, the resolver and whatever its workflows call outside; the PostgreSQL instances take n8n, each other and the operator, and reach the API server, and their Barman Cloud sidecars reach the object storage on 443 and the API server; the dump job reaches the database, the hosts age's release is downloaded from and the object storage; Open WebUI takes the proxies on 8080 and reaches nothing until an administrator turns on a connection that calls out; the backup movers reach the object storage on 443. The proxies reach n8n's 5678 and Open WebUI's 8080 alone there and forward only to their Services, PostgreSQL authenticates every client, Pod Security, node firewall. |
 | `etcd-snapshots` | listed | an application whose allows are not written, not a namespace that cannot have the posture. The snapshot job takes nothing and reaches the Talos API through `talos.default`, the object storage, the hosts age's release is downloaded from (its URL redirects to a second host, which serves the file) and the resolver. Talos' own authorisation of its one role, Pod Security, node firewall. |
-| `external-dns` | listed | an application whose allows are not written, not a namespace that cannot have the posture. external-dns takes Prometheus' scrape and the kubelet's probes on 7979 and nothing else, and reaches the API server, the DNS provider's API on 443 and the resolver. Its token, scoped to zone read and DNS edit on the cluster's one zone, its name filter, a ClusterRole that only reads, Pod Security, node firewall ([DNS records](#dns-records)). |
+| `external-dns` | listed | an application whose allows are not written, not a namespace that cannot have the posture. external-dns takes Prometheus' scrape and the kubelet's probes on 7979 and nothing else, and reaches the API server, the DNS provider's API on 443 and the resolver; the Jobs of `just cluster-dns-remove` reach only the provider's API and the resolver. Its token, scoped to zone read and DNS edit on the cluster's one zone, its name filter, a ClusterRole that only reads, Pod Security, node firewall ([DNS records](#dns-records)). |
 | `kube-system` | listed | Cilium's agent, its Envoy and its operator run in the host's network namespace; the resolver takes queries from every namespace; Hubble Relay takes the flow recorder of `security-system` on 4245; the pod-network workloads' other flows are not yet enumerated. Node firewall, the recorder's egress, which names Relay's pods on that port alone, Pod Security. |
 | `flux-system` | listed | the controllers' flows are not yet enumerated as allows; Flux's own network policies, which the operator makes at run time, and the operator's for its web interface, `flux-operator-web`, which the check reads and passes because the namespace is listed ([What the check refuses](#what-the-check-refuses)); Pod Security, node firewall. |
 | `monitoring` | listed | Prometheus scrapes every namespace and the nodes, the node exporter runs in the host's network namespace, the API server calls the operator's webhook, VictoriaLogs takes the proxies on 9428 for the route `logs`, Alertmanager reaches the resolver and, outside the cluster, each of its two destinations on the port of its URL, hosts that are deployment values and so are named by no policy ([Where alerts go](#where-alerts-go)), the blackbox exporter takes Prometheus on 9115 and reaches the resolver and the public Gateway's proxies on 10080 and 10443, the other flows are not yet enumerated. The proxies reach VictoriaLogs' 9428 alone there and forward only the route's reads, behind the cluster's sign-in, Pod Security, node firewall. |
@@ -4640,7 +4640,10 @@ answer holding addresses.
    `https` listener, and whose `hostnames` are under the domain: `<name>.${CLUSTER_DOMAIN}`. The
    listener and the certificate cover that domain only, so a name outside it is not served, and
    external-dns makes no record for one. Name at least one host: a route without a hostname would
-   publish the listener's wildcard.
+   publish the listener's wildcard. Add the route's name to the names that
+   `tests/external-dns.bats` pins for the tree, which `dns_published_names` (`scripts/lib/dns.sh`)
+   lists for the edge stack's destroy ([DNS records](#dns-records), Removal): the test fails on
+   that pin first.
 3. Name `gateway-public` in the `dependsOn` of the application that holds the route, so a cluster
    without the Gateway cannot enable it: an application of its own, as `apps/base/demo/hello-route/`
    is, or the application that owns the Service, as `ai-system/n8n` does
@@ -4755,7 +4758,17 @@ removing the application leaves them, as Helm never deletes what `crds/` install
   would leave its record at the edges, naming a host no route serves, for good. `sync` is safe
   here because the registry confines what it deletes to this owner's records. Removing the
   application itself deletes nothing: it stops, and the records and their TXT entries stay in the
-  zone, to be taken over by an instance with the same owner or deleted by hand.
+  zone, to be taken over by an instance with the same owner or deleted by hand. What takes a
+  cluster's records out is `just cluster-dns-remove`, which a teardown runs while the cluster still
+  runs, before the cluster and the edge stack go ([runbooks/rebuild.md](runbooks/rebuild.md#taking-it-down)):
+  it stops external-dns and runs it once in the cluster, as a Job with the Deployment's owner id,
+  registry, policy, filter and token, against the source `empty`, which asks for no record, so its
+  sync deletes every record whose TXT entry names this cluster's owner, and that entry, and nothing
+  else ([cluster.md](cluster.md#recipes)). The edge stack's destroy, `just infra-destroy sto2/edge`,
+  refuses while a name the tree's routes publish still resolves to one of the edges' addresses
+  at the public resolver ([infrastructure.md](infrastructure.md#recipes)): the names are those
+  `dns_published_names` (`scripts/lib/dns.sh`) lists from what `just kubernetes-check` builds,
+  every application enabled or not, and each is looked up as `just gateway-check` looks them up.
 - **The token.** An `ExternalSecret` in `external-dns` reads the key `api-token` of
   `cert-manager/cloudflare` from the ClusterSecretStore `openbao`, which serves every namespace
   ([How an application gets a secret out](#how-an-application-gets-a-secret-out)), into the Secret

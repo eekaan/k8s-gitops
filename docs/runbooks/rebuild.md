@@ -38,7 +38,12 @@ a failing one ends with a line naming the step it failed in ([cluster.md](../clu
 - Addresses: the nodes' and the API load balancer's floating addresses go back to the cloud with
   the cluster stack, and the rebuilt cluster gets new ones. The generated files that held the old
   ones, the cluster's `talman.yaml`, talosconfig and kubeconfig, are removed with the stack and
-  written again by the build.
+  written again by the build. The edge routers' floating addresses go back with the edge stack, when
+  step 5 of [Taking it down](#taking-it-down) destroys it, and edges built again get new ones.
+- The DNS records of the routes' names, the A records at the edges' addresses and their TXT entries:
+  step 3 of [Taking it down](#taking-it-down) takes them out of the zone before the edges' addresses
+  go, and the rebuilt cluster's external-dns makes them again, at the addresses its `cluster-config`
+  holds ([Building it again](#building-it-again), step 2).
 - The contents of LINSTOR's volumes: they are on the workers' data volumes, which go with the
   cluster stack ([cluster.md](../cluster.md#the-workers-data-device)).
 - The databases' contents, as each instance's volume is LINSTOR's: the rebuilt cluster makes each
@@ -80,14 +85,28 @@ a failing one ends with a line naming the step it failed in ([cluster.md](../clu
    line per copy, with the custody files: the snapshot's name, each database's dump and the segment
    and time its WAL is archived through, and each volume's backup time, which are what the rebuild
    restores and what its checks compare with. A run that fails names what failed and why, and
-   takes no later copy: put that right and run it again. The destroy in step 3 checks for no
+   takes no later copy: put that right and run it again. The destroy in step 4 checks for no
    last copy, so it waits until a run has printed its summary.
 
 2. **`just cluster-snapshot`**, when the cluster's state matters: an etcd snapshot, encrypted, in
    the etcd bucket, which the rebuild leaves alone. It is of no use to the rebuild, as a snapshot
    restores into the same nodes only ([etcd-restore.md](etcd-restore.md#when-to-restore)).
 
-3. **`just cluster-destroy`**. It asks the cluster, through its kubeconfig, for every Service of
+3. **`just cluster-dns-remove`**, while the cluster still runs, with `--check` first:
+   `just cluster-dns-remove --check` lists, by type and by name under the domain, every A record and
+   TXT entry of the cluster's owner that a run of external-dns with no source would delete, from a
+   dry-run Job in `external-dns`, which it deletes again, and changes nothing else. Then
+   `just cluster-dns-remove`, once the cluster's name is typed back, suspends Flux's Kustomization
+   and HelmRelease `external-dns`, stops external-dns, deletes those records and entries with the
+   same Job, and plans again to check that none is left. Which records go is external-dns's own
+   owner rule, so records of another owner and those made by hand stay
+   ([cluster.md](../cluster.md#recipes)). external-dns stays stopped until the destroy:
+   `ExternalDNSSyncStale` fires and is expected until then
+   ([alerts.md](alerts.md#externaldnssyncstale)), and `FluxResourceSuspended`, which is `info`,
+   after a day. The recipe prints how to start external-dns again, for a teardown that stops here.
+   A second run finds nothing to delete and asks nothing.
+
+4. **`just cluster-destroy`**. It asks the cluster, through its kubeconfig, for every Service of
    type LoadBalancer and every PersistentVolume of a CSI driver. A cloud load balancer or volume
    behind one is the cluster's own and not in the cluster stack's state: its destroy would leave it
    in the cloud, where it keeps the network from being deleted. A Service whose addresses all come
@@ -103,15 +122,20 @@ a failing one ends with a line naming the step it failed in ([cluster.md](../clu
    typed back, and removes the cluster's `talman.yaml`, talosconfig and kubeconfig. The plumbing
    stack, the secrets bundle and the buckets stay.
 
-4. **`just infra-destroy sto2/plumbing`**, when the network and the Talos image should go too. The
-   CI host, the `sto2/ci` stack, is on the plumbing stack's network, and the network cannot be
-   removed while its port and floating IP exist. So first, in the state of every other stack, the
-   recipe looks for a resource, and while it finds one it plans and destroys nothing, naming the
-   stack and the recipe that destroys it: `just infra-destroy sto2/ci` for the CI host, which also
-   takes the runner away until [ci-host.md](ci-host.md) sets a new host up. Then it plans the
-   plumbing stack's destroy, prints the summary and destroys once `sto2/plumbing` is typed back.
-   Images left from earlier Talos versions are removed by hand
-   ([image-replacement.md](image-replacement.md#removing-old-images)).
+5. **`just infra-destroy sto2/plumbing`**, when the network and the Talos image should go too. The
+   CI host, the `sto2/ci` stack, and the edge routers, the `sto2/edge` stack, are on the plumbing
+   stack's network, and the network cannot be removed while their ports and floating IPs exist. So
+   first, in the state of every other stack, the recipe looks for a resource, and while it finds one
+   it plans and destroys nothing, naming the stack and the recipe that destroys it:
+   `just infra-destroy sto2/ci` for the CI host, which also takes the runner away until
+   [ci-host.md](ci-host.md) sets a new host up, and `just infra-destroy sto2/edge` for the edge
+   routers ([edge.md](edge.md#the-way-back)). The edge stack's destroy refuses, planning nothing,
+   while a name the routes publish still resolves at the public resolver to one of its addresses,
+   or cannot be looked up, naming each by its label under the domain; step 3 is what takes those
+   records out. `just infra-destroy sto2/edge --check` says whether it would refuse, and plans and
+   destroys nothing. Then the plumbing stack's destroy is planned, its summary printed, and it
+   destroys once `sto2/plumbing` is typed back. Images left from earlier Talos versions are removed
+   by hand ([image-replacement.md](image-replacement.md#removing-old-images)).
 
 ## Building it again
 

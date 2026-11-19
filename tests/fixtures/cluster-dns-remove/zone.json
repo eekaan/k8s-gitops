@@ -1,0 +1,16 @@
+[
+  {"name": "hello.example.com", "type": "A", "content": "203.0.113.51", "ttl": 300},
+  {"name": "hello.example.com", "type": "A", "content": "203.0.113.52", "ttl": 300},
+  {"name": "extdns-a.hello.example.com", "type": "TXT", "content": "\"heritage=external-dns,external-dns/owner=lab-sto2,external-dns/resource=httproute/demo/hello\"", "ttl": 1},
+  {"name": "n8n.example.com", "type": "A", "content": "203.0.113.51", "ttl": 300},
+  {"name": "n8n.example.com", "type": "A", "content": "203.0.113.52", "ttl": 300},
+  {"name": "extdns-a.n8n.example.com", "type": "TXT", "content": "\"heritage=external-dns,external-dns/owner=lab-sto2,external-dns/resource=httproute/ai-system/n8n\"", "ttl": 1},
+  {"name": "shop.example.com", "type": "A", "content": "198.51.100.21", "ttl": 300},
+  {"name": "shop.example.com", "type": "A", "content": "198.51.100.22", "ttl": 300},
+  {"name": "extdns-a.shop.example.com", "type": "TXT", "content": "\"heritage=external-dns,external-dns/owner=other-cluster,external-dns/resource=httproute/shop/shop\"", "ttl": 1},
+  {"name": "legacy.example.com", "type": "A", "content": "198.51.100.31", "ttl": 300},
+  {"name": "extdns-a.legacy.example.com", "type": "TXT", "content": "\"heritage=external-dns,external-dns/owner=default,external-dns/resource=service/legacy/legacy\"", "ttl": 1},
+  {"name": "mail.example.com", "type": "A", "content": "198.51.100.9", "ttl": 300},
+  {"name": "app.example.net", "type": "A", "content": "203.0.113.51", "ttl": 300},
+  {"name": "extdns-a.app.example.net", "type": "TXT", "content": "\"heritage=external-dns,external-dns/owner=lab-sto2,external-dns/resource=httproute/demo/app\"", "ttl": 1}
+]
