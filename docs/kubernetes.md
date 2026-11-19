@@ -8504,8 +8504,9 @@ of the pinned image offline (Resources, below).
   is covered by the stock alerts on every workload, `KubePodNotReady`, `KubePodCrashLooping`,
   `KubeContainerWaiting` and `KubeDeploymentReplicasMismatch` among them. The server's busybox
   `httpd` forks for each connection it takes, the kubelet's probe every 10 seconds included, which
-  Falco's rule `Redirect STDOUT/STDIN to Network Connection in Container` matches at priority Notice,
-  as its exception names `demo` alone ([Tuning](#tuning)); no alert reads a rule of that priority.
+  Falco's rule `Redirect STDOUT/STDIN to Network Connection in Container` matches at priority Notice;
+  the rule's items in [Tuning](#tuning) except the server's `httpd`, so its requests raise no event
+  of that rule, and no alert reads a rule of that priority.
 - **What it calls on its own.** Nothing but the resolver and its targets, which the runner reaches:
 
   | Call | Variable | State |
@@ -9047,8 +9048,12 @@ or `exec` into the pods of `monitoring` and `security-system`, can read it.
 Local rules have one place, the `customRules` key of
 `apps/base/security-system/falco/app/values.yaml`: a map of rule file names to their contents,
 which the chart makes the ConfigMap `falco-rules` of and mounts at `/etc/falco/rules.d`, which
-Falco reads after the image's rules. It holds one file, `exceptions.yaml`, of two items, each with
-its reason in a comment above it, and no rule of the tree's own:
+Falco reads after the image's rules. It holds one file, `exceptions.yaml`, of fourteen items, each
+with its reason in a comment above it, and no rule of the tree's own. Each item overrides the
+condition of a placeholder macro the image leaves for known cases, `(never_true)`, which a rule
+negates last: the first item for a placeholder replaces its condition, and each further one appends
+`or (...)` to it, so the rule negates the items' disjunction, each item one conjunction with its own
+reason ([overriding](https://falco.org/docs/concepts/rules/overriding/)):
 
 ```yaml
 - macro: user_known_stand_streams_redirect_activities
@@ -9057,6 +9062,54 @@ its reason in a comment above it, and no rule of the tree's own:
     condition: replace
 - macro: known_drop_and_execute_activities
   condition: (k8s.ns.name = "kube-system" and container.name = "apply-sysctl-overwrites" and container.image.repository = "quay.io/cilium/cilium" and proc.exepath = "/opt/cni/bin/cilium-sysctlfix")
+  override:
+    condition: replace
+- macro: user_known_stand_streams_redirect_activities
+  condition: or (k8s.ns.name = "robot" and container.name = "httpd" and container.image.repository = "docker.io/library/busybox" and proc.name = "httpd")
+  override:
+    condition: append
+- macro: user_known_stand_streams_redirect_activities
+  condition: or (k8s.ns.name = "piraeus-datastore" and container.name = "ha-controller" and container.image.repository = "quay.io/piraeusdatastore/piraeus-ha-controller" and proc.name = "agent")
+  override:
+    condition: append
+- macro: user_known_stand_streams_redirect_activities
+  condition: or (k8s.ns.name in ("ai-system", "ascender", "backstage") and container.name = "postgres" and container.image.repository = "ghcr.io/cloudnative-pg/postgresql" and proc.name = "manager")
+  override:
+    condition: append
+- macro: user_known_contact_k8s_api_server_activities
+  condition: (k8s.ns.name = "ascender" and container.name = "ascender-task" and container.image.repository = "ghcr.io/ctrliq/ascender" and proc.name = "awx-manage")
+  override:
+    condition: replace
+- macro: user_known_contact_k8s_api_server_activities
+  condition: or (k8s.ns.name = "ascender" and container.name = "awx-manager" and container.image.repository = "ghcr.io/ctrliq/ascender-operator" and proc.name = "ansible-operato")
+  override:
+    condition: append
+- macro: user_known_contact_k8s_api_server_activities
+  condition: or (k8s.ns.name = "monitoring" and container.name = "vector" and container.image.repository = "docker.io/timberio/vector" and proc.name = "vector")
+  override:
+    condition: append
+- macro: user_known_contact_k8s_api_server_activities
+  condition: or (k8s.ns.name = "kyverno" and container.name = "kyverno" and container.image.repository = "reg.kyverno.io/kyverno/kyverno" and proc.name = "kyverno")
+  override:
+    condition: append
+- macro: user_known_contact_k8s_api_server_activities
+  condition: or (k8s.ns.name = "kyverno" and container.name = "controller" and container.image.repository = "reg.kyverno.io/kyverno/reports-controller" and proc.name = "reports-control")
+  override:
+    condition: append
+- macro: user_known_contact_k8s_api_server_activities
+  condition: or (k8s.ns.name in ("ai-system", "ascender", "backstage") and container.name in ("initdb", "join", "postgres") and container.image.repository = "ghcr.io/cloudnative-pg/postgresql" and proc.name = "manager")
+  override:
+    condition: append
+- macro: user_known_contact_k8s_api_server_activities
+  condition: or (k8s.ns.name in ("ai-system", "ascender", "backstage") and container.name = "plugin-barman-cloud" and container.image.repository = "ghcr.io/cloudnative-pg/plugin-barman-cloud-sidecar" and proc.name = "manager")
+  override:
+    condition: append
+- macro: user_shell_container_exclusions
+  condition: (k8s.ns.name in ("ai-system", "ascender", "backstage") and container.name = "postgres" and container.image.repository = "ghcr.io/cloudnative-pg/postgresql" and proc.pname = "postgres" and proc.cmdline startswith "sh -c -- /controller/manager wal-archive --log-destination /controller/log/postgres.json pg_wal/")
+  override:
+    condition: replace
+- macro: allowed_clear_log_files
+  condition: (not container and fd.name startswith "/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/")
   override:
     condition: replace
 ```
@@ -9079,8 +9132,8 @@ out of it: the namespace, the workloads of every other namespace; the container'
 `volsync-demo`, which runs the same image in the same namespace; the image's repository, any other
 image run under that name there; and the process, a shell, or any process but `httpd`, that puts its
 streams on a socket in that very container. All of those still match, as every other workload does.
-Falco compiles the rule to the image's condition with one negation, of that conjunction:
-`(evt.type in (dup, dup2, dup3) and container.id != host and evt.rawres in (0, 1, 2) and fd.type in (ipv4, ipv6) and not (k8s.ns.name = demo and container.name = httpd and container.image.repository = docker.io/library/busybox and proc.name = httpd))`.
+Falco compiles the rule to the image's condition with one negation, of that conjunction or the three
+appended to the same placeholder below (The exceptions for the tree's own applications).
 
 The second quiets the image's rule `Drop and execute new binary in container`, of priority
 Critical, whose matches raise `FalcoCriticalRuleMatched`
@@ -9121,11 +9174,173 @@ container and binary of Cilium's agent included. Falco compiles the rule to the 
 with one negation, of that conjunction:
 `(evt.type in (execve, execveat) and container.id != host and proc.is_exe_upper_layer = true and not container.image.repository in () and not (k8s.ns.name = kube-system and container.name = apply-sysctl-overwrites and container.image.repository = quay.io/cilium/cilium and proc.exepath = /opt/cni/bin/cilium-sysctlfix))`.
 
+**The exceptions for the tree's own applications.** The other twelve items quiet four of the image's
+rules for what the tree's own applications do as they run. Each names the namespace, the container's
+name, the image's repository and the process, read from what runs, but the last, which names a path;
+each leaves every other process of its container, every other container and every other namespace to
+the rule:
+
+- `Redirect STDOUT/STDIN to Network Connection in Container`, Notice, three items appended:
+  - Robot's report server (`robot`, `httpd`, `docker.io/library/busybox`, `httpd`): busybox's
+    `httpd` answers each request in a child that puts the connection on its standard streams, as
+    `hello`'s does; a shell in that container still matches.
+  - Piraeus' HA controller (`piraeus-datastore`, `ha-controller`,
+    `quay.io/piraeusdatastore/piraeus-ha-controller`, `agent`): Falco reports the agent's call on a
+    socket, and the cause is not established (below); a shell, or any other process, in that
+    container still matches.
+  - CloudNativePG's instance manager in PostgreSQL's container (the databases' namespaces,
+    `postgres`, `ghcr.io/cloudnative-pg/postgresql`, `manager`): the same, the cause not established
+    either; PostgreSQL itself in that container still matches.
+- `Contact K8S API Server From Container`, Notice, whose placeholder
+  `user_known_contact_k8s_api_server_activities` the sixth item replaces and six append to: the
+  controllers that call the API server by design.
+  - Ascender's dispatcher (`ascender`, `ascender-task`, `ghcr.io/ctrliq/ascender`, `awx-manage`),
+    which supervisord runs as `awx-manage run_dispatcher` and which lists the pods of the container
+    group Ascender registers in a Kubernetes install every minute, to remove those of finished jobs
+    (`awx_k8s_reaper` in `awx/main/tasks/system.py`, `k8s_reaper` in `awx/settings/defaults.py`),
+    from workers that are forks of it; the task pod's `ascender-ee`, the web pod and the job pods
+    as Ascender starts them still match.
+  - Ascender's operator (`ascender`, `awx-manager`, `ghcr.io/ctrliq/ascender-operator`,
+    `ansible-operato`), which watches the `AWX` and what it makes; kube-rbac-proxy beside it still
+    matches.
+  - The log collector (`monitoring`, `vector`, `docker.io/timberio/vector`, `vector`), which watches
+    pods, namespaces and nodes for the metadata of its `kubernetes_logs` source; any other process
+    in that container still matches.
+  - Kyverno's admission controller (`kyverno`, `kyverno`, `reg.kyverno.io/kyverno/kyverno`,
+    `kyverno`) and reports controller (`kyverno`, `controller`,
+    `reg.kyverno.io/kyverno/reports-controller`, `reports-control`), which watch the policies and
+    what runs and write their reports; the init container `kyverno-pre` and the chart's Jobs still
+    match.
+  - CloudNativePG's instance manager (the databases' namespaces, `initdb`, `join` and `postgres`,
+    the component's image, `manager`), which reads and writes its `Cluster`; the one container of
+    each Job of a restore, named after its role, `full-recovery`, `import`, `pgbasebackup` or
+    `snapshot-recovery`, still matches, and so does PostgreSQL itself in the three.
+  - The Barman Cloud plugin's sidecar (the databases' namespaces, `plugin-barman-cloud`,
+    `ghcr.io/cloudnative-pg/plugin-barman-cloud-sidecar`, `manager`), which reads its `ObjectStore`
+    and the credentials it names, as `/manager instance` in each instance's pod and as
+    `/manager restore` in the `full-recovery` or `snapshot-recovery` Job of a restore from the
+    plugin's archive, where the plugin puts it as well (`reconcileJob` in
+    `internal/cnpgi/operator/lifecycle.go`); it is excepted in both, and any other process in it,
+    and the restore Job's own container, still match.
+- `Run shell untrusted`, Notice, `user_shell_container_exclusions` replaced: PostgreSQL's archiver
+  in every database of the component (the databases' namespaces, `postgres`, the component's image,
+  the parent `postgres` and a command line that starts with the archive command up to `pg_wal/`);
+  any other command PostgreSQL runs through a shell still matches.
+- `Clear Log Activities`, Warning, `allowed_clear_log_files` replaced: containerd unpacking an
+  image's layer that holds a log file, under
+  `/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/`, by what Falco places in
+  no container; the same truncation in a container, and of any file outside that path, still
+  matches.
+
+**The archiver's shell.** PostgreSQL archives each finished WAL segment by running
+`archive_command` through `system()` (`shell_archive.c` of PostgreSQL 18), and CloudNativePG makes
+that command, which it does not let a `Cluster` change,
+`/controller/manager wal-archive --log-destination /controller/log/postgres.json %p`, with `%p` the
+segment's path under the data directory, `pg_wal/<segment>` (`pkg/postgres/configuration.go` of
+v1.30.1; `pgarch.c`). From 2.38 glibc runs the command `system()` and `popen()` are given as
+`sh -c -- <command>` (`sysdeps/posix/system.c`, `libio/iopopen.c`), and the component's image,
+`ghcr.io/cloudnative-pg/postgresql:18.6-standard-trixie`, is of Debian trixie, with glibc 2.41
+(`ldd --version` in the image, run offline). So `postgres` starts
+`sh -c -- /controller/manager wal-archive ...` for every segment, which the rule matches as a
+database server that spawns a shell. The image's own macro `postgres_running_cnpg`, which the rule
+negates as well, excepts a command line that starts `sh -c /controller/manager wal-archive`, as a
+glibc before 2.38 writes it: the `--` is why it misses. The item matches the command line's fixed
+prefix, up to `pg_wal/`, as that macro matches its own. Its price: a command a superuser has
+PostgreSQL run through `COPY ... TO PROGRAM`, which PostgreSQL runs with `popen()`
+(`OpenPipeStream` in `src/backend/storage/file/fd.c`), is excepted when it starts with that prefix;
+any other such command still matches. A segment is archived once it is finished, and
+`archive_timeout`, which CloudNativePG sets to `5min` where a `Cluster` does not, as the component's
+does not, switches to a new one only when the server had activity since the last switch
+(PostgreSQL's documentation of `archive_timeout`). Ascender's dispatcher records its instance's
+heartbeat in its database every minute (`cluster_node_heartbeat`, `CLUSTER_NODE_HEARTBEAT_PERIOD`
+of 60 seconds in `awx/settings/defaults.py`), so `ascender-db` is expected to archive a segment
+about every five minutes, and a database nothing writes to, none; that is reasoning, which only the
+cluster shows (What no proof shows, below). `tests/falco.bats` fails when the
+component's image is no longer of Debian trixie, saying to read its glibc again.
+
+**The databases' namespaces.** Every database the component `cnpg-cluster` makes runs the same
+image, instance manager, sidecar and archive command, so the four items for them name the set of
+their namespaces, read from the tree: the target namespaces of every Kustomization of the overlay
+whose `components` name the component, `ai-system`, `ascender` and `backstage`, in one `in` of that
+set, sorted. An application that takes the component fails the proof until the items name its
+namespace, and one that leaves it fails it until they no longer do. No item names a database or a
+pod. The containers are named as CloudNativePG v1.30.1 and the Barman Cloud plugin v0.16.0 name
+them: `postgres` (`PostgresContainerName` in `pkg/specs/pods.go`), each Job's one container after
+its role, `initdb` and `join` (`pkg/specs/jobs.go`), and the sidecar `plugin-barman-cloud`, which
+the plugin puts into each instance's pod and into a restore's `full-recovery` or
+`snapshot-recovery` Job (`internal/cnpgi/operator/lifecycle.go`), on the `SIDECAR_IMAGE` the
+plugin's chart renders. The operators make these containers at run time, so no render holds them
+and `tests/falco.bats` states each name with its source.
+
+**A process's name.** `proc.name` is the kernel's name of the process, which the probe reads at
+each `execve` (`get_comm()` in `userspace/libsinsp/sinsp_filtercheck_thread.cpp` of libs
+0.26.1): the base name of the executable started, cut to 15 characters, as `task->comm` holds 16
+bytes with its terminating NUL (`TASK_COMM_LEN` and `__set_task_comm` in the kernel's
+`fs/exec.c`). So the
+operator's `/usr/local/bin/ansible-operator`, which its image's entrypoint starts under tini, is
+`ansible-operato`, and Kyverno's `/ko-app/reports-controller` is `reports-control`; a script
+started by its name, as supervisord starts `awx-manage`, takes the script's name. Where the tree
+does not state a container's command, the executable is its image's entrypoint or its operator's
+source, which a table in `tests/falco.bats` records with its source and the proof cuts to 15
+characters. A wrong name fails safe: the item excepts nothing and the events stay.
+
+**The truncation in no container.** containerd unpacks each layer of an image the node pulls under
+`/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/<id>/fs`, opening every file
+it writes with `O_TRUNC` (`pkg/archive/tar.go` and `plugins/snapshots/overlay/overlay.go` of
+containerd 2.3.7; `CRIContainerdDataPath` in Talos' `pkg/machinery/constants/constants.go`), so a
+layer that holds a file of the rule's list `log_files`, such as a Debian image's
+`/var/log/dpkg.log`, matches the rule by the file's name. The image's macro `containerd_activities`
+excepts that path for the process `containerd` only, and Falco reports these events with no process
+and no container: why they carry no process is not established. The item names no process, and
+`not container`, the image's macro `container`, `container.id != host`, negated. That holds for a
+process of the node, whose `container.id` is `host`, and for a thread Falco has no record of, whose
+`container.id` the container plugin cannot extract (`plugins/container/src/caps/extract/extract.cpp`
+of the plugin 0.7.6), as a field that cannot be extracted compares false (`compare_nocache` in
+`userspace/libsinsp/sinsp_filtercheck.cpp` of libs). So a truncation under that path by a process
+Falco places in a container stays reported, and one by any process of the node, or by a thread
+Falco has no record of, is excepted: the item's price.
+
+**The HA controller's and the instance manager's calls on a socket.** Falco reports both making a
+`dup`-family call that returns 0, 1 or 2 for an IPv4 or IPv6 socket. Both run programs through Go's
+`os/exec`, the agent `drbdsetup` (`pkg/agent/drbd.go` of piraeus-ha-controller v1.3.4) and the
+manager `pg_ctl` and the server (`pkg/management/postgres/instance.go`), and Go's child moves its
+files onto 0, 1 and 2 with `dup3` before it execs, still under its parent's name
+(`forkAndExecInChild1` in `syscall/exec_linux.go` of Go 1.27.0, which the agent is built with),
+which is such a call; but those files are `/dev/null` and pipes (`childStdin` and `writerDescriptor`
+in `os/exec/exec.go`), not sockets. The sources do not show why Falco sees a socket there: the cause
+is not established, and the two items rest on what Falco reports.
+
+**Ascender's job pods, and the price.** No item names the container `worker` of the pods Ascender
+starts for jobs (`get_default_pod_spec` in `awx/main/utils/execution_environments.py`, as
+`tests/ascender.bats` models the pod), nor the image of the execution environment, which those pods
+and the task pod's `ascender-ee` run: a job pod as Ascender starts it, which calls the API server or
+puts a socket on its standard streams, stays reported. No item excepts by a pod's name or labels,
+which a pod started through a container group's override carries as its override says. The price is
+the one [Ascender](#ascender) states, that the login is as strong as the namespace: whoever holds
+Ascender's admin login can start a pod in `ascender` through a container group's override with any
+container name and image, so a pod made to look like a container an item names there, running what
+the item names, is excepted as that container is. A pod made to look like the task container,
+`ascender-task` on `ghcr.io/ctrliq/ascender`, running `awx-manage`, is excepted from the API server
+rule as the task container is; one made to look like the operator's container, from the same rule;
+and one made to look like a database's, from the redirect, API server and shell rules.
+
+Falco compiles each of the five rules to the image's condition with the placeholder, which is never
+true, replaced by one negation of its items. The redirect rule:
+`(evt.type in (dup, dup2, dup3) and container.id != host and evt.rawres in (0, 1, 2) and fd.type in (ipv4, ipv6) and not ((k8s.ns.name = demo and container.name = httpd and container.image.repository = docker.io/library/busybox and proc.name = httpd) or (k8s.ns.name = robot and container.name = httpd and container.image.repository = docker.io/library/busybox and proc.name = httpd) or (k8s.ns.name = piraeus-datastore and container.name = ha-controller and container.image.repository = quay.io/piraeusdatastore/piraeus-ha-controller and proc.name = agent) or (k8s.ns.name in (ai-system, ascender, backstage) and container.name = postgres and container.image.repository = ghcr.io/cloudnative-pg/postgresql and proc.name = manager)))`.
+The shell rule ends
+`... and not (k8s.ns.name in (ai-system, ascender, backstage) and container.name = postgres and container.image.repository = ghcr.io/cloudnative-pg/postgresql and proc.pname = postgres and proc.cmdline startswith "sh -c -- /controller/manager wal-archive --log-destination /controller/log/postgres.json pg_wal/"))`,
+the log-clearing rule
+`... and not (not container.id != host and fd.name startswith /var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/))`,
+and the API server rule
+`... and not ((k8s.ns.name = ascender and container.name = ascender-task and container.image.repository = ghcr.io/ctrliq/ascender and proc.name = awx-manage) or (k8s.ns.name = ascender and container.name = awx-manager and container.image.repository = ghcr.io/ctrliq/ascender-operator and proc.name = ansible-operato) or (k8s.ns.name = monitoring and container.name = vector and container.image.repository = docker.io/timberio/vector and proc.name = vector) or (k8s.ns.name = kyverno and container.name = kyverno and container.image.repository = reg.kyverno.io/kyverno/kyverno and proc.name = kyverno) or (k8s.ns.name = kyverno and container.name = controller and container.image.repository = reg.kyverno.io/kyverno/reports-controller and proc.name = reports-control) or (k8s.ns.name in (ai-system, ascender, backstage) and container.name in (initdb, join, postgres) and container.image.repository = ghcr.io/cloudnative-pg/postgresql and proc.name = manager) or (k8s.ns.name in (ai-system, ascender, backstage) and container.name = plugin-barman-cloud and container.image.repository = ghcr.io/cloudnative-pg/plugin-barman-cloud-sidecar and proc.name = manager)))`.
+
 `tests/falco.bats` holds the exceptions to that:
 
-- The place holds that one file of those two items, in that order, each an override that replaces
-  one macro's condition with its reason in a comment above it, and the chart's ConfigMap and the
-  pod's mount carry it. There is no second place: under `/etc/falco` the pod mounts only its
+- The place holds that one file of those fourteen items, in that order, each an override of one
+  placeholder's condition, the first for a placeholder replacing it and each further one appending
+  to it, with its reason in a comment above it, whose words the proof checks item by item, and the
+  chart's ConfigMap and the pod's mount carry it. There is no second place: under `/etc/falco` the
+  pod mounts only its
   configuration file, an empty `config.d` and `rules.d`, and the configuration names `config.d`
   alone as where Falco reads further configuration, which could turn a rule off.
 - The first's condition is, to the letter, the conjunction of four values read from `hello` as Flux
@@ -9150,29 +9365,60 @@ with one negation, of that conjunction:
   moves, or whose post-renderer renames the container, fails the proof, saying what Cilium is now,
   and one with `sysctlfix.enabled: false` fails it saying to remove the exception, which then names
   nothing that runs.
+- The other twelve conditions are, to the letter, the conjunctions of values read from what runs,
+  each item's from its workload: the namespace its application's Kustomization targets, or, for
+  CloudNativePG's, the set of the target namespaces of every Kustomization that takes the component;
+  the container's name from the build or the render (Robot's Deployment `robot-reports`, Vector's
+  DaemonSet, Kyverno's two Deployments, the operator's Deployment's default container, the `AWX`'s
+  name with `-task`), or, for the containers the operators make at run time, the name their sources
+  give, which the proof states with them; the image's repository as the runtime reports it, from the
+  build or the render, the component's `imageName`, the `SIDECAR_IMAGE` the Barman Cloud plugin's
+  chart renders, and the Piraeus operator's rendered image configuration with the `LinstorCluster`'s
+  `repository`, refusing one not written registry first; and the process from Robot's command or the
+  table of executables, cut to 15 characters. The archive command's prefix and the snapshot path are
+  stated with their sources. A report server renamed or on another image, a log collector, Kyverno
+  or operator on another image, an `AWX` renamed, a component on another image or of another Debian
+  release, a fourth application that takes the component, an HA controller whose image moves by the
+  image configuration or the `LinstorCluster`, or one turned off, fails the proof, saying what the
+  workload is now. No item names the job pods' container or their image.
+- No item names a field of a pod, an ancestor (`proc.aname`), `proc.exe` or `proc.args`, or any
+  field but the namespace, the container's name, the image's repository, `proc.name`,
+  `proc.exepath`, `proc.pname`, `proc.cmdline` and `fd.name`; each is one conjunction, with no `or`
+  within it and no `not` but before the macro `container`; every one but the fourteenth names a
+  namespace, a container's name, an image's repository and a process; and none turns a rule off.
 - Where a docker daemon answers, Falco itself says so, run from the pinned image without network,
   capability or root, on the rendered configuration and rules. Its dry run exits 0: a condition
   with a field Falco does not know makes it exit 1, which on a node is a pod in a crash loop. It
   validates the image's rules and then the local file without an error or a warning: an override of
   a macro the image does not define loads with the warning `LOAD_UNUSED_MACRO` and excepts nothing.
-  It prints the redirect rule enabled, at priority Notice, and the drop-and-execute rule enabled, at
-  priority Critical, each compiled to its condition above, where without the local file each
-  negates the image's placeholder. And it lists the same rules enabled with the local file as
-  without it, nothing changed but those two rules and their two placeholders: no other rule or
-  macro, and no list.
+  It prints the five rules enabled, at their priorities, Notice for the redirect, API server and
+  shell rules, Warning for the log-clearing rule and Critical for the drop-and-execute rule, each
+  compiled to the image's condition with its placeholder replaced by one negation of the items
+  built from the values above, where without the local file each negates the image's placeholder.
+  It shows the image's own `postgres_running_cnpg` and `containerd_activities` as above. And it
+  lists the same rules enabled with the local file as without it, nothing changed but those five
+  rules and their five placeholders: no other rule or macro, and no list.
 
-What no proof shows: an event evaluated against either rule. Of the image's engines, replay is the
+What no proof shows: an event evaluated against any rule. Of the image's engines, replay is the
 one that gives Falco system calls without a probe, and it reads a capture file, which only a probe
 on a running kernel records and which would hold that machine's processes, users and addresses. So
-that each rule still matches every other workload, and the drop-and-execute rule the same exec in
-another namespace, another container or at another path, rests on the condition Falco compiles. The
-values Falco reports for the four fields of each exception follow from the pinned sources, and an
-event on a node is what shows them: `container.name` is the name in the container's CRI metadata
-and `k8s.ns.name` the namespace of its pod's sandbox (`go-worker/pkg/container/cri.go` of the
-container plugin at 0.7.6, the version the image loads), and `container.image.repository` is the
+that each rule still matches every other workload, and that an excepted event's neighbour in another
+namespace, container, process, command line or path is still reported, rests on the condition Falco
+compiles. The values Falco reports for the fields of each exception follow from the pinned sources,
+and an event on a node is what shows them: `container.name` is the name in the container's CRI
+metadata and `k8s.ns.name` the namespace of its pod's sandbox (`go-worker/pkg/container/cri.go` of
+the container plugin at 0.7.6, the version the image loads), and `container.image.repository` is the
 image reference containerd 2.3.7 reports, the image's first repository digest
 (`internal/cri/server/container_status.go`), up to its `@`, which for `hello`'s image is
-`docker.io/library/busybox` and for Cilium's `quay.io/cilium/cilium`. For the sysctl fix, two of
+`docker.io/library/busybox` and for Cilium's `quay.io/cilium/cilium`. For the exceptions for the
+tree's own applications, an event of each shows what the sources only predict: each `proc.name`,
+`ansible-operato` and `reports-control` above all; `container.name` of the containers the operators
+make at run time; and `container.id` of a log-clearing event, which the item needs to be `host` or
+none. None of the proofs shows why the HA controller's and the instance manager's calls are on a
+socket, why the log-clearing events carry no process, or whether `backstage-db` and `n8n-db`
+archive at all: that `ascender-db` archives every five minutes and the others seldom is reasoning
+from `archive_timeout` and Ascender's heartbeat, which the database's own metrics
+(`cnpg_pg_stat_archiver_archived_count`) show on the cluster. For the sysctl fix, two of
 them are what such an event has to show. `proc.exepath` is the path the probe builds by walking the
 executable's mounts up to the root of the mount namespace they are in
 (`auxmap__store_d_path_approx` in libs' `driver/modern_bpf/helpers/store/auxmap_store_params.h`),
@@ -9193,17 +9439,23 @@ has one, and skip in CI, saying why.
 To silence another known-benign event, find it (`just logs` above) and read its rule and the
 namespace, pod, container, image and process in its `output_fields`; then, in a pull request:
 
-1. add an item to `exceptions.yaml` that overrides the placeholder the rule leaves for the case
-   (the image's rules name them `user_*` and `known_*`, such as
-   `user_expected_terminal_shell_in_container_conditions` for `Terminal shell in container`), with
-   the reason for the exception in a comment above it, as the items above have;
-2. keep it as narrow as the event is, a conjunction of what the event shows of the workload, and
-   never a whole rule off: the proof of the place fails on an item, file or place it does not
-   state, and, where a docker daemon answers, the proofs fail when Falco lists one rule fewer
-   enabled;
-3. prove it as the items above are proved: the proof of the place states what the place holds, so
-   an item it does not expect fails it, and the item's own proof takes its values from the workload
-   it excepts;
+1. add an item to `exceptions.yaml`, after the items there, that overrides the placeholder the rule
+   leaves for the case (the image's rules name them `user_*` and `known_*`, such as
+   `user_expected_terminal_shell_in_container_conditions` for `Terminal shell in container`): the
+   first item for a placeholder replaces its condition, `(<conjunction>)` with
+   `override: condition: replace`, and each further one appends `or (<conjunction>)` with
+   `override: condition: append`, never one item with an `or` of two conjunctions; with the reason
+   for the exception in a comment directly above it, as the items above have;
+2. keep it as narrow as the event is, a conjunction of what the event shows of the workload, its
+   namespace, container's name, image's repository and process, and never a whole rule off: the
+   proof of the place fails on an item, file or place it does not state, the proof that no exception
+   names a pod fails on a pod's field and on a conjunction without one of the four, and, where a
+   docker daemon answers, the proofs fail when Falco lists one rule fewer enabled;
+3. prove it as the items above are proved: the proof of the place states the items in their order
+   and checks each reason, so an item it does not expect fails it, and the item's own proof reads
+   its values from the workload it excepts as it runs, the process from the workload's command or
+   from the table of executables in `tests/falco.bats`, with the source each is read from, cut to
+   the kernel's 15 characters;
 4. merge it. The pod template carries a checksum of the rules' ConfigMap, `checksum/rules`, so the
    DaemonSet rolls when the rules change, one node at a time, and the Kustomization waits for the
    release. A pod that still runs gets the new file as well: the kubelet brings a changed ConfigMap
@@ -9215,9 +9467,13 @@ namespace, pod, container, image and process in its `output_fields`; then, in a 
    does ([What Falco costs and what it sees](#what-falco-costs-and-what-it-sees)). A file Falco
    refuses stops both: a pod that runs keeps the rules it has and writes
    `Falco internal: hot restart failure`, at priority Critical, among its events, and a new pod
-   exits when it starts, so the roll stops at its first node, the release's upgrade does not
-   become ready and its remediation rolls it back ([What the root sets](#what-the-root-sets)).
-   `FluxApplierNotReady` raises the release after 15 minutes.
+   exits when it starts, so the roll stops at its first node, whose pod restarts in a loop and
+   watches nothing while the release's upgrade waits out its timeout, the five minutes a
+   `HelmRelease` has where it sets none, as this one does not. Its remediation then rolls it back
+   and tries again, three times, so that node goes unwatched for up to five minutes on each of
+   four tries before the release is Stalled with the reason `RetriesExceeded`
+   ([What the root sets](#what-the-root-sets)). `FluxApplierNotReady` raises the release after
+   15 minutes.
 
 The Falco documentation says what else an override can do
 ([overriding](https://falco.org/docs/concepts/rules/overriding/),
