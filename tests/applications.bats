@@ -176,8 +176,12 @@ image_version() {
   # The Kustomization takes the component and names the cluster.
   [ "$(yq '.spec.components | map(select(test("/components/cnpg-cluster$"))) | length' "$KS")" -eq 1 ]
   [ "$(yq '.spec.postBuild.substitute.CNPG_CLUSTER_NAME' "$KS")" = n8n-db ]
-  # What it yields: one Cluster of three instances, and the PodMonitor that scrapes it.
-  cluster="$(only "$BUILT" Cluster)"
+  # What it yields: one Cluster of three instances by the name the Kustomization gives the
+  # component's, beside which a restore adds one of its own (docs/runbooks/postgres-restore.md), and
+  # the PodMonitor that scrapes it.
+  cluster="$(yq '.spec.postBuild.substitute.CNPG_CLUSTER_NAME' "$KS")"
+  [ "$(NAME="$cluster" yq -N 'select(.kind == "Cluster" and .metadata.name == strenv(NAME)) | .metadata.name' "$BUILT" | grep -c .)" -eq 1 ] ||
+    { echo "$BUILT holds no one Cluster $cluster"; return 1; }
   [ "$cluster" = n8n-db ]
   [ "$(object "$BUILT" Cluster "$cluster" | yq '.metadata.namespace')" = ai-system ]
   [ "$(object "$BUILT" Cluster "$cluster" | yq '.spec.instances')" -eq 3 ]

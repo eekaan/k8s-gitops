@@ -1,6 +1,6 @@
 {
   $schema: "https://docs.renovatebot.com/renovate-schema.json",
-  description: "Where this repository keeps versions beyond Renovate's default file patterns, the one it reads but must not propose, and the ones it may propose only within the line the tree runs.",
+  description: "Where this repository keeps versions beyond Renovate's default file patterns, the one it reads but must not propose, and the ones it may propose only within the line the tree runs. grafana-plugins is the datasource that reads a Grafana plugin's versions from the catalogue Grafana installs it from.",
   // HelmRelease, OCIRepository, GitRepository and Flux Kustomization images. Helm values files,
   // kustomization.yaml, mise.toml, GitHub Actions workflows and OpenTofu files are found by their
   // managers' default patterns.
@@ -50,6 +50,18 @@
       ],
     },
   ],
+  // A Grafana plugin's versions, by the plugin's id, from the grafana.com listing that Grafana's
+  // image installs the plugin from at every start, and a version missing from it stops Grafana from
+  // starting (docs/kubernetes.md, Grafana). The listing holds a publisher's GitHub releases later,
+  // and some never, so a pin under '# renovate: datasource=custom.grafana-plugins' moves only to a
+  // version it lists, aged from the listing's createdAt for that version.
+  customDatasources: {
+    "grafana-plugins": {
+      defaultRegistryUrlTemplate: "https://grafana.com/api/plugins/{{packageName}}/versions",
+      format: "json",
+      transformTemplates: ["{'sourceUrl': items[0].url, 'releases': [items.{'version': version, 'releaseTimestamp': createdAt}]}"],
+    },
+  },
   packageRules: [
     {
       // To move mise-action's checksum, Renovate first fetches the current release by the tag the

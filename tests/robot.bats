@@ -457,15 +457,18 @@ refused_calls() {
     }' pass=1 "${files[@]}" pass=2 "$1"
 }
 
-# fake_run: a directory standing in for the claim, a fake robot and a fake date on PATH, for run.sh
-# as the container runs it. The fake robot records its arguments, writes Robot's three files into
-# its --outputdir and exits with the number in $STATE/rc; then, as $STATE/lock says, it leaves the
-# run's directory (run) or the claim's root (reports) refusing writes, as a full or failing claim
-# would; and while $STATE/robot-waits exists it touches $STATE/robot-ready and runs until SIGTERM,
-# which it records in $STATE/robot-signals, or for at most 20 seconds. The fake date prints
-# $STATE/stamp for the run's directory. Sets REPORTS, SUITES, FAKE, STATE and RUN_ENVIRONMENT, the
-# only variables run.sh gets.
+# fake_run: a directory standing in for the claim, a fake robot, date, rm and mktemp on PATH, for
+# run.sh as the container runs it. The fake robot records its arguments, writes Robot's three files
+# into its --outputdir and exits with the number in $STATE/rc; and while $STATE/robot-waits exists
+# it touches $STATE/robot-ready and runs until SIGTERM, which it records in $STATE/robot-signals, or
+# for at most 20 seconds. The fake date prints $STATE/stamp for the run's directory. As $STATE/lock
+# says, the run's directory (run) or the claim's root (reports) refuses writes, as a full or failing
+# claim would, in a way no mode bit gives, since none stops root: with run, robot leaves a directory
+# where each of the run's status and job is written; with reports, rm and mktemp refuse, so no run
+# leaves the claim's root and nothing is made in it. Otherwise rm and mktemp are the system's. Sets
+# REPORTS, SUITES, FAKE, STATE and RUN_ENVIRONMENT, the only variables run.sh gets.
 fake_run() {
+  local tool
   REPORTS="$BATS_TEST_TMPDIR/reports" SUITES="$BATS_TEST_TMPDIR/suites" FAKE="$BATS_TEST_TMPDIR/fake"
   STATE="$BATS_TEST_TMPDIR/state"
   mkdir -p "$REPORTS" "$SUITES/base" "$SUITES/ascender" "$FAKE" "$STATE"
@@ -482,8 +485,7 @@ for file in output.xml log.html report.html; do echo "$file" >"$out/$file"; done
 echo '==============================================================================='
 echo 'Suites'
 case $(cat "$STATE/lock" 2>/dev/null) in
-  run) chmod 555 "$out" ;;
-  reports) chmod 555 "${out%/*}" ;;
+  run) mkdir "$out/status" "$out/job" ;;
 esac
 if [[ -e $STATE/robot-waits ]]; then
   trap 'echo SIGTERM >"$STATE/robot-signals"; exit "$(cat "$STATE/rc")"' TERM
@@ -496,7 +498,17 @@ EOF
 [[ $* == '-u +%Y-%m-%dT%H%M%SZ' ]] || { echo "date: unexpected $*" >&2; exit 1; }
 cat "$STATE/stamp"
 EOF
-  chmod +x "$FAKE/robot" "$FAKE/date"
+  for tool in rm mktemp; do
+    { printf '#!/usr/bin/env bash\nSTATE=%q\n' "$STATE"; cat <<'EOF'; } >"$FAKE/$tool"
+if [[ $(cat "$STATE/lock" 2>/dev/null) == reports ]]; then
+  echo "${0##*/}: the claim's root refuses writes: $*" >&2
+  exit 1
+fi
+PATH=${PATH#*:}
+exec "${0##*/}" "$@"
+EOF
+  done
+  chmod +x "$FAKE/robot" "$FAKE/date" "$FAKE/rm" "$FAKE/mktemp"
   RUN_ENVIRONMENT=(HOME=/tmp KEEP_RUNS=30 JOB_NAME=robot-suites-29384750 REPORTS_DIR="$REPORTS" SUITES_DIR="$SUITES"
     PATH="$FAKE:/usr/bin:/bin")
 }
@@ -1259,14 +1271,12 @@ section() {
   echo 0 >"$STATE/rc"
   echo run >"$STATE/lock"
   run_sh
-  chmod 755 "$REPORTS/2026-11-18T063000Z"
   echo "passing, the run's directory refusing writes: status $status; $output"
   [ "$status" -eq 1 ]
   [[ $output == *"failed while writing the run's status and job into $REPORTS/2026-11-18T063000Z"* ]]
   echo 2026-11-18T064500Z >"$STATE/stamp"
   echo 3 >"$STATE/rc"
   run_sh
-  chmod 755 "$REPORTS/2026-11-18T064500Z"
   echo "three failed, the run's directory refusing writes: status $status; $output"
   [ "$status" -eq 3 ]
   [[ $output == *"failed while writing the run's status and job into $REPORTS/2026-11-18T064500Z"* ]]
@@ -1276,7 +1286,6 @@ section() {
   RUN_ENVIRONMENT+=(KEEP_RUNS=2)
   run_sh
   unset 'RUN_ENVIRONMENT[-1]'
-  chmod 755 "$REPORTS"
   rm "$STATE/lock"
   echo "passing, the claim's root refusing writes: status $status; $output"
   [ "$status" -eq 1 ]
@@ -1369,13 +1378,12 @@ section() {
     [[ $output == *"takes only --variable NAME:VALUE pairs"* ]]
     [ ! -e "$STATE/robot-argv" ]
   done
-  # A directory it cannot write: nothing runs, and the step is named.
+  # A claim it cannot make the run's directory in, a file where the claim's directory should be,
+  # which refuses root as well: nothing runs, and the step is named.
   rm -rf "$REPORTS"
-  mkdir -p "$REPORTS"
-  chmod 555 "$REPORTS"
+  : >"$REPORTS"
   echo 2026-11-19T054500Z >"$STATE/stamp"
   run_sh
-  chmod 755 "$REPORTS"
   echo "unwritable: status $status; $output"
   [ "$status" -eq 1 ]
   [[ $output == *"failed while making the run's directory $REPORTS/2026-11-19T054500Z"* ]]

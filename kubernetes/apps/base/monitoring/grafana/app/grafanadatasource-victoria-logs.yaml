@@ -6,18 +6,25 @@
 # This is the one thing Grafana fetches from the network. The operator hands the plugin below to
 # Grafana's container as GF_INSTALL_PLUGINS, and grafana.yaml sets GF_INSTALL_PLUGINS_FORCE there,
 # so that the image's entrypoint runs `grafana cli plugins install victoriametrics-logs-datasource
-# <version>` before it starts Grafana, at every start, into a data directory that starts empty. That
-# makes two requests (pkg/plugins/repo/service.go in Grafana v13.1.3):
-#   GET https://grafana.com/api/plugins/victoriametrics-logs-datasource/versions, the plugin's
-#     versions, of which it takes the one below;
+# <version>` before it starts Grafana, at every start, into a data directory that starts empty with
+# each pod. In a new pod that makes two requests to grafana.com's plugin catalogue
+# (pkg/plugins/repo/service.go in Grafana v13.1.3):
+#   GET https://grafana.com/api/plugins/victoriametrics-logs-datasource/versions, the catalogue's
+#     listing of the plugin's versions, of which it takes the one below;
 #   GET https://grafana.com/api/plugins/victoriametrics-logs-datasource/versions/<version>/download,
 #     which grafana.com redirects to that version's archive in its catalogue's storage on
 #     storage.googleapis.com.
-# Grafana's own server would install it only with plugins.preinstall_disabled off, which would let it
-# install its list of plugins as well. The entrypoint runs under set -e: a failed request stops
-# Grafana from starting. Grafana verifies a plugin's signature against the public key it ships when
-# it loads it. The plugin is an Apache-2.0 release of its publisher's,
-# VictoriaMetrics/victorialogs-datasource.
+# A container that restarts in its pod finds that version installed already and makes neither
+# (pkg/cmd/grafana-cli/commands/install_command.go). Grafana's own server would install it only with
+# plugins.preinstall_disabled off, which would let it install its list of plugins as well. The
+# entrypoint runs under set -e: a failed request stops Grafana from starting until grafana.com
+# answers it, and a version the listing does not hold, or holds as incompatible with this Grafana,
+# stops it until the version below is one the listing holds for it. Renovate reads the plugin's
+# versions from that same listing, through the custom datasource grafana-plugins
+# (.renovate/managers.json5), so it proposes only a version the catalogue lists: the catalogue lists
+# the publisher's GitHub releases later, and some never. Grafana verifies a plugin's signature
+# against the public key it ships when it loads it. The plugin is an Apache-2.0 release of its
+# publisher's, VictoriaMetrics/victorialogs-datasource.
 apiVersion: grafana.integreatly.org/v1beta1
 kind: GrafanaDatasource
 metadata:
@@ -33,7 +40,7 @@ spec:
   uid: victoria-logs
   plugins:
     - name: victoriametrics-logs-datasource
-      # renovate: datasource=github-releases depName=VictoriaMetrics/victorialogs-datasource
+      # renovate: datasource=custom.grafana-plugins depName=victoriametrics-logs-datasource
       version: 0.34.0
   datasource:
     name: VictoriaLogs

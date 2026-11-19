@@ -122,7 +122,7 @@ kubernetes/apps/base/monitoring/blackbox-exporter/app/ocirepository.yaml	regex	g
 kubernetes/apps/base/monitoring/grafana-operator/app/ocirepository.yaml	flux	ghcr.io/grafana/helm-charts/grafana-operator	tag
 kubernetes/apps/base/monitoring/grafana-operator/app/ocirepository.yaml	regex	ghcr.io/grafana/helm-charts/grafana-operator	tag
 kubernetes/apps/base/monitoring/grafana/app/grafana.yaml	regex	docker.io/grafana/grafana	version
-kubernetes/apps/base/monitoring/grafana/app/grafanadatasource-victoria-logs.yaml	regex	VictoriaMetrics/victorialogs-datasource	version
+kubernetes/apps/base/monitoring/grafana/app/grafanadatasource-victoria-logs.yaml	regex	victoriametrics-logs-datasource	version
 kubernetes/apps/base/monitoring/grafana/app/ocirepository.yaml	flux	ghcr.io/prometheus-community/charts/kube-prometheus-stack	tag
 kubernetes/apps/base/monitoring/grafana/app/ocirepository.yaml	regex	ghcr.io/prometheus-community/charts/kube-prometheus-stack	tag
 kubernetes/apps/base/monitoring/kube-prometheus-stack/app/ocirepository.yaml	flux	ghcr.io/prometheus-community/charts/kube-prometheus-stack	tag
