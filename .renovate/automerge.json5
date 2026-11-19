@@ -33,6 +33,15 @@
       automerge: false,
     },
     {
+      // The component's image moves every database's major, and the server name moves with it by
+      // hand: tests/postgresql.bats fails until it does (docs/runbooks/postgres-restore.md).
+      description: "A PostgreSQL major of the databases' image, labelled for the person who moves the server name",
+      matchPackageNames: ["ghcr.io/cloudnative-pg/postgresql"],
+      matchUpdateTypes: ["major"],
+      addLabels: ["postgresql-major"],
+      automerge: false,
+    },
+    {
       description: "Talos",
       matchPackageNames: ["siderolabs/talos", "ghcr.io/siderolabs/**", "factory.talos.dev/**"],
       automerge: false,

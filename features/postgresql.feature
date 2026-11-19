@@ -69,7 +69,7 @@ Feature: PostgreSQL
   Scenario: A PostgreSQL cluster from the component archives its WAL and takes a daily base backup to a path of its own in the object store
     Given an application whose Kustomization names the cnpg-cluster component and sets its cluster's name and namespace, and the databases the cluster's overlay builds
     When each is built as Flux applies it
-    Then the Cluster archives through the plugin's entry that names the application's ObjectStore, a ScheduledBackup of method plugin for that Cluster runs once a day at a minute no backup of another kind uses, outside the run of the dump job of each database the overlay builds, and takes its first backup when it is made, the ObjectStore keeps base backups and WAL for a recovery window, compresses both, and reaches the cluster's object storage at the endpoint of cluster-config, in the postgres bucket, under the cluster's name, the namespace and the database's name
+    Then the Cluster archives through the plugin's entry that names the application's ObjectStore, a ScheduledBackup of method plugin for that Cluster runs once a day at a minute no backup of another kind uses, outside the run of the dump job of each database the overlay builds, and takes its first backup when it is made, the ObjectStore keeps base backups and WAL for a recovery window, compresses both, and reaches the cluster's object storage at the endpoint of cluster-config, in the postgres bucket, under the cluster's name, the namespace and the database's server name, its name while the template runs PostgreSQL 18
 
   Scenario: Every database's volume has room for its data and the WAL its primary keeps while the archive is down, and grows in place
     Given the databases the cluster's overlay builds from the cnpg-cluster component, every other Cluster their applications build beside them, and the StorageClass each Cluster names
@@ -89,12 +89,17 @@ Feature: PostgreSQL
   Scenario: Two databases never share a backup path
     Given four applications that take the component, two with different names and two more with the same names in another namespace
     When each is built as Flux applies it
-    Then the four archives are in four different places, and the place changes with the name of the Kubernetes cluster that cluster-config holds and with the bucket's prefix, each alone, and ends in the namespace and the database's name
+    Then the four archives are in four different places, and the place changes with the name of the Kubernetes cluster that cluster-config holds and with the bucket's prefix, each alone, and ends in the namespace and the database's server name, its name while the template runs PostgreSQL 18
 
   Scenario: Two databases never share a backup path, whatever namespace an application names
     Given the tree, and a copy in which n8n's Kustomization sets CNPG_NAMESPACE to a namespace other than its targetNamespace, and one that leaves it out
     When scripts/kubernetes-check runs on each
     Then the tree passes, the first is refused naming the Kustomization, the value and the targetNamespace, and the second is refused
+
+  Scenario: A new PostgreSQL major moves the archive's server name and the dump tool with it, and Renovate proposes it alone, never merged by itself
+    Given the databases the cluster's overlay builds from the cnpg-cluster component, copies of the tree whose component names the next PostgreSQL major, and Renovate's rules
+    When each database is built as Flux applies it, from its Kustomization as the overlay makes it, and the rules that match the PostgreSQL image are read
+    Then each database archives under its cluster's name while the template's image is PostgreSQL 18 and under its name followed by -pg and the major for a later one, its dump job runs an image of the same major, the copy with the major raised fails for every database while the server name is left as it is or the dump image stays behind and passes with the suffix, and a major update of the image is a pull request of its own, in no group, labelled postgresql-major, that never merges itself
 
   Scenario: Every field of the component's ObjectStore and ScheduledBackup is one the pinned plugin and operator define
     Given the component's ObjectStore and ScheduledBackup built for an application, and the definitions of the pinned plugin chart and operator chart

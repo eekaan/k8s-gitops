@@ -5779,7 +5779,11 @@ neither.
 
 The cluster has three instances of PostgreSQL 18, from the operator's standard image, whose tag names
 a minor version that Renovate moves. The publisher rebuilds the image under that tag and a node keeps
-the build it pulled first, so instances can run different builds of one minor version. Each instance
+the build it pulled first, so instances can run different builds of one minor version. A new major is
+an upgrade in place by the operator of every database the component makes, all at once: Renovate
+proposes it in a pull request of its own, labelled `postgresql-major`, that never merges itself, and
+`tests/postgresql.bats` fails that pull request until the archive's server name moves with the image
+([postgres-restore.md](runbooks/postgres-restore.md#moving-to-a-new-postgresql-major)). Each instance
 must run on a different worker, and requests and is limited to 500m CPU and 512Mi memory. The
 operator's disruption budgets move the primary away by switchover before its worker is drained, and
 let drains take one replica at a time. A PodMonitor scrapes every instance, and labels their series
@@ -5853,12 +5857,14 @@ component adds an `ObjectStore`, a `ScheduledBackup` and an ExternalSecret.
 
 - **Where.** The postgres bucket, `<BACKUP_BUCKET_PREFIX>-postgres`
   ([infrastructure.md](infrastructure.md#s3-keys-and-backup-buckets)), at the endpoint of
-  `cluster-config`, under `<CLUSTER_NAME>/<namespace>/<name>`: the Kubernetes cluster's name, which
-  `cluster-config` holds as `CLUSTER_NAME`, from the directory name of `clusters/<cluster>`, the
-  namespace and the database's `CNPG_CLUSTER_NAME`. The plugin keeps `base/` and `wals/` there, and
-  the daily dumps are the files directly in that directory, whose retention lists and deletes only
-  those ([Dumps](#dumps)). Two databases never share a path, and a restored cluster writes under its
-  own name.
+  `cluster-config`, under `<CLUSTER_NAME>/<namespace>/`: the Kubernetes cluster's name, which
+  `cluster-config` holds as `CLUSTER_NAME`, from the directory name of `clusters/<cluster>`, and the
+  namespace. The plugin keeps `base/` and `wals/` under the database's server name there, its
+  `CNPG_CLUSTER_NAME`, `<name>`, while it runs PostgreSQL 18 and `<name>-pg<major>` after a move to a
+  later major ([postgres-restore.md](runbooks/postgres-restore.md#moving-to-a-new-postgresql-major)).
+  The daily dumps stay in `<name>/`, the files directly in that directory, whose retention lists and
+  deletes only those ([Dumps](#dumps)). Two databases never share a path, and a restored cluster
+  writes under its own name.
 - **How often.** A base backup is taken at 02:47 UTC every day, and one as soon as the
   `ScheduledBackup` is made. Every database's base backup starts at 02:47, the component's one
   schedule, so the base backups of the databases run together. The minute is one that no backup of
@@ -5871,10 +5877,11 @@ component adds an `ObjectStore`, a `ScheduledBackup` and an ExternalSecret.
   since, as the operator's default `archive_timeout` closes it.
 - **How long.** Base backups and WAL are kept for a recovery window of 30 days, so a database can
   be restored to any moment of the last 30 days. After each base backup the plugin deletes what
-  falls outside the window, with the delete right of the key it holds, which is the cluster's S3
-  key and reaches every bucket of the project: a workload that holds it can delete the archive as
-  well, the residual risk [ADR 0008](adr/0008-state-and-backups-are-encrypted-before-they-leave.md)
-  states for every backup. Base backups and WAL are compressed with gzip.
+  falls outside the window from the archive of the current server name, with the delete right of
+  the key it holds, which is the cluster's S3 key and reaches every bucket of the project: a
+  workload that holds it can delete the archive as well, the residual risk
+  [ADR 0008](adr/0008-state-and-backups-are-encrypted-before-they-leave.md) states for every
+  backup. Base backups and WAL are compressed with gzip.
 - **The credentials.** An ExternalSecret in each database's namespace, `<name>-backup`, reads the
   cluster's S3 key from the secret store's key `volsync`, only its two key fields as the etcd
   snapshot job does, so nothing new is seeded for it and the restic master never reaches the
@@ -5941,14 +5948,22 @@ one reads, with certificates made as the plugin's issuer makes them, and checks 
 the cluster's CA would issue end it with `certificate required`; builds applications that
 take a cluster from the component, one that does not name it and two that patch it, by kind and by
 name, as Flux applies them, and checks their archive paths, schedule, retention, encryption and
-credentials; holds the volume of every `Cluster` an application of the overlay with a database
-builds, the component's and any beside it, built from its Kustomization as the overlay makes it, to
-the 4Gi floor above, computed in the test from its sources, and fails for one that sets a WAL
-volume, a segment size, an `archive_timeout` or a `wal_keep_size` of its own, turns
-`resizeInUseVolumes` off or names a class that does not allow expansion; checks each field of the
-`Cluster`, the `ObjectStore` and the `ScheduledBackup` against the pinned charts' definitions and
-the restore runbook's point-in-time manifest, the one that bootstraps by recovery, against the
-`Cluster`'s; and checks the `StorageClass` against LINSTOR's. `tests/postgres-restore.bats` makes
+credentials; holds every database of the overlay, built from its Kustomization as the overlay makes
+it, to the server name of its image's major, its name at PostgreSQL 18 and `<name>-pg<major>` above
+it, and its dump job to an image of that major, on the tree and on copies whose component names the
+next major, failing the copy whose server name is left as it is or whose dump image stays behind,
+and reads Renovate's four configuration files: it requires the rule that labels a major of the
+image `postgresql-major` and holds it for a person, and fails a rule after it that turns auto-merge
+on, a rule or setting that puts the image in a group or its majors with its minors, and a preset it
+has not read; holds the volume of every `Cluster` an
+application of the overlay with a database builds, the component's and any beside it, built from
+its Kustomization as the overlay makes it, to the 4Gi floor above, computed in the test from its
+sources, and fails for one that sets a WAL volume, a segment size, an `archive_timeout` or a
+`wal_keep_size` of its own, turns `resizeInUseVolumes` off or names a class that does not allow
+expansion; checks each field of the `Cluster`, the `ObjectStore` and the `ScheduledBackup` against
+the pinned charts' definitions and the restore runbook's point-in-time manifest, the one that
+bootstraps by recovery, against the `Cluster`'s; and checks the `StorageClass` against LINSTOR's.
+`tests/postgres-restore.bats` makes
 both of the runbook's restores for every database the overlay builds as their pull requests make
 them, each manifest a file of the application's own `app/` named for its new cluster, with its row
 of `.renovate/by-hand.tsv`, the dump restore's suspension of the old dump job and, for a database
@@ -6000,7 +6015,8 @@ that has its tool, so no image is built:
    retry has less time than the first attempt did and a long dump can fail until the next night. The image is the Cluster's own, which carries `pg_dump`: the same registry
    path and PostgreSQL major as the Cluster's `imageName`, pinned by tag and digest in the CronJob,
    so the tool is never older than the server, which `pg_dump` refuses. `tests/postgres-dumps.bats`
-   fails when the majors differ; Renovate moves the CronJob's image with the Cluster's, which share a package.
+   and `tests/postgresql.bats` fail when the majors differ; Renovate moves the CronJob's image with
+   the Cluster's, which share a package, a new major in the same pull request.
 3. `encrypt` encrypts the plain dump with age to the Talos age key's recipient, the one
    `just cluster-snapshot` and the etcd job encrypt to, and removes the plain file. The recipient is
    in the manifest as the default of `CNPG_DUMP_AGE_RECIPIENT`, and the test holds it to
