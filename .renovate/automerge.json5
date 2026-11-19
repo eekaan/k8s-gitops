@@ -169,5 +169,12 @@
       matchFileNames: ["kubernetes/apps/base/piraeus-datastore/**"],
       automerge: false,
     },
+    {
+      // OpenShell is before 1.0 and releases about every week, and its sandbox runtime decides
+      // what a sandbox may do, so a person reads each release.
+      description: "OpenShell",
+      matchPackageNames: ["ghcr.io/nvidia/openshell/**"],
+      automerge: false,
+    },
   ],
 }

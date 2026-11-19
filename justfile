@@ -405,3 +405,11 @@ tools-image-publish:
 # Record the tools image at digest in versions.yaml, with the key of these inputs, once its signature verifies without credentials as the tools image workflow's on main in this repository for that key
 tools-image-pin digest:
     scripts/tools-image pin {{ quote(digest) }}
+
+# The image of OpenShell's sandbox runtime, whose capability probe runtime-check runs, at a stable release, pinned by the digest of its image index. Renovate moves the tag and the digest together, to stable releases only (.renovate/managers.json5), in the OpenShell group's pull request
+# renovate: datasource=docker depName=ghcr.io/nvidia/openshell/sandbox
+openshell_sandbox_image := "ghcr.io/nvidia/openshell/sandbox:0.1.9@sha256:e57d07cd6cc1fc314b80368d6b51ec6fbf825fb62cd8f081312941180846866f"
+
+# The image the Cilium agents run, for runtime-check's net and reference pods: it holds bash, getent, timeout and iproute2's ip, and is on every node. It is the flow recorder's image, tag and digest, which tests/network-audit.bats holds to the one the Cilium chart gives the agents and tests/runtime-check.bats holds this to; Renovate moves all three in the Cilium group's pull request
+# renovate: datasource=docker depName=quay.io/cilium/cilium
+cilium_agent_image := "quay.io/cilium/cilium:v1.20.4@sha256:20fe92e4c86641233a450098c158d2d29085f3419931ab6bf681d2485dedf16e"

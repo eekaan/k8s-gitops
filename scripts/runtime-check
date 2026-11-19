@@ -1,0 +1,768 @@
+#!/usr/bin/env bash
+# Says, check by check, whether a pod under a runtime class could host an OpenShell sandbox, through
+# the cluster's kubeconfig. CLASS is kata or gvisor, the RuntimeClasses of the node image's runtimes,
+# or none, the default runtime. Three pods run in the namespace runtime-check, which the run makes
+# and removes:
+#   probe       OpenShell's own capability probe: PROBE_IMAGE, whose entrypoint is the sandbox
+#               runtime, run as "capability-probe" under the class, with the security context
+#               OpenShell 0.1.9's Kubernetes driver gives a sandbox's workload pod
+#               (crates/openshell-driver-kubernetes/src/driver.rs, the pod's at L7497-7510 and the
+#               agent container's at L7584-7593; UID 10001 and the GID following it, src/config.rs
+#               L487 and L794-822) and a /tmp, as the image has none and the probe's Landlock check
+#               writes under the temporary directory. The probe prints its report as one JSON line
+#               and exits 0, or exits 1 with its diagnostic on standard error
+#               (crates/openshell-sandbox/src/main.rs, run_capability_probe and qualify_runtime).
+#   net         NET_IMAGE, the Cilium agents' image, which holds bash, getent, timeout and
+#               iproute2's ip, under the class, running the script below.
+#   reference   the same script under the default runtime, on net's node, for the MTU to compare.
+# probe and reference are made once net is scheduled, each required onto its node.
+# It prints one line naming the class, the node, the kernel release and the LSMs net saw and how
+# long after net was made its first output came, then pass or FAIL, as cluster-check prints them,
+# for:
+#   kernel    probe exited 0 and its last line is a report that says qualified;
+#   name      net resolved kube-dns.kube-system.svc, the resolver's Service, within 10 seconds;
+#   service   net opened a TCP connection to the first address that name gave, on 53, within 5;
+#   mtu       the MTU of net's default route, the route's own or else its device's, is the
+#             reference's;
+# and exits 0 only when all four pass. It makes no judgement about which class should pass.
+#
+# The namespace enforces the restricted Pod Security level and holds the tree's default deny and one
+# allow, net's and reference's queries and connections to the resolver on 53, so the flows are the
+# same whether the cluster audits or enforces its policies. An earlier run's namespace, known by the
+# label app.kubernetes.io/managed-by: runtime-check, is deleted first; one without the label is
+# refused. On every exit after the namespace is asked for, a FAIL, a failed call, a timeout, INT or
+# TERM among them, the namespace the run made is deleted and waited for, and one that stays is named
+# with the command that deletes it. Beside an earlier run's, the run deletes only what it made: each
+# deletion carries the uid of the namespace it means as a precondition the API server checks, the uid
+# the create answered with, or, when that answer did not come, the uid of the namespace there if it
+# carries the label, which may then be another checkout's run's. A signal that comes as the namespace
+# is created waits for that answer. A namespace another party made, found by the create or in the
+# run's place, is left alone, and the run says so; when none is there after a create that got no
+# answer, the run says one may yet come of it. The run judges only the pods it made, each known by the
+# uid its create answered with. Before it makes a pod it checks that the namespace it made is there
+# and not being deleted; as a create cannot be made conditional on the namespace's uid, another can
+# still take its place in between, and the run then fails. It reads its pods' logs by name, so once it
+# has read one it checks that its namespace is still the one it made, and when another has taken its
+# place, as when another checkout's run deletes it as an earlier run's and makes its own of the same
+# name, prints no check and fails. A run whose namespace went without its own deletion answered as
+# done fails too, as another party's deletion and a deletion whose answer was lost look alike. The run
+# holds the cluster's lock (lock_cluster), which binds this checkout's recipes alone.
+#
+# Each kubectl call is bounded by 30 seconds, and each wait (for an earlier run's namespace to go,
+# for the pods from the namespace's making to their end, and for the namespace to go at the end) by
+# RUNTIME_CHECK_TIMEOUT seconds (300), which is also each pod's active deadline. What a pod that did
+# not start or end says of itself, the probe's log lines and kubectl's errors pass through
+# redact_stream (scripts/lib/errors.sh): nothing printed holds an address, the API server's name or
+# a control character, and with CI set kubectl's errors go to
+# talos/<cluster>/clusterconfig/runtime-check.errors.log.
+# Usage: scripts/runtime-check PROBE_IMAGE NET_IMAGE CLASS [CLUSTER]
+set -euo pipefail
+
+here=$(dirname "$0")
+# shellcheck source=scripts/lib/cluster.sh
+. "$here/lib/cluster.sh"
+
+usage() {
+  infra_error "usage: runtime-check PROBE_IMAGE NET_IMAGE kata|gvisor|none [cluster]"
+  exit 2
+}
+
+# An image by its tag and the digest of what that tag names, as the justfile pins it.
+image_re='^[a-z0-9]+([._-][a-z0-9]+)*(:[0-9]+)?(/[a-z0-9]+([._-][a-z0-9]+)*)+:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}@sha256:[0-9a-f]{64}$'
+(($# == 3 || $# == 4)) || usage
+probe_image=$1 net_image=$2 class=$3
+for image in "$probe_image" "$net_image"; do
+  if [[ ! $image =~ $image_re ]]; then
+    infra_error "$(printable <<< "$image") is not an image pinned as name:tag@sha256:<64 hexadecimal digits>"
+    usage
+  fi
+done
+case $class in
+  kata | gvisor) label=$class ;;
+  none) label='the default runtime' ;;
+  *) usage ;;
+esac
+timeout=${RUNTIME_CHECK_TIMEOUT:-300}
+if ! require_seconds RUNTIME_CHECK_TIMEOUT "$timeout"; then
+  usage
+elif ((10#$timeout == 0)); then
+  infra_error "RUNTIME_CHECK_TIMEOUT is 0 seconds; the pods take at least one"
+  usage
+fi
+timeout=$((10#$timeout))
+poll=2
+
+# shellcheck source=scripts/cluster-env
+. "$here/cluster-env" "${4-}"
+start_errors_log "$cluster_dir/clusterconfig/${0##*/}.errors.log"
+
+namespace=runtime-check
+managed_by='app.kubernetes.io/managed-by'
+
+# kube VERB ARG...: kubectl VERB ARG..., bounded by 30 seconds, its standard output in last_output;
+# when it fails, its errors shown as report_errors shows them, without an address. Returns kubectl's
+# status.
+kube() {
+  local status=0
+  run_keeping_errors kubectl "$1" --request-timeout=30s "${@:2}" || status=$?
+  ((status == 0)) || report_errors kubectl
+  return "$status"
+}
+
+# delete_namespace UID: asks for the namespace to be deleted if its uid is UID, a precondition the API
+# server checks as it deletes, so the call deletes no namespace but the one meant.
+delete_namespace() {
+  # shellcheck disable=SC2016 # $uid is a jq variable.
+  kube delete --raw="/api/v1/namespaces/$namespace" --filename=- <<< "$(jq -n -c --arg uid "$1" '{apiVersion: "v1", kind: "DeleteOptions", preconditions: {uid: $uid}}')"
+}
+
+# gone_within SECONDS UID: waits until the namespace whose uid is UID is gone, at most SECONDS: a read
+# finds no namespace, or one with another uid, which sets other. Fails when it is not gone, or when it
+# cannot be read until then, showing kubectl's errors of the last read, once.
+gone_within() {
+  local deadline=$((SECONDS + $1)) uid
+  other=0
+  while :; do
+    if run_keeping_errors kubectl get --request-timeout=30s --ignore-not-found --output=json namespace "$namespace"; then
+      [[ -n $last_output ]] || return 0
+      if uid=$(jq -e -r '.metadata.uid | strings' <<< "$last_output" 2> /dev/null); then
+        if [[ $uid != "$2" ]]; then
+          other=1
+          return 0
+        fi
+      fi
+      last_errors=''
+    fi
+    if ((SECONDS >= deadline)); then
+      report_errors kubectl
+      return 1
+    fi
+    sleep "$poll"
+  done
+}
+
+# kubectl's errors pass through files of this run's own directory, which every exit removes, an
+# interrupted call's included.
+work=$(umask 077 && mktemp -d "${TMPDIR:-/tmp}/runtime-check.XXXXXXXXXX")
+TMPDIR=$work
+
+# made: whether the run has asked for the namespace, after which every exit deletes the namespace it
+# made; ours: the uid of that namespace, from the create's answer; create_errors: the create's errors.
+made=0 ours='' create_errors=''
+# finish STATUS: deletes the namespace the run made and waits until it is gone; one that stays is
+# named, with the command that deletes it, and fails the run. Without the create's answer, the
+# namespace there is the run's when it carries the label. A namespace that went without the run's
+# deletion of it answered as done fails the run too: another party's deletion, as when another
+# checkout's run deletes it as an earlier run's and makes its own, and a deletion whose answer was
+# lost look alike. Then names the step a failure was in, removes the run's directory, and exits.
+finish() {
+  local status=$1 during=$step label deleted=1
+  trap '' INT TERM HUP
+  if ((made)); then
+    step="deleting the namespace $namespace"
+    if [[ -z $ours ]]; then
+      if ! kube get --ignore-not-found --output=json namespace "$namespace"; then
+        infra_error "the namespace $namespace cannot be read, so whether the run made it is not known; if it carries the label $managed_by: runtime-check, delete it with: kubectl delete namespace $namespace"
+        ((status != 0)) || status=1
+        during=$step
+      elif [[ -n $last_output ]]; then
+        label=$(jq -r --arg key "$managed_by" '.metadata.labels[$key] // ""' <<< "$last_output" 2> /dev/null) || label=''
+        if [[ $label == runtime-check ]]; then
+          ours=$(jq -r '.metadata.uid // ""' <<< "$last_output" 2> /dev/null) || ours=''
+        else
+          infra_error "the namespace $namespace is on the cluster without the label $managed_by: runtime-check, so the run did not make it; it was left alone"
+        fi
+      elif [[ $create_errors != *'Error from server'* ]]; then
+        infra_error "no namespace $namespace is on the cluster, though the run asked for one and got no answer; one with the label $managed_by: runtime-check may yet come of that request: delete it with: kubectl delete namespace $namespace"
+      fi
+    fi
+    if [[ -n $ours ]]; then
+      # A deletion answered as done under the uid precondition found the namespace the run made still
+      # there, so no other had taken its place.
+      delete_namespace "$ours" || deleted=0
+      if ! gone_within "$timeout" "$ours"; then
+        infra_error "the namespace $namespace is still on the cluster after $timeout seconds; delete it with: kubectl delete namespace $namespace; if it is terminating already, its status conditions say what holds it: kubectl get namespace $namespace --output=yaml"
+        ((status != 0)) || status=1
+        during=$step
+      else
+        if ((!deleted)); then
+          infra_error "the namespace $namespace the run made is gone, and the run's deletion of it was not answered as done: another party deleted it, or the answer to that deletion was lost, and the run, unable to tell which, fails"
+          if ((status == 0)); then
+            status=1
+            during=$step
+          fi
+        fi
+        if ((other)); then
+          infra_error "the namespace $namespace on the cluster is not the one the run made; it was left alone"
+        fi
+      fi
+    fi
+    step=$during
+  fi
+  failed_step "$status"
+  rm -rf -- "$work"
+  exit "$status"
+}
+trap 'finish $?' EXIT
+# end_on_signals: INT, TERM and HUP end the run, each with the status a shell gives it.
+end_on_signals() {
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  trap 'exit 129' HUP
+}
+end_on_signals
+
+# check_failed REASON: ends the run with REASON.
+check_failed() {
+  infra_error "$1"
+  exit 1
+}
+
+step="checking what the run needs"
+complete=1
+require_commands kubectl jq date || complete=0
+require_kubeconfig || complete=0
+((complete))
+lock_cluster
+
+if [[ $class != none ]]; then
+  step="reading the RuntimeClass $class"
+  kube get --ignore-not-found --output=json runtimeclass "$class" || check_failed "the RuntimeClass $class cannot be read"
+  if [[ -z $last_output ]]; then
+    for check in kernel name service mtu; do
+      printf '%-4s  %s: %s\n' FAIL "$check" "the RuntimeClass $class is not on the cluster, so no pod was made"
+    done
+    exit 1
+  fi
+fi
+
+step="reading the namespace $namespace"
+kube get --ignore-not-found --output=json namespace "$namespace" || check_failed "the namespace $namespace cannot be read"
+if [[ -n $last_output ]]; then
+  if ! jq -e --arg key "$managed_by" '.metadata.labels[$key] == "runtime-check"' <<< "$last_output" > /dev/null 2>&1; then
+    check_failed "the namespace $namespace exists without the label $managed_by: runtime-check, so it is no earlier run's; nothing was changed"
+  fi
+  earlier=$(jq -r '.metadata.uid // ""' <<< "$last_output")
+  step="deleting an earlier run's namespace $namespace"
+  delete_namespace "$earlier" || check_failed "the earlier run's namespace $namespace could not be deleted"
+  gone_within "$timeout" "$earlier" || check_failed "the earlier run's namespace $namespace is still there after $timeout seconds"
+  ((other == 0)) || check_failed "the earlier run's namespace $namespace went, and another party made one in its place; it was left alone"
+fi
+
+# What net and reference run, in bash in the agents' image: one key=value line each, and no address
+# ever, as the cluster's logs ship the pods' output. The lookup's answer and the route stay in
+# variables, and standard error, where bash names the address of a connection that fails, is
+# discarded. The connection is opened on descriptor 3: Falco's rule "Redirect STDOUT/STDIN to
+# Network Connection in Container" watches a socket made standard input, output or error. The name
+# carries no cluster domain; the pod's search path completes it.
+read -r -d '' net_script << 'SCRIPT' || true
+exec 2> /dev/null
+printf 'kernel=%s\n' "$(uname -r)"
+lsm=$(cat /sys/kernel/security/lsm) || lsm=
+printf 'lsm=%s\n' "${lsm:--}"
+address=
+if answer=$(timeout 10 getent ahostsv4 kube-dns.kube-system.svc); then
+  address=${answer%%[[:space:]]*}
+  if [[ $address =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+    echo name=ok
+  else
+    address=
+    echo 'name=fail:the answer holds no IPv4 address'
+  fi
+else
+  case $? in
+    124) echo 'name=fail:no answer within 10 seconds' ;;
+    2) echo 'name=fail:the name was not found' ;;
+    *) echo 'name=fail:getent could not look it up' ;;
+  esac
+fi
+if [[ -z $address ]]; then
+  echo 'service=fail:no address'
+elif timeout 5 bash -c 'exec 3<> "/dev/tcp/$0/53"' "$address"; then
+  echo service=ok
+elif (($? == 124)); then
+  echo 'service=fail:no connection within 5 seconds'
+else
+  echo 'service=fail:the connection was refused or could not be made'
+fi
+route=$(ip -4 -o route show default)
+route=${route%%$'\n'*}
+set -f
+words=($route)
+set +f
+route_mtu=- device=-
+for ((i = 0; i < ${#words[@]}; i++)); do
+  case ${words[i]} in
+    dev) device=${words[i + 1]-} ;;
+    mtu)
+      value=${words[i + 1]-}
+      [[ $value != lock ]] || value=${words[i + 2]-}
+      [[ ! $value =~ ^[0-9]+$ ]] || route_mtu=$value
+      ;;
+  esac
+done
+[[ $device =~ ^[A-Za-z0-9_.-]{1,15}$ ]] || device=-
+device_mtu=-
+if [[ $device != - ]] && value=$(cat "/sys/class/net/$device/mtu") && [[ $value =~ ^[0-9]+$ ]]; then
+  device_mtu=$value
+fi
+printf 'route_mtu=%s\ndevice=%s\ndevice_mtu=%s\n' "$route_mtu" "$device" "$device_mtu"
+exit 0
+SCRIPT
+
+# The namespace; then, once the run has made it, its default deny, which is the tree's
+# (kubernetes/apps/base/security-system/networkpolicy-default-deny.yaml), and its one allow, which
+# leaves the denying to the default deny, as docs/kubernetes.md, Declaring an application's flows,
+# asks: net and reference reach the resolver on 53, UDP and TCP, and nothing else, and nothing
+# reaches any pod of it. They are two creates, as kubectl goes on past an object it cannot make: a
+# namespace that is already there gets no policy of the run's.
+# shellcheck disable=SC2016 # $namespace and $label are jq variables.
+namespace_manifest=$(jq -n -c --arg namespace "$namespace" --arg label "$managed_by" '{apiVersion: "v1", kind: "Namespace",
+  metadata: {name: $namespace, labels: {"pod-security.kubernetes.io/enforce": "restricted", ($label): "runtime-check"}}}')
+# shellcheck disable=SC2016 # $namespace is a jq variable.
+policies_manifest=$(jq -n -c --arg namespace "$namespace" '{apiVersion: "v1", kind: "List", items: [
+  {apiVersion: "networking.k8s.io/v1", kind: "NetworkPolicy", metadata: {name: "default-deny", namespace: $namespace},
+    spec: {podSelector: {}, policyTypes: ["Ingress", "Egress"]}},
+  {apiVersion: "cilium.io/v2", kind: "CiliumNetworkPolicy", metadata: {name: "runtime-check", namespace: $namespace},
+    spec: {endpointSelector: {matchLabels: {"app.kubernetes.io/name": "runtime-check"},
+        matchExpressions: [{key: "app.kubernetes.io/component", operator: "In", values: ["net", "reference"]}]},
+      enableDefaultDeny: {ingress: false, egress: false},
+      egress: [{toEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": "kube-system", "k8s:k8s-app": "kube-dns"}}],
+        toPorts: [{ports: [{port: "53", protocol: "UDP"}, {port: "53", protocol: "TCP"}]}]}]}}]}')
+
+# The pods. pod: what the three share, each under its class (none: no runtimeClassName) and, given
+# a node, required onto it. net: the agents' image running the script, restricted, with a read-only
+# root and no volume. probe: OpenShell 0.1.9's workload pod as far as the probe can tell it, the
+# pod's security context of driver.rs L7497-7510 and the agent container's of L7584-7593, which sets
+# no read-only root, the image's entrypoint run as capability-probe, and /tmp, the one place the
+# probe writes.
+# shellcheck disable=SC2016 # The $ names are jq variables.
+pods_jq='def pod($name; $class; $node; $spec):
+    {apiVersion: "v1", kind: "Pod",
+     metadata: {name: $name, namespace: $namespace,
+       labels: {"app.kubernetes.io/name": "runtime-check", "app.kubernetes.io/component": $name}},
+     spec: ({restartPolicy: "Never", activeDeadlineSeconds: $deadline, automountServiceAccountToken: false,
+         enableServiceLinks: false}
+       + (if $class == "none" then {} else {runtimeClassName: $class} end)
+       + (if $node == "" then {} else {affinity: {nodeAffinity: {requiredDuringSchedulingIgnoredDuringExecution: {
+           nodeSelectorTerms: [{matchFields: [{key: "metadata.name", operator: "In", values: [$node]}]}]}}}} end)
+       + $spec)};
+  def net($name; $class; $node):
+    pod($name; $class; $node; {
+      securityContext: {runAsNonRoot: true, runAsUser: 65532, runAsGroup: 65532, seccompProfile: {type: "RuntimeDefault"}},
+      containers: [{name: "net", image: $net_image, imagePullPolicy: "IfNotPresent", command: ["bash", "-c", $script],
+        resources: {requests: {cpu: "10m", memory: "32Mi"}, limits: {memory: "64Mi"}},
+        securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: ["ALL"]}}}]});
+  def probe($class; $node):
+    pod("probe"; $class; $node; {
+      securityContext: {runAsUser: 10001, runAsGroup: 10001, runAsNonRoot: true, fsGroup: 10001,
+        fsGroupChangePolicy: "OnRootMismatch", supplementalGroups: [], supplementalGroupsPolicy: "Strict",
+        seccompProfile: {type: "RuntimeDefault"}, sysctls: [{name: "net.ipv4.ip_unprivileged_port_start", value: "0"}]},
+      containers: [{name: "probe", image: $probe_image, imagePullPolicy: "IfNotPresent", args: ["capability-probe"],
+        resources: {requests: {cpu: "50m", memory: "64Mi"}, limits: {memory: "128Mi"}},
+        securityContext: {runAsUser: 10001, runAsGroup: 10001, runAsNonRoot: true, allowPrivilegeEscalation: false,
+          capabilities: {drop: ["ALL"]}},
+        volumeMounts: [{name: "tmp", mountPath: "/tmp"}]}],
+      volumes: [{name: "tmp", emptyDir: {sizeLimit: "16Mi"}}]});'
+# pods_manifest EXPRESSION [NODE]: the pods EXPRESSION makes of the definitions above, with net's node
+# NODE, as one list.
+pods_manifest() {
+  jq -n -c --arg namespace "$namespace" --argjson deadline "$timeout" --arg class "$class" --arg node "${2-}" \
+    --arg probe_image "$probe_image" --arg net_image "$net_image" --arg script "$net_script" \
+    "$pods_jq"' {apiVersion: "v1", kind: "List", items: ['"$1"']}'
+}
+
+step="making the namespace $namespace"
+# A signal that comes while the namespace is created ends the run once the create's answer is read,
+# as that answer says whether the run made the namespace; Ctrl-C, which reaches kubectl too, ends the
+# create without one.
+signal=0
+trap 'signal=130' INT
+trap 'signal=143' TERM
+trap 'signal=129' HUP
+made=1 namespace_created=0
+kube create --filename=- --output=json <<< "$namespace_manifest" && namespace_created=1
+create_errors=$last_errors
+# AlreadyExists is the API server's answer that another party made the namespace after the run's read
+# found none: it is theirs, and not the run's to delete.
+if ((namespace_created)); then
+  ours=$(jq -r '.metadata.uid // ""' <<< "$last_output" 2> /dev/null) || ours=''
+elif [[ $create_errors == *'Error from server (AlreadyExists)'* ]]; then
+  made=0
+  infra_error "the namespace $namespace was made by someone else after the run found none, so it is not this run's; it was left alone"
+fi
+end_on_signals
+((signal == 0)) || exit "$signal"
+((made)) || exit 1
+((namespace_created)) || check_failed "the namespace $namespace could not be created"
+[[ -n $ours ]] || check_failed "the answer to the creation of the namespace $namespace names no uid"
+step="making the policies of the namespace $namespace"
+kube create --filename=- --output=name <<< "$policies_manifest" ||
+  check_failed "the policies of the namespace $namespace could not be created"
+
+# The pods' wait, from here to their end. The API server refuses a pod until the namespace's
+# ServiceAccount default exists, which the cluster makes for it, so the run waits for that first.
+deadline=$((SECONDS + timeout))
+step="waiting for the ServiceAccount $namespace/default"
+until kube get --namespace="$namespace" --ignore-not-found --output=json serviceaccount default && [[ -n $last_output ]]; do
+  ((SECONDS < deadline)) || check_failed "the ServiceAccount $namespace/default was not made within $timeout seconds"
+  sleep "$poll"
+done
+
+# is_ours CONSEQUENCE: ends the run, saying CONSEQUENCE, unless the namespace on the cluster is the
+# one it made, by its uid. Another party that deleted it, as another checkout's run deletes an earlier
+# run's, may have made one in its place.
+is_ours() {
+  kube get --ignore-not-found --output=json namespace "$namespace" || check_failed "the namespace $namespace cannot be read"
+  [[ -n $last_output && $(jq -r '.metadata.uid // ""' <<< "$last_output" 2> /dev/null) == "$ours" ]] ||
+    check_failed "the namespace $namespace the run made is no longer on the cluster, so $1"
+}
+
+# still_ours: ends the run unless the namespace on the cluster is the one it made, and no deletion of
+# it is under way, as a party that deletes it may make one in its place once it has gone, and the run
+# makes no pod in that.
+still_ours() {
+  is_ours 'the run makes no more pods'
+  jq -e '.status.phase == "Active" and .metadata.deletionTimestamp == null' <<< "$last_output" > /dev/null 2>&1 ||
+    check_failed "the namespace $namespace the run made is being deleted, so the run makes no more pods"
+}
+
+# The pods the run made, by name, each with the uid its create answered with. A pod of the same name
+# with another uid is not the run's, as when another party's namespace has taken the place of the
+# run's, and the run judges nothing of it.
+made_uids='{}'
+# record_uids NAME...: adds the pods NAME..., from the answer of the create that made them.
+record_uids() {
+  local name uid
+  for name; do
+    uid=$(jq -s -r --arg name "$name" '[.[] | if .kind == "List" then .items[] else . end
+        | select(.kind == "Pod" and .metadata.name == $name) | .metadata.uid | strings] | first // ""' <<< "$last_output" 2> /dev/null) || uid=''
+    [[ -n $uid ]] || check_failed "the answer to the creation of the pod $name names no uid"
+    made_uids=$(jq -c --arg name "$name" --arg uid "$uid" '.[$name] = $uid' <<< "$made_uids")
+  done
+}
+
+step="making the pod $namespace/net"
+still_ours
+# shellcheck disable=SC2016 # $class is a jq variable.
+kube create --namespace="$namespace" --filename=- --output=json <<< "$(pods_manifest 'net("net"; $class; "")')" ||
+  check_failed "the pod net could not be created"
+record_uids net
+
+# read_pods: the pods of the namespace, as one list, into pods.
+read_pods() {
+  kube get --namespace="$namespace" --output=json pods || check_failed "the pods of $namespace cannot be read"
+  pods=$last_output
+}
+
+# The pod NAME of the list on standard input, if it is the run's: a jq filter that takes $name and
+# $made.
+# shellcheck disable=SC2016 # $name and $made are jq variables.
+mine='.items[] | select(.metadata.name == $name and .metadata.uid == $made[$name])'
+
+# state NAME: what the pod NAME came to, one word: absent (not on the cluster: never made, deleted, or
+# another party's of that name), unscheduled, ran (its container ended, so its log is whole), ended
+# (without its container running), running (its container did not end) or waiting (its container
+# never started).
+state() {
+  jq -r --arg name "$1" --argjson made "$made_uids" "[$mine]"' | first
+    | if . == null then "absent"
+      elif (.spec.nodeName // "") == "" then "unscheduled"
+      elif ((.status.containerStatuses // [])[0].state.terminated // null) != null then "ran"
+      elif .status.phase == "Failed" or .status.phase == "Succeeded" then "ended"
+      elif ((.status.containerStatuses // [])[0].state.running // null) != null then "running"
+      else "waiting" end' <<< "$pods"
+}
+
+# exit_code NAME: the exit code of the pod NAME's container, which has ended.
+exit_code() {
+  jq -r --arg name "$1" --argjson made "$made_uids" "$mine"' | .status.containerStatuses[0].state.terminated.exitCode' <<< "$pods"
+}
+
+step="waiting for the pod $namespace/net to be scheduled"
+while :; do
+  read_pods
+  [[ $(state net) == unscheduled ]] || break
+  ((SECONDS < deadline)) || break
+  sleep "$poll"
+done
+node=$(jq -r --arg name net --argjson made "$made_uids" "[$mine"' | .spec.nodeName // empty] | first // ""' <<< "$pods")
+
+made_pods=(net)
+if [[ -n $node ]]; then
+  # A node's name reaches the manifest and the output only in the shape of one, never an address's.
+  if [[ ! $node =~ ^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$ || $node =~ ^[0-9.]+$ ]]; then
+    check_failed "the node net was scheduled on has no node's name"
+  fi
+  step="making the pods $namespace/probe and $namespace/reference"
+  still_ours
+  # shellcheck disable=SC2016 # $class and $node are jq variables.
+  kube create --namespace="$namespace" --filename=- --output=json <<< "$(pods_manifest 'probe($class; $node), net("reference"; "none"; $node)' "$node")" ||
+    check_failed "the pods probe and reference could not be created"
+  record_uids probe reference
+  made_pods+=(probe reference)
+  step="waiting for the pods of $namespace to end"
+  while :; do
+    read_pods
+    running=()
+    for pod in "${made_pods[@]}"; do
+      case $(state "$pod") in
+        running | waiting | unscheduled) running+=("$pod") ;;
+      esac
+    done
+    ((${#running[@]} > 0)) || break
+    if ((SECONDS >= deadline)); then
+      infra_error "the pods still running after $timeout seconds: $(printf '%s\n' "${running[@]}" | paste -sd, - | sed 's/,/, /g')"
+      break
+    fi
+    sleep "$poll"
+  done
+fi
+
+step="reading the namespace's events"
+events='{"items": []}'
+if kube get --namespace="$namespace" --output=json events; then
+  events=$last_output
+fi
+
+# result VERDICT CHECK WHY: one check's line, pass or FAIL, as cluster-check prints them.
+failures=0
+result() {
+  printf '%-4s  %s: %s\n' "$1" "$2" "$3"
+  [[ $1 == pass ]] || failures=$((failures + 1))
+}
+
+# indented: the lines on standard input, each through redact_stream, indented below a check's line.
+indented() {
+  local line
+  redact_stream | while IFS= read -r line; do
+    printf '      %s\n' "$line"
+  done
+}
+
+# details NAME: what the pod NAME says of itself, a line each, at most 8: its status's reason and
+# message, its scheduling condition when false, its container's state when it is not running, and
+# the reason and message of the namespace's Warning events for it, each by its uid.
+# shellcheck disable=SC2016 # $name and $made are jq variables.
+details_jq='def text($reason; $message): [($reason // ""), ($message // "")] | map(select(. != "")) | join(": ");
+  ([.[0] | '"$mine"'] | first) as $pod
+  | (if $pod == null then empty else
+      (if ($pod.status.reason // $pod.status.message // null) != null
+       then "pod: \($pod.status.phase // "Unknown"), \(text($pod.status.reason; $pod.status.message))" else empty end),
+      ($pod.status.conditions // [] | .[] | select(.type == "PodScheduled" and .status == "False")
+        | "PodScheduled: \(text(.reason; .message))"),
+      ($pod.status.containerStatuses // [] | .[] | . as $c | .state
+        | if .waiting then "container \($c.name): waiting, \(text(.waiting.reason; .waiting.message))"
+          elif .terminated then "container \($c.name): terminated with exit code \(.terminated.exitCode), \(text(.terminated.reason; .terminated.message))"
+          else empty end)
+    end),
+  (.[1].items // [] | .[] | select(.type == "Warning" and .involvedObject.name == $name and .involvedObject.uid == $made[$name])
+    | "event \(text(.reason; .message))")'
+details() {
+  jq -r -s --arg name "$1" --argjson made "$made_uids" "$details_jq" <(printf '%s' "$pods") <(printf '%s' "$events") 2> /dev/null | head -n 8
+}
+
+# no_result CHECK NAME: the pod NAME gave CHECK no result: the check fails saying why, and what the
+# pod says of itself is shown below the first check that names it. probe and reference are made only
+# once net is scheduled, so net is the reason when they were not made; a pod the run made that is not
+# there was deleted.
+declare -A shown=()
+no_result() {
+  local why
+  case $(state "$2") in
+    absent)
+      if [[ " ${made_pods[*]} " != *" $2 "* ]]; then
+        no_result "$1" net
+        return
+      fi
+      why="the pod $2 is no longer on the cluster"
+      ;;
+    unscheduled) why="the pod $2 was not scheduled within $timeout seconds" ;;
+    ran) why="the script of the pod $2 exited $(exit_code "$2")" ;;
+    ended) why="the pod $2 ended without running its container" ;;
+    running) why="the pod $2 did not end within $timeout seconds" ;;
+    *) why="the pod $2 did not start within $timeout seconds" ;;
+  esac
+  result FAIL "$1" "$why"
+  if [[ -z ${shown[$2]-} ]]; then
+    shown[$2]=1
+    details "$2" | indented
+  fi
+}
+
+# The lines net and reference printed, by key, and the keys a pod printed more than once.
+# shellcheck disable=SC2034 # read_lines and value_of reach net_lines and reference_lines by name.
+declare -A net_lines=() reference_lines=() repeated=() read_from=()
+first_output=''
+# read_lines POD [--timestamps]: POD's log, read when its script ended as it does, with exit code 0.
+read_lines() {
+  local pod=$1 text key
+  local -n into=${1}_lines
+  [[ $(state "$pod") == ran && $(exit_code "$pod") == 0 ]] || return 0
+  kube logs --namespace="$namespace" --container=net "${@:2}" "pod/$pod" || return 0
+  read_from[$pod]=1
+  while IFS= read -r text; do
+    if [[ ${2-} == --timestamps ]]; then
+      [[ -n $first_output ]] || first_output=${text%% *}
+      text=${text#* }
+    fi
+    [[ $text == *=* ]] || continue
+    key=${text%%=*}
+    [[ $key =~ ^[a-z_]+$ ]] || continue
+    [[ -z ${into["$key"]+set} ]] || repeated[$pod.$key]=1
+    into["$key"]=${text#*=}
+  done <<< "$last_output"
+}
+step="reading the pods' logs"
+read_lines net --timestamps
+read_lines reference
+# probe's log, whole once its container ended, its last line the probe's report.
+probe_log='' probe_log_read=0
+if [[ $(state probe) == ran ]] && kube logs --namespace="$namespace" --container=probe pod/probe; then
+  probe_log=$last_output probe_log_read=1
+fi
+# The logs go by the pods' names, which another party's pods take when its namespace takes the place
+# of the run's; the rest the run judges is matched by uid. A namespace that is still the one the run
+# made after the reads was there throughout them, and no other took its place.
+if ((${#read_from[@]} > 0 || probe_log_read)); then
+  step="checking that the namespace $namespace is the one the run made"
+  is_ours "the logs the run read by its pods' names may be another party's, and it judges none of them"
+fi
+
+# value_of POD KEY RE: the value of POD's KEY line when it printed it once and it matches RE, in
+# value; otherwise why not, in why, and fails. POD's log was read.
+value_of() {
+  local -n lines=${1}_lines
+  value='' why=''
+  if [[ -z ${read_from[$1]-} ]]; then
+    why="the log of the pod $1 could not be read"
+  elif [[ -z ${lines[$2]+set} ]]; then
+    why="$1 printed no $2 line"
+  elif [[ -n ${repeated[$1.$2]-} ]]; then
+    why="$1 printed its $2 line more than once"
+  elif [[ ! ${lines[$2]} =~ $3 ]]; then
+    why="$1's $2 line is malformed"
+  else
+    value=${lines[$2]}
+    return 0
+  fi
+  return 1
+}
+
+# gave_result POD: whether POD's script ran to its end, so that its lines decide its checks.
+gave_result() {
+  [[ $(state "$1") == ran && $(exit_code "$1") == 0 ]]
+}
+
+# The header, from what net printed: a value not of its kind's shape is not shown.
+kernel=unknown lsms=unknown seconds='no output'
+if gave_result net; then
+  if value_of net kernel '^[A-Za-z0-9][A-Za-z0-9._+~-]{0,63}$' && [[ ! $value =~ [0-9]{1,3}(\.[0-9]{1,3}){3} ]]; then
+    kernel=$value
+  fi
+  if value_of net lsm '^(-|[a-z0-9_]{1,32}(,[a-z0-9_]{1,32}){0,31})$'; then
+    lsms=$value
+    [[ $lsms != - ]] || lsms='not readable in the pod'
+  fi
+  if [[ -n $first_output ]] && first=$(date -u -d "$first_output" +%s 2> /dev/null) &&
+    created=$(date -u -d "$(jq -r --arg name net --argjson made "$made_uids" "$mine"' | .metadata.creationTimestamp' <<< "$pods")" +%s 2> /dev/null); then
+    seconds="first output $((first - created))s after the pod was created"
+  fi
+fi
+where="node $node"
+[[ -n $node ]] || where='no node'
+printf 'runtime-check: %s on %s: kernel %s, LSMs %s, %s\n' "$label" "$where" "$kernel" "$lsms" "$seconds"
+
+step="checking $label"
+# kernel: OpenShell's own probe, by its exit code and its report, the last line of its log.
+if [[ $(state probe) != ran ]]; then
+  no_result kernel probe
+elif ((!probe_log_read)); then
+  result FAIL kernel "the log of the pod probe could not be read"
+else
+  log=$probe_log
+  code=$(exit_code probe)
+  if [[ $code == 0 ]] && qualified=$(jq -e -r -s 'select(length == 1) | .[0]
+      | select(type == "object" and .qualified == true and (.landlock_abi | type == "number" and . == floor and . > 0)
+          and .seccomp_notification == true and .seccomp_addfd_send == true and .task_memory_copy == true)
+      | "Landlock ABI \(.landlock_abi), seccomp user notification with addfd send, task-memory copy"' <<< "${log##*$'\n'}" 2> /dev/null); then
+    result pass kernel "OpenShell's capability probe qualified the runtime: $qualified"
+  else
+    if [[ $code == 0 ]]; then
+      what="exited 0 without a report that qualifies the runtime"
+    elif [[ $code =~ ^[0-9]{1,3}$ ]]; then
+      what="exited $code"
+    else
+      what="ended with no exit code"
+    fi
+    if [[ -n $log ]]; then
+      result FAIL kernel "OpenShell's capability probe $what; the end of its log:"
+      tail -n 8 <<< "$log" | indented
+    else
+      result FAIL kernel "OpenShell's capability probe $what and printed nothing"
+    fi
+    # The probe exits 0 or 1 itself; any other end, a kill for memory or a container that could not
+    # start among them, and a probe that printed nothing are told by the pod.
+    if [[ -z $log || ($code != 0 && $code != 1) ]]; then
+      details probe | indented
+    fi
+  fi
+fi
+
+# name and service: net's lines.
+for check in name service; do
+  if ! gave_result net; then
+    no_result "$check" net
+  elif ! value_of net "$check" '^(ok|fail:.+)$'; then
+    result FAIL "$check" "$why"
+  elif [[ $check == name && $value == ok ]]; then
+    result pass name "kube-dns.kube-system.svc resolved within 10 seconds"
+  elif [[ $check == name ]]; then
+    result FAIL name "kube-dns.kube-system.svc did not resolve: $(redact_stream <<< "${value#fail:}")"
+  elif [[ $value == ok ]]; then
+    result pass service "a TCP connection to the resolver's Service address on port 53 opened within 5 seconds"
+  else
+    result FAIL service "no TCP connection to the resolver's Service address on port 53: $(redact_stream <<< "${value#fail:}")"
+  fi
+done
+
+# mtu: the MTU of each pod's default route, the route's own or else its device's.
+# effective POD: POD's MTU and where it came from, in mtu and from; or why not, in why.
+effective() {
+  local route device
+  mtu='' from=''
+  value_of "$1" route_mtu '^(-|[0-9]{1,6})$' || return 1
+  route=$value
+  value_of "$1" device '^(-|[A-Za-z][A-Za-z0-9_.-]{0,14})$' || return 1
+  device=$value
+  value_of "$1" device_mtu '^(-|[0-9]{1,6})$' || return 1
+  if [[ $route != - ]]; then
+    mtu=$route from='from the route'
+  elif [[ $value != - ]]; then
+    mtu=$value from="from the device $device"
+  elif [[ $device != - ]]; then
+    why="the default route's MTU cannot be read in $1, from the route or the device $device"
+    return 1
+  else
+    why="the default route's MTU cannot be read in $1, which found no default route"
+    return 1
+  fi
+}
+if ! gave_result net; then
+  no_result mtu net
+elif ! effective net; then
+  result FAIL mtu "$why"
+else
+  net_mtu=$mtu net_from=$from
+  if ! gave_result reference; then
+    no_result mtu reference
+  elif ! effective reference; then
+    result FAIL mtu "$why"
+  elif [[ $net_mtu == "$mtu" ]]; then
+    result pass mtu "the default route's MTU is $net_mtu in net, $net_from, and $mtu in reference, $from"
+  else
+    result FAIL mtu "the default route's MTU is $net_mtu in net, $net_from, and $mtu in reference, $from"
+  fi
+fi
+
+((failures == 0))

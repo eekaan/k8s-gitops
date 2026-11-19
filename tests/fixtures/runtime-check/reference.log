@@ -1,0 +1,7 @@
+kernel=6.18.0
+lsm=-
+name=ok
+service=ok
+route_mtu=1400
+device=eth0
+device_mtu=1450
