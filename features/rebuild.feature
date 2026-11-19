@@ -4,7 +4,7 @@ Feature: Rebuilding the cluster
   Scenario: The rebuild runbook links every restore the runbooks hold, the secret store's before what reads it
     Given the "## Restoring" headings of the runbooks, and the runbooks whose title begins with Restoring
     When docs/runbooks/rebuild.md is read
-    Then it links each of them by its anchor, and in "Building it again" the hold of the databases' backups is merged and published before just cluster-flux, the old seal key goes in place in the step that runs just cluster-flux, OpenBao's restore comes before the volumes', and the volumes' before the databases', and in "Taking it down" just cluster-last-copies comes before just cluster-destroy
+    Then it links each of them by its anchor, and in "Building it again" the hold of the databases' backups is merged and published before just cluster-flux, the old seal key goes in place in the step that runs just cluster-flux, which after a seal-key rotation takes the custody file just bao-seal-keep wrote, writes the previous key's Secret too and links the rotation, OpenBao's restore comes before the volumes', and the volumes' before the databases', and in "Taking it down" just cluster-last-copies comes before just cluster-destroy
 
   Scenario: The rebuild runbook names every database the cluster's render builds, and how each comes back
     Given the render of lab-sto2
@@ -17,9 +17,9 @@ Feature: Rebuilding the cluster
     Then it takes, in this order, a snapshot of the secret store by a Job from its CronJob, checked with openbao-snapshot-check; for each database a dump by a Job from its dump CronJob, checked with postgres-dump-check, a WAL segment switched on its primary, the newest complete one even where nothing was written since the last switch, and waited for until the archiver has archived it, and its ObjectStore's recovery window; and for each volume a backup by VolSync's manual trigger, once no backup of it runs, while the Kustomization that owns it is suspended, resumed afterwards; every copy is newer than the run, every kubectl call it makes itself but exec is made with a request timeout, and it prints one line per copy: the snapshot's name, each database's dump and the segment and time its WAL is archived through, and each volume's backup time
 
   Scenario: A custody file that is missing, does not open or does not hold what the cluster holds stops the last copies before any is taken, and is named
-    Given a running cluster and the three custody files, the Talos age key and the Flux age key
-    When one file is missing, is not where only the operator can have written it, does not open with the Talos age key or holds another key than the cluster holds for any one of its databases or volumes, or an age key is missing or is not the one its .sops.yaml encrypts to, and just cluster-last-copies runs
-    Then it exits non-zero naming that file or key by its role, having created no Job, patched nothing, suspended nothing and run nothing in a pod
+    Given a running cluster and the three custody files, the Talos age key and the Flux age key, and the same after a seal-key rotation, its current key openbao-seal-2 and its previous key openbao-seal-1
+    When one file is missing, is not where only the operator can have written it, does not open with the Talos age key or holds another key than the cluster holds for any one of its databases or volumes, or an age key is missing or is not the one its .sops.yaml encrypts to, or after the rotation the OpenBao custody file is the one written before it, and just cluster-last-copies runs
+    Then it exits non-zero naming that file or key by its role, the older OpenBao custody file with bao-seal-restore's reason on the lines above and each seal Secret by its id, having created no Job, patched nothing, suspended nothing and run nothing in a pod, while after the rotation the custody file bao-seal-keep wrote passes the comparison
 
   Scenario: A last copy that fails, or is not newer than the run, fails the recipe naming it, and what it suspended is resumed
     Given a running cluster and the custody files of what it holds

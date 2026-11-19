@@ -20,11 +20,17 @@ member's readiness probe is `bao status`, which fails while it is sealed, so Rea
 Look at first: `kubectl --namespace openbao get pods`, and the member's log,
 `kubectl --namespace openbao logs <pod>`, which says why it could not unseal or rejoin.
 
-Usually: the seal key's Secret `openbao-seal-1` is missing or changed, so the member cannot unseal
-([bringing the seal key back](openbao.md#bringing-the-seal-key-back)); the member started with data
-of another cluster ([a member that does not rejoin](openbao.md#a-member-that-does-not-rejoin)); or
-its volume is not attached to the worker it was moved to yet, in which case the pod is Pending
-and the alert clears by itself.
+Usually: the Secret of a seal key the stanza names, `openbao-seal-1` today and after a rotation the
+previous key's too, is missing or changed, so the member cannot unseal
+([bringing the seal key back](openbao.md#bringing-the-seal-key-back)); during a rotation of the seal
+key, the member waits for the new key's Secret, which External Secrets has not written yet, or its
+pod is from before the rotation and restarted after a member on the new configuration took the lead
+and sealed the root key with the new key, which that pod mounts no Secret of, so it cannot start or
+unseal until the rollout replaces it, or the release was rolled back or reverted to the stanza from
+before the rotation, which holds no key of the new id, and is taken forward again as
+[Rotating](openbao.md#rotating) says; the member started with data of another cluster ([a member that does not rejoin](openbao.md#a-member-that-does-not-rejoin)); or its
+volume is not attached to the worker it was moved to yet, in which case the pod is Pending and the
+alert clears by itself.
 
 ## OpenBaoNoActiveMember
 

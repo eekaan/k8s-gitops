@@ -8,7 +8,8 @@
 #                       ReplicationSource's status is made up here, below, and a Kustomization's
 #                       spec.suspend is true while the fake flux keeps it suspended
 #   cluster/<kind>.<namespace>.<name>.json
-#                       an object read by name: secret, objectstore; absent, it is not found
+#                       an object read by name: secret, configmap, objectstore; absent, it is not
+#                       found
 #   jobs/<namespace>.<job>  a Job created from a CronJob, whose name the file holds
 #   recipient, real-age, prefix, snapshot.plain, dump.plain
 #                       what a created Job uploads: the plain snapshot or dump, encrypted with the
@@ -141,7 +142,7 @@ case "$1 $2" in
       cat "$state/cluster/$kind.json"
     fi
     ;;
-  "get secret" | "get objectstores.barmancloud.cnpg.io")
+  "get secret" | "get configmap" | "get objectstores.barmancloud.cnpg.io")
     kind=${2%%.*}
     kind=${kind%s}
     file=$state/cluster/$kind.$namespace.$3.json
