@@ -59,7 +59,7 @@ Feature: Continuous integration
 
   Scenario: A test file without a recorded time stops the tests, naming the command that records it
     Given a copy of the justfile, scripts/ and tests/ with a new test file the record lacks, and a record line for a file that is gone
-    When each part of the bats tests the groups run, such as just test 1/6, runs with a recording bats
+    When each part of the bats tests the groups run, such as just test 1/8, runs with a recording bats
     Then each ends non-zero, bats was never called, and the output names the new file with just test-time tests/<name>.bats and the gone file's line, saying to delete it or run just test-times-record
 
   Scenario: Each test file prints how long it took, and the record is written from what a run printed

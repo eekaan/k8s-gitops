@@ -157,14 +157,14 @@ current. A new version alone leaves the record as it is. With [mise](https://mis
   checkout are judged on the same commits. The group `signatures` runs `just signatures-verify`
   alone, which asks the registries anonymously whether each source the tree pins is signed as its
   row says, so a registry out of reach fails it and leaves `static` as it is. The groups `tests-1`
-  to `tests-6` each run a sixth of the bats tests by recorded time.
+  to `tests-8` each run an eighth of the bats tests by recorded time.
 - The groups are the dependencies of the `checks` recipe, and a group's checks are its own
   dependencies; a new check goes into exactly one group, and then runs in `just checks`, in
   `just ci` and in CI.
 - `just test` runs the bats tests but the hermetic ones and the namespace one, one bats run per test
   file, the tests of each file side by side (a file whose tests share state runs them one at a time,
   and says why), and after each file prints how long it took, `test: tests/<name>.bats took <N>s`;
-  `just test 2/6` runs the second of six parts of the test files, which are split by the seconds
+  `just test 2/8` runs the second of eight parts of the test files, which are split by the seconds
   each took as `tests/times.tsv` records them: the heaviest first, each to the part with the least
   recorded time so far, so the parts take about as long. A new test file gets its time with
   `just test-time tests/<name>.bats`, which runs the files given and writes their times there; until

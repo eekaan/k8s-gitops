@@ -84,7 +84,7 @@ signatures-verify:
 catalogue-dependencies:
     scripts/catalogue-dependencies
 
-# Run the bats tests, except those tagged hermetic, which run just ci and need a container runtime, and those tagged namespace, which need unprivileged user namespaces (just edge-forward-check), one bats run per test file, each followed by the line saying how long it took (scripts/test-run). A shard such as 2/6 runs the second of six parts of the test files, split by the seconds each took as tests/times.tsv records them: the heaviest first, each to the part whose recorded total is lowest so far, so the parts take about as long. Before bats runs, every part fails while a test file has no line in the record, which just test-time writes, a line names a file tests/ no longer has, a second line names a file, or a line is not a test file, a tab and its whole seconds
+# Run the bats tests, except those tagged hermetic, which run just ci and need a container runtime, and those tagged namespace, which need unprivileged user namespaces (just edge-forward-check), one bats run per test file, each followed by the line saying how long it took (scripts/test-run). A shard such as 2/8 runs the second of eight parts of the test files, split by the seconds each took as tests/times.tsv records them: the heaviest first, each to the part whose recorded total is lowest so far, so the parts take about as long. Before bats runs, every part fails while a test file has no line in the record, which just test-time writes, a line names a file tests/ no longer has, a second line names a file, or a line is not a test file, a tab and its whole seconds
 [script]
 test shard='1/1':
     set -o pipefail
@@ -207,7 +207,7 @@ test-times-record run='':
     scripts/test-times < "$logs"
 
 # Run every check that needs no credentials with the tools on this machine, group by group
-checks: static signatures tests-1 tests-2 tests-3 tests-4 tests-5 tests-6
+checks: static signatures tests-1 tests-2 tests-3 tests-4 tests-5 tests-6 tests-7 tests-8
 
 # The groups of checks are the dependencies of checks, and each group's checks its own dependencies: just ci runs every group side by side in containers of its own, and CI runs each as a job of its own. A check, with whatever it depends on, belongs to one group only, or it would run twice.
 # The checks other than the bats tests, the cheapest and most basic first
@@ -216,23 +216,29 @@ static: tools-check check-literals check-commit-literals check-conflict-markers 
 # The verification of the sources' signatures against the registries, a group of its own: a registry out of reach fails it and leaves static's result as it is
 signatures: signatures-verify
 
-# The first of six parts of the bats tests, split by the seconds each test file took (tests/times.tsv)
-tests-1: (test '1/6')
+# The first of eight parts of the bats tests, split by the seconds each test file took (tests/times.tsv)
+tests-1: (test '1/8')
 
-# The second of six parts of the bats tests, split by the seconds each test file took (tests/times.tsv)
-tests-2: (test '2/6')
+# The second of eight parts of the bats tests, split by the seconds each test file took (tests/times.tsv)
+tests-2: (test '2/8')
 
-# The third of six parts of the bats tests, split by the seconds each test file took (tests/times.tsv)
-tests-3: (test '3/6')
+# The third of eight parts of the bats tests, split by the seconds each test file took (tests/times.tsv)
+tests-3: (test '3/8')
 
-# The fourth of six parts of the bats tests, split by the seconds each test file took (tests/times.tsv)
-tests-4: (test '4/6')
+# The fourth of eight parts of the bats tests, split by the seconds each test file took (tests/times.tsv)
+tests-4: (test '4/8')
 
-# The fifth of six parts of the bats tests, split by the seconds each test file took (tests/times.tsv)
-tests-5: (test '5/6')
+# The fifth of eight parts of the bats tests, split by the seconds each test file took (tests/times.tsv)
+tests-5: (test '5/8')
 
-# The sixth of six parts of the bats tests, split by the seconds each test file took (tests/times.tsv)
-tests-6: (test '6/6')
+# The sixth of eight parts of the bats tests, split by the seconds each test file took (tests/times.tsv)
+tests-6: (test '6/8')
+
+# The seventh of eight parts of the bats tests, split by the seconds each test file took (tests/times.tsv)
+tests-7: (test '7/8')
+
+# The eighth of eight parts of the bats tests, split by the seconds each test file took (tests/times.tsv)
+tests-8: (test '8/8')
 
 # Without a terminal, as in CI, Dagger's default progress is a line every 30 seconds; plain prints every step and each check's output as it happens.
 # Run the checks inside containers built from the pins, as CI does: every group side by side, or only the group named, such as just ci tests-2; renovate-check's validator, vector-check's Vector and edge-policy-check's FRR each in its own image, rules-check's promtool, taken from the image of the Prometheus the chart deploys, and alerts-route-check's amtool and Alertmanager, taken from the image of the Alertmanager it deploys, in the tools container, the other checks in a container with the tools pinned in mise.toml, the tools image versions.yaml records when it was built for these pins. Dagger records in dagger.lock each image it resolves without an entry there, such as the Prometheus image of rules-check, so the run puts the file back as it found it, whether it passes, fails or is stopped by INT, TERM or HUP; lock-check refuses such an entry in the committed file
