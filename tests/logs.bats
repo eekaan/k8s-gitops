@@ -1,9 +1,14 @@
 #!/usr/bin/env bats
 # Proves features/logs.feature, except the scenarios tagged @by:vector-check, which Vector's unit
 # tests in tests/vector prove; each test carries its scenario's title. Needs helm, flux, kustomize,
-# just, yq, jq and awk on PATH (the versions pinned for the repository). Each chart is pulled once
-# per run from its public registry; building and rendering are offline. The applications are built
-# in memory, so no build rewrites a file of this checkout.
+# just, yq, jq, awk and git on PATH (the versions pinned for the repository). Each chart is pulled
+# once per run from its public registry; building and rendering are offline. The applications are
+# built in memory, so no build rewrites a file of this checkout.
+#
+# One test also runs Renovate's image, the one the justfile pins, with docker: the proof of
+# Renovate's own lookup of the VictoriaLogs plugin. It skips, saying why, where no docker daemon
+# answers, as in the CI containers; with one, a pull or a run that fails is a failure. Its container
+# has no network, no capability and a read-only root, and mounts only a directory of the test's own.
 
 # The tests run one at a time even where bats runs a file's tests side by side: a test that starts
 # while another pulls a chart finds the chart's directory before the chart is in it.
@@ -1181,9 +1186,10 @@ window_seconds() {
     | select(.name == "GF_INSTALL_PLUGINS_FORCE" and .value == "true")] | length' <<<"$grafana")" -eq 1 ]
   [ "$(jq -r '[.spec.deployment.spec.template.spec.containers // [] | .[] | .env // [] | .[]
     | select(.name == "GF_INSTALL_PLUGINS" or .name == "GF_PLUGINS_PREINSTALL" or .name == "GF_PLUGINS_PREINSTALL_SYNC")] | length' <<<"$grafana")" -eq 0 ]
-  # Renovate's regex manager reads the version on the line under such a comment.
+  # Renovate's regex manager reads the version on the line under such a comment, by the plugin's
+  # name, from the catalogue Grafana installs it from.
   [ "$(grep -B1 -E "^[[:blank:]]+version: [\"']?${version//./\\.}[\"']?\$" "$REPO/kubernetes/apps/base/$NAMESPACE/grafana/app/grafanadatasource-victoria-logs.yaml" | head -1 | sed 's/^[[:blank:]]*//')" \
-    = '# renovate: datasource=github-releases depName=VictoriaMetrics/victorialogs-datasource' ]
+    = "# renovate: datasource=custom.grafana-plugins depName=$type" ]
 
   # The dashboard: loaded into the Grafana from a ConfigMap of the application, and reading this
   # datasource, with volume by namespace and by node and a logs panel filtered by two variables.
@@ -1213,6 +1219,211 @@ window_seconds() {
   # The logs panel is filtered by both variables.
   jq -e '[.panels[] | select(.type == "logs") | .targets[].expr]
     | length > 0 and all(test("kubernetes.pod_namespace\":\\$namespace") and test("kubernetes.pod_name\":\\$pod"))' <<<"$json"
+}
+
+# The plugin repository Grafana's CLI installs from while neither --repo, GF_PLUGIN_REPO nor --config
+# names another, and the image's entrypoint passes none: the default of the CLI's repo flag
+# (pkg/cmd/grafana-cli/commands/cli.go:46-49 in Grafana v13.1.3). The install asks
+# <repository>/<plugin>/versions for the plugin's versions (pkg/plugins/repo/service.go:109-118).
+GRAFANA_PLUGIN_REPO=https://grafana.com/api/plugins
+
+# The one transform of the custom datasource grafana-plugins: every item of the listing a release,
+# by its version and dated by the catalogue's createdAt for it, from the publisher's repository.
+PLUGIN_TRANSFORM="{'sourceUrl': items[0].url, 'releases': [items.{'version': version, 'releaseTimestamp': createdAt}]}"
+
+# docker_or_skip: skips the test, saying why, where no docker daemon answers. Past it, whatever
+# docker fails at fails the test, a pull of the image included.
+docker_or_skip() {
+  type -P docker >/dev/null || skip "no docker daemon answers: docker is not on PATH"
+  docker version --format '{{.Server.Version}}' >/dev/null 2>&1 ||
+    skip "no docker daemon answers: docker version reaches none"
+}
+
+# renovate_json FILE: a Renovate configuration file as JSON (the files are JSON5 with comments,
+# which YAML reads once they are dropped).
+renovate_json() {
+  grep -v '^[[:space:]]*//' "$1" | yq -o json -I0 '.'
+}
+
+# renovate_config: renovate.json5 and each preset of this repository it extends, one line each:
+# {"file": its path in the tree, "config": the file as JSON}.
+renovate_config() {
+  local file presets
+  mapfile -t presets < <(renovate_json "$REPO/renovate.json5" | jq -r '.extends[] | select(startswith("local>")) | sub(".*//"; "")')
+  for file in renovate.json5 "${presets[@]}"; do
+    renovate_json "$REPO/$file" | jq -c --arg file "$file" '{file: $file, config: .}'
+  done
+}
+
+# victoria_logs_plugin: the plugin the VictoriaLogs datasource of $BUILT asks for. Sets
+# PLUGIN_NAME and PLUGIN_VERSION.
+victoria_logs_plugin() {
+  local plugin
+  plugin="$(yq -N -o json -I0 'select(.kind == "GrafanaDatasource" and .spec.datasource.type == "victoriametrics-logs-datasource")
+    | .spec.plugins[0]' "$BUILT")"
+  echo "the datasource's plugin: $plugin"
+  PLUGIN_NAME="$(jq -r '.name // ""' <<<"$plugin")"
+  PLUGIN_VERSION="$(jq -r '.version // ""' <<<"$plugin")"
+  [ -n "$PLUGIN_NAME" ]
+  [ -n "$PLUGIN_VERSION" ]
+}
+
+@test "Renovate reads the VictoriaLogs plugin's versions from the catalogue Grafana installs it from" {
+  local file="kubernetes/apps/base/$NAMESPACE/grafana/app/grafanadatasource-victoria-logs.yaml"
+  local managers manager pins pin datasource custom entry url configs rules grafana row
+  local github=github-releases publisher=VictoriaMetrics/victorialogs-datasource
+  built grafana
+  victoria_logs_plugin
+  # The custom managers whose file patterns take the datasource's file: one, which takes all it
+  # reads of the pin from the comment and its line, as it has no template.
+  managers="$(renovate_json "$REPO/.renovate/managers.json5")"
+  manager="$(jq -c --arg file "$file" '[.customManagers[]
+    | select(any(.managerFilePatterns[]; . as $p | $file | test($p | ltrimstr("/") | rtrimstr("/"))))]' <<<"$managers")"
+  echo "custom managers of $file: $(jq -r 'map(.description) | join("; ")' <<<"$manager")"
+  [ "$(jq 'length' <<<"$manager")" -eq 1 ]
+  manager="$(jq -c '.[0]' <<<"$manager")"
+  [ "$(jq -r '.customType' <<<"$manager")" = regex ]
+  echo "templates of that manager: $(jq -c '[keys[] | select(endswith("Template"))]' <<<"$manager")"
+  [ "$(jq -c '[keys[] | select(endswith("Template"))]' <<<"$manager")" = '[]' ]
+  # What its own patterns read from the file: the plugin's pin, under the custom datasource, by the
+  # plugin's name, the one the operator hands to GF_INSTALL_PLUGINS and the install asks the
+  # catalogue for, at the datasource's version.
+  pins="$(jq -Rs -c --argjson m "$manager" '. as $text | [$m.matchStrings[] as $re | $text | capture($re; "g")]' "$REPO/$file")"
+  echo "what the manager reads there: $pins"
+  [ "$(jq 'length' <<<"$pins")" -eq 1 ]
+  pin="$(jq -c '.[0]' <<<"$pins")"
+  datasource="$(jq -r '.datasource' <<<"$pin")"
+  [ "$datasource" = custom.grafana-plugins ]
+  [ "$(jq -r '.depName' <<<"$pin")" = "$PLUGIN_NAME" ]
+  [ "$(jq -r '.currentValue' <<<"$pin")" = "$PLUGIN_VERSION" ]
+  # The datasource is the one custom datasource, by the name Renovate takes from custom.<name>, and
+  # reads JSON from the listing the install reads, through the one transform.
+  custom="$(jq -c '.customDatasources // {}' <<<"$managers")"
+  echo "custom datasources: $custom"
+  [ "$(jq -c 'keys' <<<"$custom")" = "$(jq -cn --arg name "${datasource#custom.}" '[$name]')" ]
+  entry="$(jq -c --arg name "${datasource#custom.}" '.[$name]' <<<"$custom")"
+  [ "$(jq -c 'keys' <<<"$entry")" = '["defaultRegistryUrlTemplate","format","transformTemplates"]' ]
+  url="$(jq -r '.defaultRegistryUrlTemplate' <<<"$entry")"
+  echo "the listing Renovate reads for $PLUGIN_NAME: ${url//'{{packageName}}'/$PLUGIN_NAME}"
+  [ "${url//'{{packageName}}'/$PLUGIN_NAME}" = "$GRAFANA_PLUGIN_REPO/$PLUGIN_NAME/versions" ]
+  [ "$(jq -r '.format' <<<"$entry")" = json ]
+  [ "$(jq -c '.transformTemplates' <<<"$entry")" = "$(jq -cn --arg transform "$PLUGIN_TRANSFORM" '[$transform]')" ]
+  # Renovate deep-merges customDatasources from every preset, with renovate.json5's own over them; a
+  # registry URL that the configuration or a rule gives the dependency replaces the datasource's URL
+  # template (datasource/custom/utils.js in Renovate 44.227.4), and a rule's overrideDatasource or
+  # overridePackageName replaces what it looks up. So of the configuration's files only
+  # managers.json5 sets customDatasources, none sets registryUrls at its top, and no rule sets one
+  # of the three unless a list of plain names it matches by leaves the plugin out.
+  configs="$(renovate_config)"
+  echo "files of the configuration that set customDatasources: $(jq -r 'select(.config | has("customDatasources")) | .file' <<<"$configs" | paste -sd' ' -)"
+  [ "$(jq -r 'select(.config | has("customDatasources")) | .file' <<<"$configs")" = .renovate/managers.json5 ]
+  rules="$(jq -c --arg datasource "$datasource" --arg name "$PLUGIN_NAME" '
+    def leaves_out($own): type == "array" and length > 0
+      and all(.[]; test("^[^!/][^*?{}\\[\\]]*$") and ascii_downcase != $own);
+    .file as $file | .config
+    | (select(has("registryUrls")) | {file: $file, registryUrls}),
+      (.packageRules // [] | .[]
+        | select(has("registryUrls") or has("overrideDatasource") or has("overridePackageName"))
+        | select((.matchDatasources | leaves_out($datasource)) or (.matchDepNames | leaves_out($name))
+          or (.matchPackageNames | leaves_out($name)) | not)
+        | {file: $file, rule: .})' <<<"$configs")"
+  echo "what could give the plugin another registry or name: $rules"
+  [ -z "$rules" ]
+  # The CLI takes another repository from GF_PLUGIN_REPO, and an archive from GF_PLUGIN_URL in
+  # place of the catalogue's (cli.go:45-56), and the image's entrypoint sets each from the file that
+  # the same name with __FILE appended names, before the install (packaging/docker/run.sh:50-62).
+  # The Grafana's containers set none of the four, and take no variables from a ConfigMap or a
+  # Secret, which could.
+  grafana="$(yq -N -o json -I0 'select(.kind == "Grafana")' "$BUILT")"
+  [ "$(jq '[.spec.deployment.spec.template.spec // {} | (.containers // []) + (.initContainers // []) | .[]
+    | (.env // [] | .[] | select(.name | IN("GF_PLUGIN_REPO", "GF_PLUGIN_URL", "GF_PLUGIN_REPO__FILE", "GF_PLUGIN_URL__FILE"))),
+      (.envFrom // [] | .[])]
+    | length' <<<"$grafana")" -eq 0 ]
+  # The records name the pin by the datasource and the plugin's name: the form of the listing's
+  # versions, and what Renovate extracts from the file.
+  row="$(awk -F'\t' -v datasource="$datasource" -v name="$PLUGIN_NAME" '$1 == datasource && $2 == name' "$REPO/.renovate/tag-forms.tsv")"
+  echo "tag form: $row"
+  [ "$(grep -c . <<<"$row")" -eq 1 ]
+  [ "$(cut -f3 <<<"$row")" = '^[0-9]+\.[0-9]+\.[0-9]+$' ]
+  [[ $(cut -f4 <<<"$row") == *"$GRAFANA_PLUGIN_REPO/$PLUGIN_NAME/versions"* ]]
+  echo "extracted from $file: $(awk -F'\t' -v file="$file" '$1 == file' "$REPO/.renovate/extracted.tsv")"
+  [ "$(awk -F'\t' -v file="$file" '$1 == file' "$REPO/.renovate/extracted.tsv")" = "$file"$'\tregex\t'"$PLUGIN_NAME"$'\tversion' ]
+  # Nothing reads the version from the publisher's GitHub releases, which the catalogue lists
+  # later than GitHub, and some never.
+  [ -z "$(awk -F'\t' -v datasource="$github" -v name="$publisher" '$1 == datasource && $2 == name' "$REPO/.renovate/tag-forms.tsv")" ]
+  # git grep answers 1 for no match, and fails otherwise, as outside a work tree.
+  run git -C "$REPO" grep --untracked -l -F "datasource=$github depName=$publisher"
+  echo "files naming the GitHub releases as the datasource: status $status; $output"
+  [ "$status" -eq 1 ]
+}
+
+@test "Renovate's own lookup of the VictoriaLogs plugin finds exactly the catalogue's versions, with the times the catalogue published them" {
+  local dir="$BATS_TEST_TMPDIR/lookup" fixture="$REPO/tests/fixtures/grafana-plugin-versions.json"
+  local image out result copy
+  built grafana
+  victoria_logs_plugin
+  # Only this directory is mounted, never the checkout: the presets as JSON, the copies of the
+  # listing and the script. The fixture is the catalogue's listing as
+  # https://grafana.com/api/plugins/victoriametrics-logs-datasource/versions answered a request
+  # without headers on 2026-11-19, trimmed with jq '.items |= .[:3]' and every field of those items
+  # kept. The publisher's GitHub release v0.33.0 is not in that listing; the copy added.json lists
+  # it, as the catalogue would.
+  mkdir -p "$dir"
+  grep -v '^[[:space:]]*//' "$REPO/.renovate/managers.json5" | yq -o json '.' >"$dir/managers.json"
+  cp "$fixture" "$dir/listing.json"
+  jq '.items += [.items[0] | .version = "0.33.0" | .createdAt = "2026-10-15T09:00:00.000Z"]' "$fixture" >"$dir/added.json"
+  jq '.items = []' "$fixture" >"$dir/empty.json"
+  # Renovate's own code from the image: the custom datasource's configuration as a lookup compiles
+  # it, and the lookup itself, over a file:// registry, which replaces the URL template and is read
+  # within the local directory only.
+  cat >"$dir/lookup.mjs" <<'EOF'
+import { readFileSync } from 'node:fs';
+import { GlobalConfig } from '/usr/local/renovate/dist/config/global.js';
+import { massageCustomDatasourceConfig } from '/usr/local/renovate/dist/modules/datasource/custom/utils.js';
+import { CustomDatasource } from '/usr/local/renovate/dist/modules/datasource/custom/index.js';
+
+const [datasource, packageName, currentValue] = process.argv.slice(2);
+const { customDatasources } = JSON.parse(readFileSync('/w/managers.json', 'utf8'));
+GlobalConfig.set({ localDir: '/w' });
+const config = { datasource, packageName, currentValue, customDatasources };
+const compiled = massageCustomDatasourceConfig(datasource.replace(/^custom\./, ''), config);
+const result = { url: compiled?.defaultRegistryUrlTemplate ?? null };
+for (const copy of ['listing', 'added', 'empty']) {
+  result[copy] = await new CustomDatasource().getReleases({ ...config, registryUrl: `file:///w/${copy}.json` });
+}
+console.log(`lookup: ${JSON.stringify(result)}`);
+EOF
+  # The image runs as a user of its own, which must be able to read the directory.
+  chmod -R a+rX "$dir"
+  docker_or_skip
+  image="$("$(command -v just)" --justfile "$REPO/justfile" --evaluate renovate_image)"
+  echo "image: $image"
+  [[ $image == *@sha256:* ]]
+  out="$(
+    # shellcheck source=scripts/lib/tools.sh
+    . "$REPO/scripts/lib/tools.sh"
+    docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges \
+      --volume "$dir:/w:ro" --entrypoint node "$image" /w/lookup.mjs custom.grafana-plugins "$PLUGIN_NAME" "$PLUGIN_VERSION" 2>&1
+  )" || { echo "$out"; return 1; }
+  result="$(sed -n 's/^lookup: //p' <<<"$out")"
+  [ -n "$result" ] || { echo "$out"; return 1; }
+  # The URL Renovate asks for the plugin is the one Grafana's install asks.
+  echo "compiled URL: $(jq -r '.url' <<<"$result")"
+  [ "$(jq -r '.url' <<<"$result")" = https://grafana.com/api/plugins/victoriametrics-logs-datasource/versions ]
+  # Each copy's releases are its items, in its order, each dated by its createdAt.
+  for copy in listing added empty; do
+    echo "$copy: $(jq -c --arg copy "$copy" '.[$copy]' <<<"$result")"
+    [ "$(jq -c --arg copy "$copy" '[.[$copy].releases // [] | .[] | {version, releaseTimestamp}]' <<<"$result")" \
+      = "$(jq -c '[.items[] | {version, releaseTimestamp: .createdAt}]' "$dir/$copy.json")" ]
+  done
+  [ "$(jq -r '[.listing.releases[].version] | join(" ")' <<<"$result")" = "0.34.0 0.33.1 0.32.0" ]
+  [ "$(jq -r '.listing.sourceUrl' <<<"$result")" = "$(jq -r '.items[0].url' "$fixture")" ]
+  [ "$(jq -r '.listing.sourceUrl' <<<"$result")" = https://github.com/VictoriaMetrics/victorialogs-datasource ]
+  # A GitHub release the listing lacks is no release, until the listing holds it; an empty listing
+  # gives none.
+  [ "$(jq '[.listing.releases[] | select(.version == "0.33.0")] | length' <<<"$result")" -eq 0 ]
+  [ "$(jq -r '.added.releases[] | select(.version == "0.33.0") | .releaseTimestamp' <<<"$result")" = 2026-10-15T09:00:00.000Z ]
+  [ "$(jq '.empty.releases // [] | length' <<<"$result")" -eq 0 ]
 }
 
 # Vector's unit tests run the collector's transforms and cannot see a source or a sink, so what

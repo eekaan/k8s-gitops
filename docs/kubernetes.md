@@ -3056,18 +3056,56 @@ plugin of the VictoriaLogs datasource ([Logs](#logs)): Grafana does not ship it.
 it to Grafana's container as `GF_INSTALL_PLUGINS`, `victoriametrics-logs-datasource` at the exact
 version in `grafanadatasource-victoria-logs.yaml`, which Renovate moves, and `grafana.yaml` sets
 `GF_INSTALL_PLUGINS_FORCE=true` on the container. With that set the Grafana image's entrypoint runs
-`grafana cli plugins install victoriametrics-logs-datasource <version>` at every start, into a data
-directory that starts empty. That makes two requests to grafana.com's plugin API
+`grafana cli plugins install victoriametrics-logs-datasource <version>` at every start of the
+container, into a data directory that starts empty with each pod. The plugin comes from
+grafana.com's plugin catalogue, through two requests that a new pod makes
 (`pkg/plugins/repo/service.go` in Grafana v13.1.3): `GET
-https://grafana.com/api/plugins/victoriametrics-logs-datasource/versions`, the plugin's versions, of
-which it takes the one asked for, and `GET
+https://grafana.com/api/plugins/victoriametrics-logs-datasource/versions`, the catalogue's listing
+of the plugin's versions, of which it takes the one asked for, and `GET
 https://grafana.com/api/plugins/victoriametrics-logs-datasource/versions/<version>/download`, which
 grafana.com redirects to that version's archive in its catalogue's storage on
-`storage.googleapis.com`. Grafana's own server would install the plugin only with its
-preinstalled-plugins list on, which stays off. The entrypoint runs under `set -e`, so a failed
-request stops Grafana from starting until grafana.com answers. Grafana loads the plugin only if its
-signature verifies against the public key Grafana ships. Nothing else is fetched, and
-`tests/grafana.bats` fails when any other datasource or dashboard asks for a plugin.
+`storage.googleapis.com`. A container that restarts in its pod finds that version in the data
+directory already and makes neither (`pkg/cmd/grafana-cli/commands/install_command.go`). Grafana's
+own server would install the plugin only with its preinstalled-plugins list on, which stays off.
+Grafana loads the plugin only if its signature verifies against the public key Grafana ships.
+Nothing else is fetched, and `tests/grafana.bats` fails when any other datasource or dashboard asks
+for a plugin.
+
+The entrypoint runs under `set -e` and starts Grafana only once the install has succeeded. In a new
+pod, a request that fails stops Grafana from starting until grafana.com answers it. A version the
+listing does not hold stops it until the pin names one it holds: the CLI exits 1 with
+"victoriametrics-logs-datasource v<version> was not returned by the Grafana.com catalog. …", the
+entrypoint stops before Grafana starts, and the container restarts in a loop and never becomes
+ready. A version the catalogue lists as incompatible with the Grafana that runs fails the same way,
+with "victoriametrics-logs-datasource v<version> is not compatible with your Grafana version: …":
+the version's `grafanaDependency` decides it, which the catalogue answers as `isCompatible` only to
+a request that names a Grafana version, as the CLI's does. So does a version the listing holds
+without a package for the node's system or for `any`, with "… is not supported on your system …".
+When the listing holds no version compatible with the Grafana that runs, the CLI fails before it
+looks for the pinned one, with "victoriametrics-logs-datasource is not compatible with your Grafana
+version: …", which names no version of the plugin. While a new pod cannot install its
+version, the Deployment's default rolling update keeps the pod before it: with one replica it starts
+the new pod beside the old one and removes the old one only once the new one is ready. A reboot that
+leaves the old pod in place starts its container again at the version before, and a drain, a
+deletion or an eviction has its ReplicaSet start another pod at that version, which installs while
+the listing still holds it. A Grafana started afresh has no pod before it, and runs no Grafana until
+the pin is one the listing holds.
+
+The catalogue lists the publisher's GitHub releases later than GitHub does, and some never. So
+Renovate reads the plugin's versions from the same listing the install reads, through the custom
+datasource `grafana-plugins` in `.renovate/managers.json5`, which the pin's `# renovate:
+datasource=custom.grafana-plugins depName=victoriametrics-logs-datasource` comment names: it
+proposes only a version the catalogue lists, and the three days a release waits count from the
+catalogue's `createdAt` for that version. Its request names no Grafana version, so the listing it
+reads says nothing of compatibility, and whether a proposed version's `grafanaDependency` admits the
+Grafana that `grafana.yaml` pins is for the reader of the pull request: nothing else checks it, and
+the auto-merge switch in `.renovate/automerge.json5` makes no exception for the plugin. Moving the
+pin by hand needs a version that listing holds. `tests/logs.bats` checks that the pin, the
+datasource and the records name that listing and that nothing else in the configuration gives the
+lookup another datasource, registry or name, and, where docker runs, that Renovate's own lookup over
+a copy of it finds exactly its versions with their dates. That second check skips where no docker
+daemon answers, as in CI, so a person runs `bats tests/logs.bats` on a machine with docker before
+merging an update of the Renovate image the justfile pins.
 
 The dashboards come from the monitoring stack's own chart. The release `grafana-dashboards` installs
 `kube-prometheus-stack` at the version the monitoring application runs, with everything off but the

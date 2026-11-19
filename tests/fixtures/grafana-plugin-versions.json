@@ -1,0 +1,199 @@
+{
+  "items": [
+    {
+      "id": 11935,
+      "pluginId": 1004,
+      "pluginSlug": "victoriametrics-logs-datasource",
+      "version": "0.34.0",
+      "url": "https://github.com/VictoriaMetrics/victorialogs-datasource",
+      "commit": "",
+      "description": "VictoriaLogs datasource plugin for Grafana",
+      "keywords": [
+        "logs",
+        "log analytics",
+        "observability",
+        "victoriametrics",
+        "victorialogs",
+        "datasource"
+      ],
+      "createdAt": "2026-11-10T12:46:29.000Z",
+      "updatedAt": null,
+      "downloads": 107686,
+      "verified": false,
+      "status": "active",
+      "statusContext": "",
+      "downloadSlug": "victoriametrics-logs-datasource",
+      "packages": {
+        "any": {
+          "md5": "a27b4748aaeab7b48daadd55752c69fe",
+          "sha256": "6fc61446097a525e826f2ddb6746723f85447845c95a7b1a99624e84d4b2e237",
+          "packageName": "any",
+          "downloadUrl": "/api/plugins/victoriametrics-logs-datasource/versions/0.34.0/download"
+        }
+      },
+      "links": [
+        {
+          "rel": "self",
+          "href": "/plugins/victoriametrics-logs-datasource/versions/0.34.0"
+        },
+        {
+          "rel": "images",
+          "href": "/plugins/victoriametrics-logs-datasource/versions/0.34.0/images"
+        },
+        {
+          "rel": "thumbnails",
+          "href": "/plugins/victoriametrics-logs-datasource/versions/0.34.0/thumbnails"
+        },
+        {
+          "rel": "plugin",
+          "href": "/plugins/victoriametrics-logs-datasource"
+        },
+        {
+          "rel": "download",
+          "href": "/plugins/victoriametrics-logs-datasource/versions/0.34.0/download"
+        }
+      ],
+      "grafanaDependency": ">=10.4.0",
+      "angularDetected": false,
+      "scopes": [
+        "universal"
+      ],
+      "federalDisabled": false,
+      "distributionType": "catalog",
+      "children": []
+    },
+    {
+      "id": 11377,
+      "pluginId": 1004,
+      "pluginSlug": "victoriametrics-logs-datasource",
+      "version": "0.33.1",
+      "url": "https://github.com/VictoriaMetrics/victorialogs-datasource",
+      "commit": "",
+      "description": "VictoriaLogs datasource plugin for Grafana",
+      "keywords": [
+        "logs",
+        "log analytics",
+        "observability",
+        "victoriametrics",
+        "victorialogs",
+        "datasource"
+      ],
+      "createdAt": "2026-10-16T14:33:19.000Z",
+      "updatedAt": null,
+      "downloads": 452902,
+      "verified": false,
+      "status": "active",
+      "statusContext": "",
+      "downloadSlug": "victoriametrics-logs-datasource",
+      "packages": {
+        "any": {
+          "md5": "e85122b23541aff94d27c128a880d9e9",
+          "sha256": "73e7ce379ae9a9ce6fdb978e5d6d43f67029b4c3e4d970f1ca8f7f4617f331c5",
+          "packageName": "any",
+          "downloadUrl": "/api/plugins/victoriametrics-logs-datasource/versions/0.33.1/download"
+        }
+      },
+      "links": [
+        {
+          "rel": "self",
+          "href": "/plugins/victoriametrics-logs-datasource/versions/0.33.1"
+        },
+        {
+          "rel": "images",
+          "href": "/plugins/victoriametrics-logs-datasource/versions/0.33.1/images"
+        },
+        {
+          "rel": "thumbnails",
+          "href": "/plugins/victoriametrics-logs-datasource/versions/0.33.1/thumbnails"
+        },
+        {
+          "rel": "plugin",
+          "href": "/plugins/victoriametrics-logs-datasource"
+        },
+        {
+          "rel": "download",
+          "href": "/plugins/victoriametrics-logs-datasource/versions/0.33.1/download"
+        }
+      ],
+      "grafanaDependency": ">=10.4.0",
+      "angularDetected": false,
+      "scopes": [
+        "universal"
+      ],
+      "federalDisabled": false,
+      "distributionType": "catalog",
+      "children": []
+    },
+    {
+      "id": 10857,
+      "pluginId": 1004,
+      "pluginSlug": "victoriametrics-logs-datasource",
+      "version": "0.32.0",
+      "url": "https://github.com/VictoriaMetrics/victorialogs-datasource",
+      "commit": "",
+      "description": "VictoriaLogs datasource plugin for Grafana",
+      "keywords": [
+        "logs",
+        "log analytics",
+        "observability",
+        "victoriametrics",
+        "victorialogs",
+        "datasource"
+      ],
+      "createdAt": "2026-09-11T15:37:25.000Z",
+      "updatedAt": null,
+      "downloads": 529275,
+      "verified": false,
+      "status": "active",
+      "statusContext": "",
+      "downloadSlug": "victoriametrics-logs-datasource",
+      "packages": {
+        "any": {
+          "md5": "d8f2b4d71bf77fb38645049c0b33378c",
+          "sha256": "8204d097b17f53b1c3a71761047734b7980bd983710c6cfcef8d938abe5eeef0",
+          "packageName": "any",
+          "downloadUrl": "/api/plugins/victoriametrics-logs-datasource/versions/0.32.0/download"
+        }
+      },
+      "links": [
+        {
+          "rel": "self",
+          "href": "/plugins/victoriametrics-logs-datasource/versions/0.32.0"
+        },
+        {
+          "rel": "images",
+          "href": "/plugins/victoriametrics-logs-datasource/versions/0.32.0/images"
+        },
+        {
+          "rel": "thumbnails",
+          "href": "/plugins/victoriametrics-logs-datasource/versions/0.32.0/thumbnails"
+        },
+        {
+          "rel": "plugin",
+          "href": "/plugins/victoriametrics-logs-datasource"
+        },
+        {
+          "rel": "download",
+          "href": "/plugins/victoriametrics-logs-datasource/versions/0.32.0/download"
+        }
+      ],
+      "grafanaDependency": ">=10.4.0",
+      "angularDetected": false,
+      "scopes": [
+        "universal"
+      ],
+      "federalDisabled": false,
+      "distributionType": "catalog",
+      "children": []
+    }
+  ],
+  "orderBy": "version",
+  "direction": "desc",
+  "pluginSlugOrId": "victoriametrics-logs-datasource",
+  "links": [
+    {
+      "rel": "self",
+      "href": "/plugins/victoriametrics-logs-datasource/versions/"
+    }
+  ]
+}
