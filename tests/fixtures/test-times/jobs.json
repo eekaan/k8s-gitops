@@ -1,0 +1,19 @@
+{
+  "jobs": [
+    {
+      "databaseId": 1001,
+      "name": "check (tests-5)",
+      "conclusion": "success"
+    },
+    {
+      "databaseId": 1002,
+      "name": "check (signatures)",
+      "conclusion": "success"
+    },
+    {
+      "databaseId": 1003,
+      "name": "check (tests-6)",
+      "conclusion": "skipped"
+    }
+  ]
+}

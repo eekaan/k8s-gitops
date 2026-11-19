@@ -1,5 +1,7 @@
 #!/usr/bin/env bats
 
+bats_require_minimum_version 1.5.0
+
 setup() {
   REPO=$(cd "$BATS_TEST_DIRNAME/.." && pwd)
   WORKFLOW="$REPO/.github/workflows/ci.yaml"
@@ -511,6 +513,528 @@ lock_check_repo() {
     [ "$(grep -cx -- '--jobs' "$BATS_TEST_TMPDIR/bats.args")" -eq "$calls" ]
   fi
   [ "$(grep -cx -- '--no-parallelize-across-files' "$BATS_TEST_TMPDIR/bats.args")" -eq "$(grep -cx -- '--jobs' "$BATS_TEST_TMPDIR/bats.args")" ]
+}
+
+# recording_bats: BIN, a directory with a mise that installs nothing, so the justfile puts no pinned
+# tool before what BIN holds on PATH, and a bats that records each argument it is handed, one per
+# line, in $BATS_ARGS.
+recording_bats() {
+  BIN="$BATS_TEST_TMPDIR/recording"
+  mkdir -p "$BIN"
+  printf '#!/usr/bin/env bash\n' > "$BIN/mise"
+  # shellcheck disable=SC2016 # the stand-in expands them
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$@" >> "$BATS_ARGS"\n' > "$BIN/bats"
+  chmod +x "$BIN/mise" "$BIN/bats"
+  export BATS_ARGS="$BATS_TEST_TMPDIR/bats.args"
+}
+
+@test "The bats tests are split into groups by the time each file took, and no group takes much longer than another" {
+  local file seconds part total heaviest most=0 least=0 too_heavy='' over='' report=''
+  local -a parts words files handed=()
+  local -A recorded=()
+  while IFS=$'\t' read -r file seconds; do
+    recorded[$file]=$seconds
+  done < <(grep -v '^#' "$REPO/tests/times.tsv")
+  # The parts of the bats tests the groups run: each test recipe they run and its arguments.
+  mapfile -t parts < <(runs_of "$REPO/justfile" | cut -f2 | grep -E '^test( |$)')
+  [ "${#parts[@]}" -gt 1 ]
+  recording_bats
+
+  for part in "${parts[@]}"; do
+    read -ra words <<< "$part"
+    rm -f "$BATS_ARGS"
+    run env PATH="$BIN:/usr/bin:/bin" "$(command -v just)" --justfile "$REPO/justfile" --working-directory "$REPO" "${words[@]}"
+    [ "$status" -eq 0 ] || { echo "$part: $output"; return 1; }
+    files=()
+    if [[ -e $BATS_ARGS ]]; then
+      mapfile -t files < <(grep -E '^tests/[^/]+\.bats$' "$BATS_ARGS")
+    fi
+    handed+=("${files[@]}")
+    # The part's recorded total, and its heaviest file.
+    total=0 heaviest=
+    for file in "${files[@]}"; do
+      [ -n "${recorded[$file]-}" ] || { echo "$file has no time in tests/times.tsv"; return 1; }
+      total=$((total + recorded[$file]))
+      if [[ -z $heaviest ]] || ((recorded[$file] > recorded[$heaviest])); then
+        heaviest=$file
+      fi
+    done
+    report+="$part: ${#files[@]} files, ${total}s"$'\n'
+    if ((${#files[@]} > 1)); then
+      if ((total > most)); then
+        most=$total too_heavy="$heaviest, ${recorded[$heaviest]}s,"
+      fi
+      if ((least == 0 || total < least)); then
+        least=$total
+      fi
+    fi
+    if ((total > 1500)); then
+      over+=" $part"
+    fi
+  done
+
+  # Every test file goes to one part, and to one only.
+  [ "$(printf '%s\n' "${handed[@]}" | sort)" = "$(cd "$REPO" && printf '%s\n' tests/*.bats | sort)" ] || {
+    echo "the parts do not hand bats every test file once:"
+    diff <(printf '%s\n' "${handed[@]}" | sort) <(cd "$REPO" && printf '%s\n' tests/*.bats | sort)
+    return 1
+  }
+  # The parts of more than one file take about as long as each other, and none longer than 25 minutes.
+  ((most * 100 <= least * 105)) || {
+    printf '%s' "$report"
+    echo "the parts of more than one file differ by more than 5%: $too_heavy is too heavy to balance around in the heaviest part; change the number of groups until its part balances or it has one of its own"
+    return 1
+  }
+  [ -z "$over" ] || {
+    printf '%s' "$report"
+    echo "recorded at more than 25 minutes:$over; add a group: a recipe tests-N that runs test 'N/M', its name in the checks recipe's dependencies, and test 'N/M' in every group"
+    return 1
+  }
+}
+
+# record_copy: COPY, a copy of the justfile, just/, scripts/, the test files and their record, and
+# PARTS, the parts of the bats tests its groups run.
+record_copy() {
+  COPY="$BATS_TEST_TMPDIR/copy"
+  mkdir -p "$COPY/tests"
+  cp -R "$REPO/justfile" "$REPO/just" "$REPO/scripts" "$COPY/"
+  cp "$REPO"/tests/*.bats "$REPO/tests/times.tsv" "$COPY/tests/"
+  mapfile -t PARTS < <(runs_of "$COPY/justfile" | cut -f2 | grep -E '^test( |$)')
+  [ "${#PARTS[@]}" -gt 1 ]
+}
+
+@test "A test file without a recorded time stops the tests, naming the command that records it" {
+  local part
+  local -a words
+  record_copy
+  # A new test file without its time, and a line for a file that is gone.
+  printf '@test "%s" {\n  true\n}\n' 'a new application' > "$COPY/tests/new-app.bats"
+  printf 'tests/gone.bats\t9\n' >> "$COPY/tests/times.tsv"
+  recording_bats
+  rm -f "$BATS_ARGS"
+
+  for part in "${PARTS[@]}"; do
+    read -ra words <<< "$part"
+    run env PATH="$BIN:/usr/bin:/bin" "$(command -v just)" --justfile "$COPY/justfile" --working-directory "$COPY" "${words[@]}"
+
+    echo "$output"
+    [ "$status" -ne 0 ]
+    # Every part fails the same way, before bats is called.
+    [ ! -e "$BATS_ARGS" ] || { echo "$part called bats"; return 1; }
+    [ "$(grep '^test: ' <<< "$output")" = "$(printf '%s\n' \
+      'test: tests/new-app.bats has no time in tests/times.tsv; record it with just test-time tests/new-app.bats' \
+      'test: tests/times.tsv has a line for tests/gone.bats, which tests/ no longer has; delete the line or run just test-times-record')" ]
+  done
+}
+
+@test "a line of the record that is not a test file, a tab and whole seconds stops the tests" {
+  local part number
+  local -a words
+  record_copy
+  # A space where the tab belongs.
+  printf 'tests/ci.bats 21\n' >> "$COPY/tests/times.tsv"
+  number=$(wc -l < "$COPY/tests/times.tsv")
+  recording_bats
+  rm -f "$BATS_ARGS"
+
+  for part in "${PARTS[@]}"; do
+    read -ra words <<< "$part"
+    run env PATH="$BIN:/usr/bin:/bin" "$(command -v just)" --justfile "$COPY/justfile" --working-directory "$COPY" "${words[@]}"
+
+    echo "$output"
+    [ "$status" -ne 0 ]
+    [ ! -e "$BATS_ARGS" ] || { echo "$part called bats"; return 1; }
+    [ "$(grep '^test: ' <<< "$output")" = "test: tests/times.tsv:$number is not a test file, a tab and its whole seconds" ]
+  done
+}
+
+@test "a test file with two lines in the record stops the tests" {
+  local part number
+  local -a words
+  record_copy
+  # A second line for a file the record holds, with another time.
+  printf 'tests/ci.bats\t99\n' >> "$COPY/tests/times.tsv"
+  number=$(wc -l < "$COPY/tests/times.tsv")
+  recording_bats
+  rm -f "$BATS_ARGS"
+
+  for part in "${PARTS[@]}"; do
+    read -ra words <<< "$part"
+    run env PATH="$BIN:/usr/bin:/bin" "$(command -v just)" --justfile "$COPY/justfile" --working-directory "$COPY" "${words[@]}"
+
+    echo "$output"
+    [ "$status" -ne 0 ]
+    [ ! -e "$BATS_ARGS" ] || { echo "$part called bats"; return 1; }
+    [ "$(grep '^test: ' <<< "$output")" = "test: tests/times.tsv:$number repeats tests/ci.bats; a test file has one line" ]
+  done
+}
+
+@test "a test file whose tests the tags all leave out runs, passes and prints its time" {
+  local dir="$BATS_TEST_TMPDIR/left-out"
+  mkdir -p "$dir/tests"
+  # Only tests that just test leaves out: one tagged hermetic, one tagged namespace.
+  printf '# bats test_tags=%s\n@test "%s" {\n  true\n}\n\n' hermetic 'left out 1' namespace 'left out 2' > "$dir/tests/left-out.bats"
+  [ "$(bats --count "$dir/tests/left-out.bats")" -eq 2 ]
+  cd "$dir"
+
+  run "$REPO/scripts/test-run" tests/left-out.bats
+
+  echo "$output"
+  [ "$status" -eq 0 ]
+  # bats ran the file, which planned no test.
+  [ "$(grep -cx '1\.\.0' <<< "$output")" -eq 1 ]
+  [ "$(grep -cxE 'test: tests/left-out\.bats took [0-9]+s' <<< "$output")" -eq 1 ]
+}
+
+# times_tree: TREE, a copy of the justfile, just/ and scripts/ whose tests/ holds no test file yet
+# and a tests/times.tsv of this record's header alone; BIN, a directory for stand-ins, with a mise that
+# installs nothing, so the justfile puts no pinned tool before them on PATH.
+times_tree() {
+  TREE="$BATS_TEST_TMPDIR/tree"
+  BIN="$BATS_TEST_TMPDIR/stand-ins"
+  mkdir -p "$TREE/tests" "$BIN"
+  cp -R "$REPO/justfile" "$REPO/just" "$REPO/scripts" "$TREE/"
+  grep '^#' "$REPO/tests/times.tsv" > "$TREE/tests/times.tsv"
+  printf '#!/usr/bin/env bash\n' > "$BIN/mise"
+  chmod +x "$BIN/mise"
+}
+
+# times_file NAME SECONDS [TESTS]: adds tests/NAME.bats to the tree, with TESTS tests, one by
+# default, and a line of its record saying it took SECONDS.
+times_file() {
+  local i
+  for ((i = 1; i <= ${3:-1}; i++)); do
+    printf '@test "%s %d" {\n  true\n}\n' "$1" "$i"
+  done > "$TREE/tests/$1.bats"
+  printf 'tests/%s.bats\t%s\n' "$1" "$2" >> "$TREE/tests/times.tsv"
+}
+
+# times_just ARG...: runs the tree's just with ARG..., the stand-ins first on PATH.
+times_just() {
+  run env PATH="$BIN:/usr/bin:/bin" "$(command -v just)" --justfile "$TREE/justfile" --working-directory "$TREE" "$@"
+}
+
+@test "Each test file prints how long it took, and the record is written from what a run printed" {
+  local entry name sleep printed fixture plan live heading report line
+  local -A took=()
+  times_tree
+  # broken.bats fails; the heaviest by its recorded time and by its number of tests, it runs first.
+  times_file broken 30 3
+  times_file slow 20 2
+  times_file quick 10
+  # A bats that records the file it is handed and sleeps a known time for it: two seconds for
+  # slow.bats, one for broken.bats, after which it fails, none for quick.bats.
+  cat > "$BIN/bats" << 'EOF'
+#!/usr/bin/env bash
+file=${!#}
+printf '%s\n' "$file" >> "$STAND_IN_CALLS"
+case $file in
+  tests/slow.bats) sleep 2 ;;
+  tests/broken.bats) sleep 1; printf '1..1\nnot ok 1 broken 1\n'; exit 1 ;;
+esac
+printf '1..1\nok 1 fine\n'
+EOF
+  chmod +x "$BIN/bats"
+  export STAND_IN_CALLS="$BATS_TEST_TMPDIR/calls"
+
+  run --separate-stderr env PATH="$BIN:/usr/bin:/bin" "$(command -v just)" --justfile "$TREE/justfile" --working-directory "$TREE" test 1/1
+
+  echo "$output"
+  echo "$stderr"
+  [ "$status" -ne 0 ]
+  # Every file ran, those after the failing one too, each with one line on standard output of the
+  # whole seconds it took: its sleep, or a second more for starting and rounding.
+  [ "$(head -n 1 "$STAND_IN_CALLS")" = tests/broken.bats ]
+  [ "$(sort "$STAND_IN_CALLS")" = "$(printf '%s\n' tests/broken.bats tests/quick.bats tests/slow.bats)" ]
+  for entry in broken:1 slow:2 quick:0; do
+    name=${entry%:*} sleep=${entry#*:}
+    [ "$(grep -cxE "test: tests/$name\.bats took [0-9]+s" <<< "$output")" -eq 1 ] || { echo "not one time for $name"; return 1; }
+    took[$name]=$(sed -nE "s|^test: tests/$name\.bats took ([0-9]+)s$|\1|p" <<< "$output")
+    ((took[$name] >= sleep && took[$name] <= sleep + 1)) || { echo "$name took ${took[$name]}s, slept ${sleep}s"; return 1; }
+  done
+  # The run ends naming the file that failed.
+  printed=$output$'\n'$stderr
+  [ "$(grep -cx 'test: failed: tests/broken.bats' <<< "$printed")" -eq 1 ]
+
+  # Since the run, a test file came with its line, and a line was added for one that is gone.
+  times_file later 7
+  printf 'tests/gone.bats\t9\n' >> "$TREE/tests/times.tsv"
+  cp -p "$TREE/tests/times.tsv" "$BATS_TEST_TMPDIR/before"
+  # The run's output, both streams, as a CI job's log carries it (tests/fixtures/test-times): each
+  # line after GitHub's timestamp and Dagger's prefix, colour codes included, and before a carriage
+  # return, then again after the timestamp alone in the group's report. The log also times the gone
+  # file, as a run older than the tree would.
+  fixture="$BATS_TEST_DIRNAME/fixtures/test-times/job-1001.log"
+  plan=$(grep -m 1 -E '1\.\.[0-9]+$' "$fixture")
+  live=${plan%1..*}
+  [[ $live == *$'\e[90m|\e[0m ' ]]
+  heading=$(grep -m 1 -E '== tests-[0-9]+: ' "$fixture")
+  report=${heading%%== *}
+  [[ $report =~ ^[0-9]{4}-[0-9T:.-]+Z\ $ ]]
+  {
+    while IFS= read -r line; do printf '%s%s\r\n' "$live" "$line"; done <<< "$printed"
+    printf '%stest: tests/gone.bats took 12s\r\n' "$live"
+    printf '%s== tests-1: failed (test 1/1)\n' "$report"
+    while IFS= read -r line; do printf '%s%s\n' "$report" "$line"; done <<< "$printed"
+  } > "$BATS_TEST_TMPDIR/job.log"
+
+  # A log without a timing line, and one that gives a file two times, change nothing.
+  grep -v ' took ' "$BATS_TEST_TMPDIR/job.log" > "$BATS_TEST_TMPDIR/untimed.log"
+  run "$TREE/scripts/test-times" < "$BATS_TEST_TMPDIR/untimed.log"
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"test-times: no line test: tests/<name>.bats took <N>s in the input"* ]]
+  cmp "$BATS_TEST_TMPDIR/before" "$TREE/tests/times.tsv"
+  { cat "$BATS_TEST_TMPDIR/job.log"; printf '%stest: tests/slow.bats took %ss\r\n' "$live" "$((took[slow] + 5))"; } > "$BATS_TEST_TMPDIR/twice.log"
+  run "$TREE/scripts/test-times" < "$BATS_TEST_TMPDIR/twice.log"
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"test-times: tests/slow.bats took ${took[slow]}s and $((took[slow] + 5))s in the input"* ]]
+  cmp "$BATS_TEST_TMPDIR/before" "$TREE/tests/times.tsv"
+
+  run "$TREE/scripts/test-times" < "$BATS_TEST_TMPDIR/job.log"
+
+  echo "$output"
+  [ "$status" -eq 0 ]
+  # Each timed file's line holds its time, once though the log prints it twice; the added file keeps
+  # its line, the gone file's is dropped, and the header stays.
+  {
+    grep '^#' "$REPO/tests/times.tsv"
+    printf 'tests/%s.bats\t%s\n' broken "${took[broken]}" later 7 quick "${took[quick]}" slow "${took[slow]}"
+  } > "$BATS_TEST_TMPDIR/expected"
+  cmp "$BATS_TEST_TMPDIR/expected" "$TREE/tests/times.tsv"
+  # One line for the gone file's line, dropped, and one for each file whose time changed.
+  [ "$output" = "$(
+    echo 'test-times: tests/gone.bats 9s -> dropped (not in tests/)'
+    printf 'test-times: tests/%s.bats %ss -> %ss\n' broken 30 "${took[broken]}" quick 10 "${took[quick]}" slow 20 "${took[slow]}"
+  )" ]
+}
+
+@test "test-times drops each line of the record just test refuses, saying so, and writes one just test reads" {
+  local headed
+  times_tree
+  times_file a 5
+  times_file b 8
+  times_file c 3
+  headed=$(grep -c '^#' "$TREE/tests/times.tsv")
+  # Under the header: seconds that are not whole, before c.bats's own line; a space where the tab
+  # belongs; a second line for a.bats; and a line for a file that is gone.
+  {
+    grep '^#' "$REPO/tests/times.tsv"
+    printf 'tests/a.bats\t5\ntests/c.bats\t2.5\ntests/b.bats 7\ntests/b.bats\t8\ntests/a.bats\t6\ntests/c.bats\t3\ntests/gone.bats\t9\n'
+  } > "$TREE/tests/times.tsv"
+
+  run "$TREE/scripts/test-times" <<< 'test: tests/c.bats took 4s'
+
+  echo "$output"
+  [ "$status" -eq 0 ]
+  {
+    grep '^#' "$REPO/tests/times.tsv"
+    printf 'tests/%s.bats\t%s\n' a 5 b 8 c 4
+  } > "$BATS_TEST_TMPDIR/expected"
+  cmp "$BATS_TEST_TMPDIR/expected" "$TREE/tests/times.tsv"
+  [ "$output" = "$(printf '%s\n' \
+    "test-times: tests/times.tsv:$((headed + 2)) is not a test file, a tab and its whole seconds; dropped" \
+    "test-times: tests/times.tsv:$((headed + 3)) is not a test file, a tab and its whole seconds; dropped" \
+    "test-times: tests/times.tsv:$((headed + 5)) repeats tests/a.bats; dropped" \
+    'test-times: tests/gone.bats 9s -> dropped (not in tests/)' \
+    'test-times: tests/c.bats 3s -> 4s')" ]
+
+  # just test takes the record as written.
+  printf '#!/usr/bin/env bash\nprintf "1..1\\nok 1 fine\\n"\n' > "$BIN/bats"
+  chmod +x "$BIN/bats"
+  times_just test 1/1
+  echo "$output"
+  [ "$status" -eq 0 ]
+}
+
+@test "just test-time records the files it runs, one that fails too, and then fails" {
+  local broken quick
+  times_tree
+  times_file broken 30
+  times_file other 7
+  times_file quick 10
+  # A bats that fails broken.bats and passes any other file.
+  cat > "$BIN/bats" << 'EOF'
+#!/usr/bin/env bash
+case ${!#} in
+  tests/broken.bats) printf '1..1\nnot ok 1 broken 1\n'; exit 1 ;;
+esac
+printf '1..1\nok 1 fine\n'
+EOF
+  chmod +x "$BIN/bats"
+
+  times_just test-time tests/broken.bats tests/quick.bats
+
+  echo "$output"
+  [ "$status" -ne 0 ]
+  # The run's output shows, and each file's time goes into the record; the file not run keeps its line.
+  [[ $output == *"not ok 1 broken 1"* ]]
+  broken=$(sed -nE 's|^test: tests/broken\.bats took ([0-9]+)s$|\1|p' <<< "$output")
+  quick=$(sed -nE 's|^test: tests/quick\.bats took ([0-9]+)s$|\1|p' <<< "$output")
+  [[ $broken =~ ^[0-9]+$ && $quick =~ ^[0-9]+$ ]]
+  {
+    grep '^#' "$REPO/tests/times.tsv"
+    printf 'tests/%s.bats\t%s\n' broken "$broken" other 7 quick "$quick"
+  } > "$BATS_TEST_TMPDIR/expected"
+  cmp "$BATS_TEST_TMPDIR/expected" "$TREE/tests/times.tsv"
+  [[ $output == *"test-times: tests/broken.bats 30s -> ${broken}s"* ]]
+
+  # A path that is not tests/<name>.bats, which its timing line would not name, is refused.
+  times_just test-time ./tests/quick.bats
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"test-time: ./tests/quick.bats is not a test file, tests/<name>.bats"* ]]
+  cmp "$BATS_TEST_TMPDIR/expected" "$TREE/tests/times.tsv"
+}
+
+@test "the split hands the heaviest file first to the part of least recorded time, ties by path and to the lowest part" {
+  local part
+  local -a split_files=()
+  times_tree
+  times_file a 10
+  times_file b 10
+  times_file c 10
+  times_file d 10
+  times_file e 25
+  # A bats that records the file it is handed.
+  cat > "$BIN/bats" << 'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "${!#}" >> "$BATS_ARGS"
+printf '1..1\nok 1 fine\n'
+EOF
+  chmod +x "$BIN/bats"
+  export BATS_ARGS="$BATS_TEST_TMPDIR/bats.args"
+
+  for part in 1 2; do
+    rm -f "$BATS_ARGS"
+    times_just test "$part/2"
+    echo "$output"
+    [ "$status" -eq 0 ]
+    split_files[part]=$(sort "$BATS_ARGS" | paste -sd ' ')
+  done
+
+  # e, the heaviest, goes first, to part 1 of two empty parts; a, b and c, of equal time and taken
+  # by path, to part 2 while it holds less than part 1; d to part 1, by then the lighter.
+  [ "${split_files[1]}" = 'tests/d.bats tests/e.bats' ]
+  [ "${split_files[2]}" = 'tests/a.bats tests/b.bats tests/c.bats' ]
+}
+
+# gh_reads FILE: fails unless every call FILE records, its arguments separated by tabs, is one that
+# only reads: gh run list, gh run view, or gh api with neither a method nor a field or input, which
+# would make it write.
+gh_reads() {
+  local call words word
+  while IFS= read -r call; do
+    IFS=$'\t' read -ra words <<< "$call"
+    case "${words[0]} ${words[1]-}" in
+      "run list" | "run view") ;;
+      api\ *)
+        for word in "${words[@]}"; do
+          case $word in
+            -X* | --method* | -f* | -F* | --field* | --raw-field* | --input*) echo "writes: $call"; return 1 ;;
+          esac
+        done
+        ;;
+      *) echo "not a read: $call"; return 1 ;;
+    esac
+  done < "$1"
+}
+
+# gh_called FILE WORD...: the calls FILE records that hold every WORD as an argument of their own.
+gh_called() {
+  local file=$1 call word
+  shift
+  while IFS= read -r call; do
+    for word in "$@"; do
+      [[ $'\t'$call$'\t' == *$'\t'"$word"$'\t'* ]] || continue 2
+    done
+    printf '%s\n' "$call"
+  done < "$file"
+}
+
+@test "The record of the test files' times is written from the logs of a CI run" {
+  local fixtures calls job
+  times_tree
+  # The files whose times the fixture's tests job prints, and one it does not.
+  times_file cluster-recipes 80
+  times_file other 7
+  times_file secret-rotate 40
+  cp -p "$TREE/tests/times.tsv" "$BATS_TEST_TMPDIR/before"
+  {
+    grep '^#' "$REPO/tests/times.tsv"
+    printf 'tests/%s.bats\t%s\n' cluster-recipes 83 other 7 secret-rotate 43
+  } > "$BATS_TEST_TMPDIR/expected"
+  fixtures="$BATS_TEST_DIRNAME/fixtures/test-times"
+  calls="$BATS_TEST_TMPDIR/gh-calls"
+  # A gh that records each call, its arguments separated by tabs, and answers from the fixtures:
+  # the run list, the run's jobs, whatever run is asked for, and each job's log, which it refuses
+  # to print when the log holds terminal escapes and the call does not allow them, as gh does.
+  cat > "$BIN/gh" << 'EOF'
+#!/usr/bin/env bash
+(IFS=$'\t'; printf '%s\n' "$*") >> "$GH_CALLS"
+args=("$@") filter=
+for ((i = 0; i < $#; i++)); do
+  if [[ ${args[i]} == --jq ]]; then filter=${args[i + 1]}; fi
+done
+answer() {
+  if [[ -n $filter ]]; then "$JQ" -r "$filter" "$1"; else cat "$1"; fi
+}
+case "$1 ${2-}" in
+  "run list") answer "$GH_FIXTURES/runs.json" ;;
+  "run view") answer "$GH_FIXTURES/jobs.json" ;;
+  api\ *)
+    path=${!#}
+    if [[ ! $path =~ ^repos/[^/]+/[^/]+/actions/jobs/([0-9]+)/logs$ || ! -f $GH_FIXTURES/job-${BASH_REMATCH[1]}.log ]]; then
+      echo "stand-in gh: no such log: $path" >&2
+      exit 1
+    fi
+    log=$GH_FIXTURES/job-${BASH_REMATCH[1]}.log
+    if grep -q $'\e' "$log" && [[ " $* " != *" --allow-escape-sequences "* ]]; then
+      echo "the response contains terminal escape sequences; pass --allow-escape-sequences to output it anyway" >&2
+      exit 1
+    fi
+    cat "$log"
+    ;;
+  *) echo "stand-in gh: unexpected: $*" >&2; exit 1 ;;
+esac
+EOF
+  chmod +x "$BIN/gh"
+  JQ=$(command -v jq)
+  export GH_CALLS="$calls" GH_FIXTURES="$fixtures" JQ
+  # The fixture's tests job prints its times live and again in its report.
+  [ "$(grep -c 'test: tests/cluster-recipes.bats took 83s' "$fixtures/job-1001.log")" -eq 2 ]
+  grep -q $'\e' "$fixtures/job-1001.log"
+
+  times_just test-times-record 42
+
+  echo "$output"
+  [ "$status" -eq 0 ]
+  cmp "$BATS_TEST_TMPDIR/expected" "$TREE/tests/times.tsv"
+  # Run 42's jobs, and the log of each job that ran, with nothing else asked for: job 1003 was
+  # skipped and has no log.
+  [ "$(jq -r '.jobs[] | select(.databaseId == 1003) | .conclusion' "$fixtures/jobs.json")" = skipped ]
+  [ -z "$(gh_called "$calls" run list)" ]
+  [ "$(gh_called "$calls" run view 42 --json jobs | wc -l)" -eq 1 ]
+  for job in 1001 1002; do
+    [ "$(gh_called "$calls" api --allow-escape-sequences "repos/{owner}/{repo}/actions/jobs/$job/logs" | wc -l)" -eq 1 ] || { echo "job $job's log not read once"; return 1; }
+  done
+  [ "$(wc -l < "$calls")" -eq 3 ]
+  gh_reads "$calls"
+
+  cp -p "$BATS_TEST_TMPDIR/before" "$TREE/tests/times.tsv"
+  rm "$calls"
+
+  times_just test-times-record
+
+  echo "$output"
+  [ "$status" -eq 0 ]
+  cmp "$BATS_TEST_TMPDIR/expected" "$TREE/tests/times.tsv"
+  # The latest successful push run of ci on main, which the run list gives as 43.
+  [ "$(gh_called "$calls" run list --workflow ci --branch main --event push --status success --limit 1 | wc -l)" -eq 1 ]
+  [ "$(gh_called "$calls" run view 43 --json jobs | wc -l)" -eq 1 ]
+  [ "$(wc -l < "$calls")" -eq 4 ]
+  gh_reads "$calls"
 }
 
 @test "The workflow's jobs are computed from the justfile" {

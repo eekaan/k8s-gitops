@@ -1,0 +1,90 @@
+# How long each bats test file took, in whole seconds of wall time. just test reads this record to
+# split the test files into parts that take about as long, and fails while a test file has no line
+# here, a line names a file tests/ no longer has, a second line names a file, or a line is not a
+# test file, a tab and its whole seconds. scripts/test-run prints a file's time once its bats run
+# ends, the run's start and the file's setup_file included, in a line of its own,
+# test: tests/<name>.bats took <N>s, and scripts/test-times writes this record from those lines,
+# through just test-time FILE... for the files run here and just test-times-record [RUN] for every
+# file a CI run timed: a timed file gets its new time, a file not timed keeps its line, and a line
+# just test refuses is dropped, with a line saying so.
+# Columns, separated by a tab: the test file, the seconds it took.
+tests/acme-issuers.bats	181
+tests/admission-policy.bats	135
+tests/alert-routes.bats	106
+tests/app-adoption.bats	5
+tests/applications.bats	358
+tests/ascender.bats	228
+tests/autoscaling.bats	9
+tests/backstage.bats	222
+tests/baseline.bats	18
+tests/check-address-literals.bats	2
+tests/check-conflict-markers.bats	1
+tests/ci-host.bats	4
+tests/ci.bats	21
+tests/cluster-flux.bats	19
+tests/cluster-last-copies.bats	45
+tests/cluster-lifecycle.bats	145
+tests/cluster-recipes.bats	83
+tests/cluster-snapshot.bats	13
+tests/crowdsec.bats	193
+tests/dagger-engine.bats	0
+tests/dashboards.bats	258
+tests/edge-forward.bats	0
+tests/edge-routers.bats	1
+tests/edge-scripts.bats	64
+tests/etcd-snapshots.bats	2
+tests/external-dns.bats	84
+tests/external-secrets.bats	3
+tests/falco.bats	99
+tests/flux.bats	3
+tests/gateway-check.bats	14
+tests/gateway.bats	85
+tests/grafana.bats	13
+tests/infra-backups.bats	5
+tests/infra-check.bats	2
+tests/infra-forget-image.bats	13
+tests/infra-recipes.bats	19
+tests/infra-talman.bats	3
+tests/install-cilium.bats	75
+tests/kromgo.bats	204
+tests/kubernetes-check.bats	132
+tests/kubernetes-validate.bats	441
+tests/locust.bats	155
+tests/logs.bats	197
+tests/monitoring.bats	11
+tests/network-audit.bats	153
+tests/network-drops.bats	2
+tests/network-policy.bats	155
+tests/node-firewall.bats	11
+tests/node-listeners.bats	96
+tests/open-feature-operator.bats	123
+tests/openbao-recipes.bats	19
+tests/openbao-snapshot-recipes.bats	14
+tests/openbao-snapshots.bats	5
+tests/openbao.bats	13
+tests/pod-security.bats	203
+tests/postgres-dump-recipes.bats	5
+tests/postgres-dumps.bats	3
+tests/postgres-restore.bats	786
+tests/postgresql.bats	171
+tests/probes.bats	314
+tests/publish.bats	19
+tests/rebuild.bats	74
+tests/recipes.bats	4
+tests/render.bats	62
+tests/renovate-pins.bats	21
+tests/robot.bats	220
+tests/rules-check.bats	1167
+tests/scenarios-check.bats	1
+tests/secret-rotate.bats	43
+tests/signatures.bats	129
+tests/silences.bats	148
+tests/sso.bats	257
+tests/state-encryption.bats	12
+tests/storage.bats	10
+tests/talos-check.bats	27
+tests/tool-secrets.bats	2
+tests/tools-check.bats	0
+tests/tools-image.bats	43
+tests/volume-backups.bats	14
+tests/waf.bats	91

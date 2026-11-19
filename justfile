@@ -84,7 +84,7 @@ signatures-verify:
 catalogue-dependencies:
     scripts/catalogue-dependencies
 
-# Run the bats tests, except those tagged hermetic, which run just ci and need a container runtime, and those tagged namespace, which need unprivileged user namespaces (just edge-forward-check). A shard such as 2/3 runs the second of three parts of the test files, split by their number of tests
+# Run the bats tests, except those tagged hermetic, which run just ci and need a container runtime, and those tagged namespace, which need unprivileged user namespaces (just edge-forward-check), one bats run per test file, each followed by the line saying how long it took (scripts/test-run). A shard such as 2/6 runs the second of six parts of the test files, split by the seconds each took as tests/times.tsv records them: the heaviest first, each to the part whose recorded total is lowest so far, so the parts take about as long. Before bats runs, every part fails while a test file has no line in the record, which just test-time writes, a line names a file tests/ no longer has, a second line names a file, or a line is not a test file, a tab and its whole seconds
 [script]
 test shard='1/1':
     set -o pipefail
@@ -94,10 +94,53 @@ test shard='1/1':
       exit 1
     fi
     part=${BASH_REMATCH[1]} parts=${BASH_REMATCH[2]}
-    # The files with the most tests go first, each to the part with the fewest tests so far, so the
-    # parts take about as long; ties go by name, byte by byte, so every part makes the same split.
-    files=$(grep -c '^[[:blank:]]*@test[[:blank:]]' tests/*.bats | LC_ALL=C sort -t: -k2,2nr -k1,1 |
-      awk -F: -v parts="$parts" -v part="$part" '{
+    record=tests/times.tsv
+    if [[ ! -f $record ]]; then
+      echo "test: $record is missing; just test-times-record writes it from a CI run" >&2
+      exit 1
+    fi
+    # Every part checks the whole record, not only its own files, so every group fails alike.
+    line_re=$'^(tests/[^/\t]+\\.bats)\t([0-9]+)$'
+    declare -A recorded=()
+    listed=() failed=0 number=0
+    while IFS= read -r line || [[ -n $line ]]; do
+      number=$((number + 1))
+      if [[ $line == '#'* ]]; then
+        continue
+      elif [[ $line =~ $line_re ]]; then
+        file=${BASH_REMATCH[1]}
+        if [[ -n ${recorded[$file]+set} ]]; then
+          echo "test: $record:$number repeats $file; a test file has one line" >&2
+          failed=1
+        else
+          listed+=("$file")
+        fi
+        recorded[$file]=${BASH_REMATCH[2]}
+      else
+        echo "test: $record:$number is not a test file, a tab and its whole seconds" >&2
+        failed=1
+      fi
+    done < "$record"
+    for file in tests/*.bats; do
+      if [[ -z ${recorded[$file]+set} ]]; then
+        echo "test: $file has no time in $record; record it with just test-time $file" >&2
+        failed=1
+      fi
+    done
+    for file in "${listed[@]}"; do
+      if [[ ! -f $file ]]; then
+        echo "test: $record has a line for $file, which tests/ no longer has; delete the line or run just test-times-record" >&2
+        failed=1
+      fi
+    done
+    if ((failed)); then
+      exit 1
+    fi
+    # The heaviest files go first, each to the part whose recorded total is lowest so far, ties to the
+    # lowest part; ties between files go by name, byte by byte, so every part makes the same split.
+    files=$(for file in "${!recorded[@]}"; do printf '%s\t%s\n' "$file" "${recorded[$file]}"; done |
+      LC_ALL=C sort -t $'\t' -k2,2nr -k1,1 |
+      awk -F'\t' -v parts="$parts" -v part="$part" '{
         least = 0
         for (i = 1; i < parts; i++) if (load[i] < load[least]) least = i
         load[least] += $2
@@ -108,22 +151,63 @@ test shard='1/1':
       exit 0
     fi
     mapfile -t files <<< "$files"
-    # A file's tests run side by side, a file whose tests share state excepted, and the files one
-    # after another: bats runs files side by side only through GNU parallel, which is not pinned.
-    # Side by side within a file, bats takes turns with flock or shlock; without either, one by one.
-    jobs=()
-    cpus=$(getconf _NPROCESSORS_ONLN)
-    if ((cpus > 1)) && { command -v flock || command -v shlock; } > /dev/null; then
-      jobs=(--jobs "$cpus" --no-parallelize-across-files)
-    fi
-    bats "${jobs[@]}" --filter-tags '!hermetic,!namespace' "${files[@]}"
+    scripts/test-run "${files[@]}"
 
 # Run the bats tests that run just ci
 test-hermetic:
     bats --filter-tags hermetic tests
 
+# Run the test files given, such as tests/edge-routers.bats, as just test runs them, and write the seconds each took into tests/times.tsv; a file that fails still gets its time, and the recipe fails: the time of a file that failed before its tests ran, such as when bats did not start, is no measure of the file
+[positional-arguments]
+[script]
+test-time +files:
+    set -o pipefail
+    for file in "$@"; do
+      if [[ ! $file =~ ^tests/[^/]+\.bats$ || ! -f $file ]]; then
+        echo "test-time: $file is not a test file, tests/<name>.bats" >&2
+        exit 1
+      fi
+    done
+    out=$(mktemp)
+    trap 'rm -f "$out"' EXIT
+    # The output shows as the tests run and is kept; the record is written once the run has ended.
+    status=0
+    scripts/test-run "$@" | tee "$out" || status=$?
+    scripts/test-times < "$out"
+    exit "$status"
+
+# Write tests/times.tsv from the seconds each test file took in a run of the ci workflow, the run given or else the latest successful push run of ci on main, read from the log of each of its jobs that ran; needs gh signed in, and only reads
+[script]
+test-times-record run='':
+    set -o pipefail
+    # gh gets its own token and none of the secrets a recipe's environment may hold.
+    . scripts/lib/tools.sh
+    run={{ quote(run) }}
+    if [[ -z $run ]]; then
+      run=$(gh run list --workflow ci --branch main --event push --status success --limit 1 --json databaseId --jq '.[].databaseId')
+      if [[ -z $run ]]; then
+        echo "test-times-record: gh lists no successful push run of ci on main" >&2
+        exit 1
+      fi
+    fi
+    if [[ ! $run =~ ^[1-9][0-9]*$ ]]; then
+      echo "test-times-record: a run is the number of a run of the ci workflow, not '$run'" >&2
+      exit 1
+    fi
+    # A skipped job ran nothing and has no log.
+    jobs=$(gh run view "$run" --json jobs --jq '.jobs[] | select(.conclusion != "skipped") | .databaseId')
+    logs=$(mktemp)
+    trap 'rm -f "$logs"' EXIT
+    # gh api prints a job's log as it is, terminal escapes included, as Dagger's progress has them,
+    # and only when allowed to. Every log is read before the record is written, so a read that fails
+    # leaves it as it was.
+    for job in $jobs; do
+      gh api --allow-escape-sequences "repos/{owner}/{repo}/actions/jobs/$job/logs" >> "$logs"
+    done
+    scripts/test-times < "$logs"
+
 # Run every check that needs no credentials with the tools on this machine, group by group
-checks: static signatures tests-1 tests-2 tests-3
+checks: static signatures tests-1 tests-2 tests-3 tests-4 tests-5 tests-6
 
 # The groups of checks are the dependencies of checks, and each group's checks its own dependencies: just ci runs every group side by side in containers of its own, and CI runs each as a job of its own. A check, with whatever it depends on, belongs to one group only, or it would run twice.
 # The checks other than the bats tests, the cheapest and most basic first
@@ -132,14 +216,23 @@ static: tools-check check-literals check-commit-literals check-conflict-markers 
 # The verification of the sources' signatures against the registries, a group of its own: a registry out of reach fails it and leaves static's result as it is
 signatures: signatures-verify
 
-# The first of three parts of the bats tests
-tests-1: (test '1/3')
+# The first of six parts of the bats tests, split by the seconds each test file took (tests/times.tsv)
+tests-1: (test '1/6')
 
-# The second of three parts of the bats tests
-tests-2: (test '2/3')
+# The second of six parts of the bats tests, split by the seconds each test file took (tests/times.tsv)
+tests-2: (test '2/6')
 
-# The third of three parts of the bats tests
-tests-3: (test '3/3')
+# The third of six parts of the bats tests, split by the seconds each test file took (tests/times.tsv)
+tests-3: (test '3/6')
+
+# The fourth of six parts of the bats tests, split by the seconds each test file took (tests/times.tsv)
+tests-4: (test '4/6')
+
+# The fifth of six parts of the bats tests, split by the seconds each test file took (tests/times.tsv)
+tests-5: (test '5/6')
+
+# The sixth of six parts of the bats tests, split by the seconds each test file took (tests/times.tsv)
+tests-6: (test '6/6')
 
 # Without a terminal, as in CI, Dagger's default progress is a line every 30 seconds; plain prints every step and each check's output as it happens.
 # Run the checks inside containers built from the pins, as CI does: every group side by side, or only the group named, such as just ci tests-2; renovate-check's validator, vector-check's Vector and edge-policy-check's FRR each in its own image, rules-check's promtool, taken from the image of the Prometheus the chart deploys, and alerts-route-check's amtool and Alertmanager, taken from the image of the Alertmanager it deploys, in the tools container, the other checks in a container with the tools pinned in mise.toml, the tools image versions.yaml records when it was built for these pins. Dagger records in dagger.lock each image it resolves without an entry there, such as the Prometheus image of rules-check, so the run puts the file back as it found it, whether it passes, fails or is stopped by INT, TERM or HUP; lock-check refuses such an entry in the committed file
