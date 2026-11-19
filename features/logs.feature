@@ -1,6 +1,8 @@
 Feature: Logs
   VictoriaLogs keeps the cluster's logs for two weeks, and Vector on every node ships them: every pod's, and the node's own Talos service and kernel logs but its audit log, read from the files Talos writes. A person on the cluster's sign-in list reads them in VictoriaLogs' own interface at logs under the cluster's domain, and nothing else of the store is reachable through the public Gateway.
 
+  One scenario needs a docker daemon, which the CI containers do not have: "Renovate's own lookup of the VictoriaLogs plugin finds exactly the catalogue's versions, with the times the catalogue published them". Its proof runs Renovate's own datasource code, from the image the justfile pins, by its digest, in a container without network, without a capability and with a read-only root, which mounts only a directory of the test's own holding a JSON copy of .renovate/managers.json5, the copies of the catalogue's listing and the script, and reads what it prints. It runs with the other proofs of tests/logs.bats wherever a docker daemon answers, on a developer's machine or an agent's, and skips, saying why, where none does, as under just ci and in CI, which run every other proof.
+
   Scenario: The log store builds with Flux and runs once in the monitoring namespace
     Given the victoria-logs application and its namespace directory, enabled in the cluster's overlay
     When it is built as Flux applies it and its pinned chart is rendered with the repository's values
@@ -81,6 +83,16 @@ Feature: Logs
     Given the grafana application and the victoria-logs application's pinned chart
     When the first is built as Flux applies it and the second is rendered offline
     Then a GrafanaDatasource selects the Grafana without being its default, is of the VictoriaLogs plugin's type, names the store's Service in its namespace on a port the Service serves, asks for exactly that plugin at an exact version that Renovate updates and for no other, the Grafana's container sets what makes the image's entrypoint install it while Grafana's own preinstall of plugins stays off, and a GrafanaDashboard loads a dashboard of log volume by namespace and by node and a logs panel with namespace and pod variables, from a ConfigMap of the application
+
+  Scenario: Renovate reads the VictoriaLogs plugin's versions from the catalogue Grafana installs it from
+    Given the grafana application's VictoriaLogs datasource, Renovate's presets and its records
+    When the pin's comment is read with the custom manager's own pattern, and the custom datasource it names is read from .renovate/managers.json5
+    Then the pin is read under custom.grafana-plugins with the plugin's own name and version, that datasource is defined once and reads JSON from the plugin's versions listing on grafana.com, the URL Grafana's install asks, with the one transform that makes each listed version a release dated by the catalogue, the Grafana's containers name no other plugin repository, the tag form and the extraction record name the pin by that datasource and name, and nothing reads the plugin's version from its GitHub releases
+
+  Scenario: Renovate's own lookup of the VictoriaLogs plugin finds exactly the catalogue's versions, with the times the catalogue published them
+    Given Renovate's pinned image, its custom datasource as .renovate/managers.json5 defines it, and a copy of the catalogue's listing
+    When Renovate's own datasource code compiles the URL for the plugin and looks it up over the copy, without network
+    Then the URL is the plugin's versions listing on grafana.com, the releases are the listing's versions in its order, each dated by its createdAt, with the publisher's repository as their source, a GitHub release the listing lacks is not among them, an added item appears and an empty listing gives none
 
   @by:vector-check
   Scenario: Kernel audit records are dropped and counted

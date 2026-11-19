@@ -74,8 +74,9 @@ spec:
             # operator sets from the datasource's plugins (grafanadatasource-victoria-logs.yaml), with
             # `grafana cli plugins install` before it starts Grafana, and only with this set. It runs
             # under set -e: a failure of either request the datasource's comment names stops Grafana
-            # from starting, and the pod restarts until grafana.com answers. The patch merges into
-            # the operator's container by its name.
+            # from starting, and the container restarts until grafana.com answers and lists the
+            # datasource's version as one this Grafana can install. The patch merges into the
+            # operator's container by its name.
             - name: grafana
               env:
                 - name: GF_INSTALL_PLUGINS_FORCE
