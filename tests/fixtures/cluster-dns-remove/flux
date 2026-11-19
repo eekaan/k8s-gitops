@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# A stand-in for the flux CLI, installed by tests/cluster-dns-remove.bats as <tmp>/bin/flux, that
+# suspends and resumes a Kustomization or a HelmRelease by spec.suspend, in the namespace
+# --namespace names, flux-system without it, and keeps which are suspended as
+# <tmp>/state/suspended.<kind>.<namespace>.<name>. It finds its files from its own path:
+#   <tmp>/state/suspend-fails.<kind>   suspending an object of that kind fails as the pinned CLI,
+#                                      v2.10.0, fails it: the object is left as it was, the failure
+#                                      is printed on standard error, naming the API server's
+#                                      address, and the status is 0 (cmd/flux/suspend.go:116-124,
+#                                      where a failure named by the object's name is logged and the
+#                                      command returns nil)
+# It records "flux ARGS" in <tmp>/record/argv, and each suspension and resumption, in order, in
+# <tmp>/record/events.
+set -uo pipefail
+
+root=${0%/bin/*}
+state=$root/state
+record=$root/record
+printf '%s\n' "flux $*" >> "$record/argv"
+
+verb=${1-} kind=${2-} name=${3-}
+namespace=flux-system
+shift 3 || true
+while (($#)); do
+  case $1 in
+    --namespace) namespace=$2 && shift ;;
+    *) echo "fake flux: unexpected argument $1" >&2 && exit 1 ;;
+  esac
+  shift
+done
+[[ $kind == kustomization || $kind == helmrelease ]] && [[ -n $name ]] ||
+  { echo "fake flux: unexpected flux $verb $kind $name" >&2; exit 1; }
+case $verb in
+  suspend)
+    echo "► suspending $kind $name in $namespace namespace" >&2
+    if [[ -e $state/suspend-fails.$kind ]]; then
+      shown=Kustomization
+      [[ $kind == kustomization ]] || shown=HelmRelease
+      echo "✗ failed suspending $shown $name in $namespace namespace: Patch \"https://192.0.2.10:6443/apis/$kind/namespaces/$namespace/$name\": dial tcp 192.0.2.10:6443: connect: connection refused" >&2
+      exit 0
+    fi
+    : > "$state/suspended.$kind.$namespace.$name"
+    printf '%s\n' "suspended $kind $namespace/$name" >> "$record/events"
+    ;;
+  resume)
+    rm -f "$state/suspended.$kind.$namespace.$name"
+    printf '%s\n' "resumed $kind $namespace/$name" >> "$record/events"
+    echo "► resuming $kind $name in $namespace namespace" >&2
+    ;;
+  *)
+    echo "fake flux: unexpected flux $verb" >&2
+    exit 1
+    ;;
+esac

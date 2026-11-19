@@ -1346,6 +1346,58 @@ take one now, `kubectl --namespace etcd-snapshots create job --from=cronjob/etcd
   flux CLI's output it shows only their errors, through the filter of
   [What the recipes print](#what-the-recipes-print). It runs on lab-sto2 alone, as
   `bao-seal-restore` and `bao-volsync-password` compare with that cluster only.
+- `just cluster-dns-remove [cluster] [--check] [--yes]` takes the cluster's DNS records out of the
+  zone before the cluster and the edge stack are taken down
+  ([runbooks/rebuild.md](runbooks/rebuild.md#taking-it-down)), by external-dns's own rules: a sync
+  against the source `empty`, which asks for no record, deletes every record whose TXT registry
+  entry names the cluster's owner id, and that entry, and leaves another owner's records and those
+  made by hand ([kubernetes.md](kubernetes.md#dns-records)). A cluster without the Kustomization
+  `flux-system/external-dns` does not select external-dns, and the run says so and ends. It reads
+  `CLUSTER_DOMAIN` from `flux-system/cluster-config`, and refuses, naming why and changing nothing,
+  a Deployment `external-dns/external-dns` whose container `external-dns` does not run with
+  `--policy=sync`, `--registry=txt`, `--provider=cloudflare` and one `--txt-owner-id` other than the
+  base's placeholder; it prints the owner id. Then the plan: a Job in `external-dns`, named
+  `external-dns-remove-<start in Unix seconds>-plan` (the deleting one ends in `-delete`, the
+  second plan in `-verify`), made from the Deployment's pod template, its
+  image, service account, security contexts, resources and environment, the token by its
+  reference to the Secret, and its arguments without the sources, the Gateway's, the namespace, the
+  event and interval settings and the log format, and with `--source=empty`, `--once`,
+  `--log-format=json` and `--dry-run`; no probe, no port, no service account token mounted,
+  `restartPolicy: Never`, `backoffLimit: 0`, `DNS_REMOVE_TIMEOUT` as its `activeDeadlineSeconds`,
+  and the label `app.kubernetes.io/name: external-dns-remove`, which the chart's Service and
+  ServiceMonitor do not select. Its log, read as JSON lines, gives each record the sync would
+  delete, printed as `delete <type> <name under the domain>`, one line per record at the provider,
+  which holds an A record for each address of a name; a change other than a deletion, a record
+  outside the domain or a line that is not JSON and names a change stops the run. The Job is
+  deleted once read. `--check` stops there, having changed nothing but that Job; so does a plan
+  that deletes nothing, without asking, as a second run does. Otherwise, once the cluster's name is
+  typed back, or with `--yes`, it suspends the Kustomization `external-dns` and the HelmRelease
+  `external-dns/external-dns` with the flux CLI and reads each back, stopping unless it is
+  suspended, as the pinned CLI prints a failure to suspend and still exits 0; scales the Deployment
+  to 0 and waits until no pod of it runs; runs the same Job without `--dry-run`, which ends complete
+  only when its one pass succeeded, and prints its deletions; and plans again, failing, naming
+  each, while a record of the owner is left. external-dns stays stopped, and the two suspended, and
+  the run ends with how to start it again: `flux resume kustomization external-dns`, then
+  `flux resume helmrelease external-dns --namespace external-dns`, after which helm-controller's
+  drift detection scales the Deployment back to its one replica and external-dns makes the records
+  again at its first sync. Those commands are run before the edge stack's destroy, or after it only
+  once the edges are built again, `just cluster-config` has written their addresses to the cluster
+  and `flux reconcile kustomization gateway-public` has applied them to the Gateway, whose
+  annotation external-dns reads them from, and ended Ready
+  ([runbooks/edge.md](runbooks/edge.md#the-way-back)). A Job that fails, or whose log the run does
+  not read as external-dns', is kept, and the run names it with the `kubectl logs` command that
+  reads its log, of which it prints nothing. A Job that does not end within the wait, or that its
+  own deadline stops, is kept and named too; as that deadline is the wait's length, a deleting Job
+  the run stopped waiting for can still be at work until it passes, when the Job controller deletes
+  its pod, and the log with it, and `just cluster-dns-remove --check`, run after that, lists what is
+  left. external-dns does not fail at once when it cannot reach the provider's API, so on a cluster
+  that cannot reach it a run, `--check` included, can take the whole wait before it fails, naming
+  the Job. Every exit after a suspension names last what is left suspended, or may be, as an object
+  that cannot be read back, or scaled, and how to undo it. Every wait is bounded by
+  `DNS_REMOVE_TIMEOUT` seconds, and every kubectl call by 30 seconds. It reads no Secret, passes
+  nothing of the token on a command line, and prints nothing of the token, the zone's identifier,
+  the domain, a name under it or an address; kubectl's and the flux CLI's errors pass through the
+  filter of [What the recipes print](#what-the-recipes-print).
 - `just cluster-destroy [cluster] [--yes] [--unreachable]` destroys the cluster stack,
   `sto2/cluster`, as `just infra-destroy sto2/cluster` does
   ([infrastructure.md](infrastructure.md#recipes)): it shows the plan's summary, destroys once the
@@ -1483,7 +1535,11 @@ to hand it to kubectl and age-keygen on standard input.
   at most nine digits, refused otherwise before anything runs.
 - `CLUSTER_DOMAIN`: the domain the cluster's applications are published under, a lower-case DNS
   name, which becomes `CLUSTER_DOMAIN` in `cluster-config`; `cluster-bootstrap`, `cluster-config`
-  and `cluster-flux` need it.
+  and `cluster-flux` need it, and so does `just infra-destroy sto2/edge`, which looks the routes'
+  names up under it ([infrastructure.md](infrastructure.md#recipes)).
+- `DNS_REMOVE_TIMEOUT`: how many seconds each wait of `cluster-dns-remove` may take, for a Job or
+  for external-dns' pod to go, and each of its Jobs may run, 300 when unset; a whole number from 1
+  of at most nine digits, refused otherwise before anything runs.
 - `CLUSTER_DNS_ZONE`: the zone at the DNS provider that holds `CLUSTER_DOMAIN`, a lower-case DNS
   name that is the domain or one it is under, which becomes `CLUSTER_DNS_ZONE` in `cluster-config`
   ([kubernetes.md](kubernetes.md#dns-records)); the domain itself when unset. Set it when the

@@ -137,7 +137,10 @@ exceptions:
       cannot hold the default deny. Its one pod takes Prometheus' scrape of its metrics port 7979,
       through the chart's ServiceMonitor, and the kubelet's probes on that port, and no other
       connection; it reaches the API server to watch Gateways, HTTPRoutes and Namespaces, the DNS
-      provider's API on 443, outside the cluster, and the cluster's resolver
+      provider's API on 443, outside the cluster, and the cluster's resolver. The Jobs that just
+      cluster-dns-remove runs from its pod template are selected by no Service and reach only the
+      provider's API and the resolver, as their source asks the API server for nothing and no
+      service account token is mounted in them
     covered-by: the provider's API token, from the store's entry cert-manager/cloudflare through an
       ExternalSecret, whose Secrets are in this namespace and cert-manager's alone, and which the
       operator scopes to zone read and DNS edit on the cluster's one zone; the name filter, which

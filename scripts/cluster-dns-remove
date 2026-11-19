@@ -1,0 +1,375 @@
+#!/usr/bin/env bash
+# Takes a cluster's DNS records out of the zone before the cluster and the edge stack are taken
+# down (docs/runbooks/rebuild.md), before the edge stack's addresses are released, which the edge
+# stack's destroy holds back while a name the routes publish resolves to them (scripts/infra-destroy).
+# The deleting is external-dns's own: a sync against a source that asks for no record, with the
+# cluster's owner id and TXT registry, deletes exactly the records whose registry entry names that
+# owner, and those entries (github.com/kubernetes-sigs/external-dns at v0.23.0: plan/plan.go:216-217
+# and :230-232, registry/txt/registry.go:387 and :403-405). In this order:
+#   1. The Kustomization flux-system/external-dns. Without it the cluster does not select
+#      external-dns, so there is none to delete records with, and the run ends. CLUSTER_DOMAIN is
+#      read from flux-system/cluster-config, to name the records under it.
+#   2. The Deployment external-dns/external-dns. Its one container named external-dns must run with
+#      --policy=sync, --registry=txt, --provider=cloudflare and one --txt-owner-id that is neither
+#      empty nor the base's placeholder, or nothing is changed; its owner id is printed.
+#   3. The plan: a Job made from the Deployment's pod template, in dry-run, whose log names every
+#      record the sync would delete; each is printed as "delete TYPE NAME", NAME under the domain,
+#      and the Job is deleted. --check stops here. A plan that deletes nothing ends the run too,
+#      without asking, whatever state external-dns is in.
+#   4. The cluster's name typed back, or --yes. Then the Kustomization and the HelmRelease
+#      external-dns are suspended with the flux CLI, so that neither applies the Deployment again,
+#      each read back and the run stopped unless it is suspended, and the Deployment is scaled to 0
+#      and its pod waited for until it is gone, so that nothing makes the records again.
+#   5. The same Job without --dry-run, which must complete (with --once, external-dns exits 0 only
+#      when its pass succeeded: controller/execute.go:138-144), and whose log's deletions are
+#      printed; then the plan again, which must find nothing left, or the run fails naming what is.
+# external-dns then stays stopped, and Flux's two objects suspended. The run ends with the commands
+# that start it again, which hold before the edge stack's destroy, and after it only once the edges
+# are built again, just cluster-config has written their addresses to the cluster and flux reconcile
+# kustomization gateway-public has applied them to the Gateway and ended Ready: external-dns reads
+# the addresses from the Gateway's annotation, which Flux substitutes from cluster-config only when
+# that Kustomization reconciles. Every exit after a suspension names last what is left suspended or
+# scaled, with the commands that undo it.
+#
+# Each Job runs in external-dns, from the Deployment's pod template: its image, service account, pod
+# and container security contexts, resources and environment, the token by its reference to the
+# Secret, as the template has it; the template's arguments without its sources, the Gateway's, the
+# namespace, the event and interval settings and the log format, and with --source=empty, --once,
+# --log-format=json and, but for the deleting one, --dry-run, under which the provider changes
+# nothing (provider/cloudflare/cloudflare.go:566). The empty source asks the Kubernetes API for
+# nothing and the token is not mounted. No probes and no ports; restartPolicy Never, backoffLimit 0
+# and DNS_REMOVE_TIMEOUT as activeDeadlineSeconds; a label of its own, app.kubernetes.io/name:
+# external-dns-remove, so the chart's Service and ServiceMonitor select none of its pods. The
+# manifest reaches kubectl on standard input. A Job is deleted once its log is read. One that fails,
+# or whose log is not read as external-dns', is kept and named, with the command that reads its
+# log, and none of its log is printed; one that does not end within the wait, or that its own
+# deadline stops, is kept and named too, and its pod goes, with its log, once that deadline passes,
+# as the Job controller deletes it. A Job's log is read as the JSON lines external-dns writes: a
+# line that is not JSON and mentions a change, a change other than a deletion, or a record outside
+# the domain stops the run.
+#
+# Every wait, for a Job and for the pod to go, is bounded by DNS_REMOVE_TIMEOUT seconds (300), and
+# every kubectl call by 30 seconds. Nothing of the token, the zone's identifier, the domain, a name
+# under it or an address is printed or passed as an argument; the recipe reads no Secret. kubectl's
+# and flux's errors are shown as scripts/lib/errors.sh shows them.
+# Usage: scripts/cluster-dns-remove [cluster] [--check] [--yes]
+set -euo pipefail
+
+here=$(dirname "$0")
+# shellcheck source=scripts/lib/cluster.sh
+. "$here/lib/cluster.sh"
+# The typed answer comes from the operator's input alone; every program run gets /dev/null.
+reserve_answers
+
+usage() {
+  infra_error "usage: cluster-dns-remove [cluster] [--check] [--yes]"
+  exit 2
+}
+
+check=0 confirmed=0 name=''
+for arg; do
+  case $arg in
+    --check) check=1 ;;
+    --yes) confirmed=1 ;;
+    -*) usage ;;
+    *)
+      [[ -z $name ]] || usage
+      name=$arg
+      ;;
+  esac
+done
+
+# The run's start, which names its Jobs.
+start=$(date -u +%s)
+poll=2
+
+# shellcheck source=scripts/cluster-env
+. "$here/cluster-env" "$name"
+start_errors_log "$cluster_dir/clusterconfig/${0##*/}.errors.log"
+
+# What the run has left suspended, or may have, or scaled, in the order it did it, the Job it is
+# waiting for, and whether that Job's pod still holds its log.
+left=() job='' job_log=1
+# finish STATUS: names the step a failure was in, a Job the failure kept, with the command that reads
+# its log while its pod holds it, and then, last, what the run left suspended, or may have, or
+# scaled, with the commands that undo it; and exits.
+finish() {
+  local status=$1 what
+  trap '' INT TERM HUP
+  failed_step "$status"
+  if ((status != 0)); then
+    if [[ -n $job ]] && ((job_log)); then
+      infra_error "the Job external-dns/$job is kept, and its log, as it names the zone, is not shown here; it is read with: kubectl --namespace external-dns logs job/$job"
+    elif [[ -n $job ]]; then
+      infra_error "the Job external-dns/$job is kept; its own deadline of $timeout seconds stops its pod, which goes with its log"
+    fi
+    for what in "${left[@]}"; do
+      case $what in
+        kustomization) infra_error "the Kustomization flux-system/external-dns is left suspended; resume it with: flux resume kustomization external-dns" ;;
+        maybe-kustomization) infra_error "the Kustomization flux-system/external-dns may be left suspended, as it could not be read back; resume it with: flux resume kustomization external-dns" ;;
+        helmrelease) infra_error "the HelmRelease external-dns/external-dns is left suspended; resume it, after the Kustomization, with: flux resume helmrelease external-dns --namespace external-dns" ;;
+        maybe-helmrelease) infra_error "the HelmRelease external-dns/external-dns may be left suspended, as it could not be read back; resume it, after the Kustomization, with: flux resume helmrelease external-dns --namespace external-dns" ;;
+        scaled) infra_error "the Deployment external-dns/external-dns is left at 0 replicas, which helm-controller's drift detection undoes once the HelmRelease is resumed" ;;
+      esac
+    done
+  fi
+  exit "$status"
+}
+trap 'finish $?' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+
+# removal_failed REASON: fails the run with REASON.
+removal_failed() {
+  infra_error "$1"
+  exit 1
+}
+
+# kube VERB ARG...: kubectl VERB ARG..., bounded by 30 seconds, its standard output in last_output;
+# when it fails, its errors shown as report_errors shows them, without an address. Returns kubectl's
+# status.
+kube() {
+  local status=0
+  run_keeping_errors kubectl "$1" --request-timeout=30s "${@:2}" || status=$?
+  ((status == 0)) || report_errors kubectl
+  return "$status"
+}
+
+# quiet_flux ARG...: the flux CLI with ARG..., printing nothing when it succeeds and its errors as
+# kube shows kubectl's when it fails. Returns its status.
+quiet_flux() {
+  local status=0
+  run_keeping_errors flux "$@" || status=$?
+  ((status == 0)) || report_errors flux
+  return "$status"
+}
+
+# suspend_flux KIND NAMESPACE RESOURCE WHAT: suspends the object external-dns of KIND, kustomization
+# or helmrelease, in NAMESPACE with the flux CLI, and reads it back as RESOURCE; fails, naming WHAT
+# and showing the CLI's errors, unless its spec.suspend reads true. The pinned CLI, v2.10.0, prints a
+# failure to suspend an object it is given by name and exits 0 (cmd/flux/suspend.go:116-124), so its
+# status alone does not say the object is suspended. An object that cannot be read back may be
+# suspended, so the run's exit names it with the command that resumes it.
+suspend_flux() {
+  local kind=$1 namespace=$2 resource=$3 what=$4 flux_errors
+  quiet_flux suspend "$kind" external-dns --namespace "$namespace" || removal_failed "$what could not be suspended"
+  flux_errors=$last_errors
+  if ! kube get --namespace="$namespace" --output=json "$resource" external-dns; then
+    left+=("maybe-$kind")
+    removal_failed "$what cannot be read, so whether flux suspended it is not known"
+  fi
+  if ! jq -e '.spec.suspend == true' <<< "$last_output" > /dev/null 2>&1; then
+    last_errors=$flux_errors
+    report_errors flux
+    removal_failed "$what is not suspended after flux suspend, so external-dns is not scaled or run"
+  fi
+}
+
+# deadline_passed DEADLINE: whether SECONDS has reached DEADLINE.
+deadline_passed() {
+  ((SECONDS >= $1))
+}
+
+step="checking what the removal needs"
+complete=1
+require_commands kubectl flux jq || complete=0
+require_kubeconfig || complete=0
+timeout=${DNS_REMOVE_TIMEOUT:-300}
+if ! require_seconds DNS_REMOVE_TIMEOUT "$timeout"; then
+  complete=0
+elif ((10#$timeout == 0)); then
+  infra_error "DNS_REMOVE_TIMEOUT is 0 seconds; a Job and a wait take at least one"
+  complete=0
+fi
+((complete))
+timeout=$((10#$timeout))
+lock_cluster
+
+step="reading what $cluster runs"
+kube get --namespace=flux-system --ignore-not-found --output=json kustomizations.kustomize.toolkit.fluxcd.io external-dns ||
+  removal_failed "the Kustomization flux-system/external-dns cannot be read"
+if [[ -z $last_output ]]; then
+  infra_say "$cluster does not select external-dns, as the Kustomization flux-system/external-dns does not exist: it runs no external-dns to make records or to delete them with"
+  exit 0
+fi
+kube get --namespace=flux-system --output=json configmap cluster-config ||
+  removal_failed "flux-system/cluster-config cannot be read, so the records cannot be named under CLUSTER_DOMAIN"
+# The domain, as gateway-check reads it: a DNS name of two labels or more, never printed.
+domain=$(jq -r '.data.CLUSTER_DOMAIN // "" | tostring
+  | select(length <= 253 and test("\\A[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+\\z"))' <<< "$last_output" 2> /dev/null) || domain=
+[[ -n $domain ]] || removal_failed "the CLUSTER_DOMAIN of flux-system/cluster-config is not a DNS name"
+
+kube get --namespace=external-dns --output=json deployment external-dns ||
+  removal_failed "the Deployment external-dns/external-dns cannot be read"
+deployment=$last_output
+last_output=
+# What the template's container runs with, each a word, never the arguments' values but the owner id,
+# which is printed once it is a name.
+checked=$(jq -r --arg placeholder set-by-the-overlay '
+  [.spec.template.spec.containers[]? | select(.name == "external-dns")] as $containers
+  | if ($containers | length) != 1 then "containers"
+    else ($containers[0].args // []) as $args
+    | def given($flag): [$args[] | strings | select(startswith("--" + $flag + "=")) | ltrimstr("--" + $flag + "=")];
+    if any($args[]; type != "string" or (startswith("--") | not)) then "arguments"
+    elif given("policy") != ["sync"] then "policy"
+    elif given("registry") != ["txt"] then "registry"
+    elif given("provider") != ["cloudflare"] then "provider"
+    elif (given("txt-owner-id") | length) != 1 or given("txt-owner-id")[0] == "" or given("txt-owner-id")[0] == $placeholder then "owner"
+    elif (given("txt-owner-id")[0] | test("\\A[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\z") | not) then "owner-name"
+    elif ((.spec.selector.matchLabels // {}) | length == 0 or any(to_entries[]; (.key + "=" + (.value | tostring)) | test("\\A[A-Za-z0-9./_-]+=[A-Za-z0-9._-]*\\z") | not)) then "selector"
+    else "ok " + given("txt-owner-id")[0] end end' <<< "$deployment" 2> /dev/null) || checked=unreadable
+refused="the Deployment external-dns/external-dns"
+case $checked in
+  "ok "*) owner=${checked#ok } ;;
+  containers) removal_failed "$refused does not have one container named external-dns, whose arguments the Jobs take; nothing was changed" ;;
+  arguments) removal_failed "$refused runs external-dns with an argument that is not one --flag or --flag=value, which the Jobs could not take apart; nothing was changed" ;;
+  policy) removal_failed "$refused does not run external-dns with --policy=sync, once, so its sync would not delete; nothing was changed" ;;
+  registry) removal_failed "$refused does not run external-dns with --registry=txt, once, so the records it made cannot be told by their owner from the others'; nothing was changed" ;;
+  provider) removal_failed "$refused does not run external-dns with --provider=cloudflare, once, the provider whose log the run reads; nothing was changed" ;;
+  owner) removal_failed "$refused does not run external-dns with one --txt-owner-id of its cluster: it is missing, empty, given twice or the base's placeholder set-by-the-overlay; nothing was changed" ;;
+  owner-name) removal_failed "$refused runs external-dns with a --txt-owner-id that is not a name of lower-case letters, digits and hyphens; nothing was changed" ;;
+  selector) removal_failed "$refused selects its pods by no labels the run can wait on; nothing was changed" ;;
+  *) removal_failed "$refused cannot be read as a Deployment" ;;
+esac
+selector=$(jq -r '.spec.selector.matchLabels | to_entries | map("\(.key)=\(.value)") | join(",")' <<< "$deployment")
+infra_say "external-dns of $cluster owns its records as $owner"
+
+# The Job of KIND, plan or delete, made from the Deployment: see the header.
+# shellcheck disable=SC2016 # $name, $dry, $deadline and $label are jq variables.
+job_manifest='.spec.template.spec as $pod
+  | ($pod.containers[] | select(.name == "external-dns")) as $container
+  | def dropped: test("\\A--(source|namespace|interval|min-event-sync-interval|log-format)=") or startswith("--gateway-") or . == "--events";
+  {apiVersion: "batch/v1", kind: "Job",
+   metadata: {name: $name, namespace: "external-dns", labels: {"app.kubernetes.io/name": $label}},
+   spec: {backoffLimit: 0, activeDeadlineSeconds: $deadline,
+     template: {metadata: {labels: {"app.kubernetes.io/name": $label}},
+       spec: ({restartPolicy: "Never", serviceAccountName: $pod.serviceAccountName, automountServiceAccountToken: false,
+         securityContext: $pod.securityContext,
+         containers: [{name: "external-dns", image: $container.image, securityContext: $container.securityContext,
+           resources: $container.resources, env: $container.env, envFrom: $container.envFrom,
+           args: ([$container.args[] | select(dropped | not)] + ["--source=empty", "--once", "--log-format=json"]
+             + (if $dry then ["--dry-run"] else [] end))}
+           | with_entries(select(.value != null))]}
+         | with_entries(select(.value != null)))}}}'
+
+# What a Job's log says it changes, from its lines as external-dns writes them, given the domain:
+# a first line "ok" and one "TYPE NAME" per record it deletes, NAME under the domain, @ for the
+# domain itself; or a first line "refused WHY". The first line of the log is text, as external-dns
+# writes its configuration before it sets the format.
+# shellcheck disable=SC2016 # $domain is a jq variable.
+log_changes='[inputs | . as $line | ((try fromjson catch null) | if type == "object" then . else {text: $line} end)] as $lines
+  | [$lines[] | select(.msg == "Changing record.")] as $changes
+  | def relative: ascii_downcase | if . == $domain then "@" elif endswith("." + $domain) then rtrimstr("." + $domain) else null end;
+  if any($lines[]; (.text // "") | test("Changing record")) then "refused a line that mentions a change is not JSON"
+  elif any($changes[]; .action != "DELETE") then "refused it changes a record otherwise than by deleting it"
+  elif any($changes[]; (.record | type) != "string" or (.record | relative) == null) then "refused it changes a record that is not under the domain"
+  elif any($changes[]; (.record | relative | test("\\A[a-z0-9_*@-]([a-z0-9_.*-]{0,252})\\z") | not)
+      or (.type | type) != "string" or (.type | test("\\A[A-Z]{1,10}\\z") | not)) then "refused it changes a record whose name or type is not one"
+  elif ($changes | length) == 0 and (any($lines[]; .msg == "All records are already up to date") | not) then
+    "refused it says neither what it deletes nor that every record is up to date"
+  else "ok", ($changes[] | "\(.type) \(.record | relative)") end'
+
+# run_job KIND: makes the run's Job of KIND, plan, delete or verify, the second plan, which is a
+# Job of its own name, waits until it ends within the timeout, reads what its log says it deletes
+# into changes, "TYPE NAME" per line, sorted, and deletes it. A Job that cannot be made fails the
+# run; one that fails, does not end in time or whose log cannot be read fails it and is kept.
+run_job() {
+  local kind=$1 dry=true deadline condition verdict manifest name
+  [[ $kind != delete ]] || dry=false
+  name=external-dns-remove-$start-$kind
+  step="creating the Job external-dns/$name"
+  manifest=$(jq -c --arg name "$name" --arg label external-dns-remove --argjson dry "$dry" --argjson deadline "$timeout" \
+    "$job_manifest" <<< "$deployment" 2> /dev/null) || removal_failed "the Job external-dns/$name cannot be made from the Deployment's pod template"
+  kube create --namespace=external-dns --filename=- --output=name <<< "$manifest" ||
+    removal_failed "the Job external-dns/$name could not be created"
+  job=$name
+  step="waiting for the Job external-dns/$job"
+  deadline=$((SECONDS + timeout))
+  while :; do
+    kube get --namespace=external-dns --output=json job "$job" || removal_failed "the Job external-dns/$job cannot be read"
+    condition=$(jq -r '[.status.conditions // [] | .[] | select(.status == "True")]
+      | if any(.type == "Complete") then "complete"
+        elif any(.type == "Failed" and .reason == "DeadlineExceeded") then "expired"
+        elif any(.type == "Failed") then "failed" else "running" end' <<< "$last_output")
+    case $condition in
+      complete) break ;;
+      failed) removal_failed "the Job external-dns/$job failed" ;;
+    esac
+    if [[ $condition == expired ]] || deadline_passed "$deadline"; then
+      # The Job's own deadline is the same number of seconds, so a deleting Job may still be at work
+      # until it passes; then the Job controller deletes the Job's pod, and its log goes with it.
+      job_log=0
+      [[ $kind != delete ]] ||
+        removal_failed "the Job external-dns/$job did not end within $timeout seconds; its own deadline stops it, and just cluster-dns-remove --check, run after that, lists what is left in the zone"
+      removal_failed "the Job external-dns/$job did not end within $timeout seconds"
+    fi
+    sleep "$poll"
+  done
+  step="reading the log of the Job external-dns/$job"
+  kube logs --namespace=external-dns "job/$job" || removal_failed "the log of the Job external-dns/$job cannot be read"
+  verdict=$(jq -nrR --arg domain "$domain" "$log_changes" <<< "$last_output" 2> /dev/null) || verdict="refused it cannot be read"
+  last_output=
+  if [[ ${verdict%%$'\n'*} != ok ]]; then
+    removal_failed "the log of the Job external-dns/$job is not read as external-dns' plan: ${verdict#refused }"
+  fi
+  changes=$(sed 1d <<< "$verdict" | LC_ALL=C sort)
+  step="deleting the Job external-dns/$job"
+  kube delete --namespace=external-dns --wait=false job "$job" || removal_failed "the Job external-dns/$job could not be deleted"
+  job=''
+}
+
+# listed: the changes, one "  delete TYPE NAME" per line.
+listed() {
+  local change
+  while IFS= read -r change; do
+    printf '  delete %s\n' "$change"
+  done <<< "$changes"
+}
+
+run_job plan
+if [[ -z $changes ]]; then
+  infra_say "a run of external-dns with no source would delete nothing: no record it manages in the zone is $owner's"
+  exit 0
+fi
+infra_say "a run of external-dns with no source would delete these $(grep -c . <<< "$changes") records of $owner, each by its type and name under the domain, one line per record at the DNS provider:"
+listed
+if ((check)); then
+  infra_say "--check deletes none of them, and suspends and scales nothing"
+  exit 0
+fi
+((confirmed)) || confirm "$cluster" "stop external-dns and delete the records above for" changed
+
+step="suspending the Kustomization flux-system/external-dns"
+suspend_flux kustomization flux-system kustomizations.kustomize.toolkit.fluxcd.io "the Kustomization flux-system/external-dns"
+left+=(kustomization)
+step="suspending the HelmRelease external-dns/external-dns"
+suspend_flux helmrelease external-dns helmreleases.helm.toolkit.fluxcd.io "the HelmRelease external-dns/external-dns"
+left+=(helmrelease)
+step="scaling the Deployment external-dns/external-dns to 0"
+kube scale --namespace=external-dns --replicas=0 deployment/external-dns ||
+  removal_failed "the Deployment external-dns/external-dns could not be scaled to 0"
+left+=(scaled)
+step="waiting until no pod of external-dns/external-dns runs"
+deadline=$((SECONDS + timeout))
+while :; do
+  kube get --namespace=external-dns --selector="$selector" --output=json pods ||
+    removal_failed "the pods of external-dns/external-dns cannot be read"
+  [[ $(jq '.items | length' <<< "$last_output") != 0 ]] || break
+  ! deadline_passed "$deadline" || removal_failed "a pod of external-dns/external-dns still runs after $timeout seconds"
+  sleep "$poll"
+done
+
+run_job delete
+if [[ -n $changes ]]; then
+  infra_say "external-dns deleted these $(grep -c . <<< "$changes") records:"
+  listed
+fi
+run_job verify
+if [[ -n $changes ]]; then
+  infra_say "the plan after the deletion still finds records of $owner:"
+  listed
+  removal_failed "$(grep -c . <<< "$changes") records of $owner are still in the zone, so the removal has not finished; run it again"
+fi
+infra_say "a second plan finds no record of $owner left"
+infra_say "external-dns stays stopped, with the Kustomization flux-system/external-dns and the HelmRelease external-dns/external-dns suspended; ExternalDNSSyncStale fires meanwhile. To start it again, before the edge stack's destroy, or after it only once the edges are built again, just cluster-config has written their addresses to the cluster and flux reconcile kustomization gateway-public has applied them to the Gateway and ended Ready: flux resume kustomization external-dns, then flux resume helmrelease external-dns --namespace external-dns; helm-controller's drift detection then scales the Deployment back to one replica, and external-dns makes the records again at its first sync"

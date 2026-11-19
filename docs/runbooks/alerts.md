@@ -235,6 +235,9 @@ What fires it:
   scope), a connection to the provider that cannot be made, or the Kubernetes API failing the
   source. The pod then crash-loops, its target goes, and its series with it. A pod that never
   starts, as when its Secret is missing, and a release that is not installed have none either.
+- **A removal**: `just cluster-dns-remove` stops external-dns before a teardown, so a cluster it ran
+  on fires the alert, as expected, until the cluster is destroyed or external-dns is started again
+  ([rebuild.md](rebuild.md#taking-it-down), [edge.md](edge.md#the-way-back)).
 
 Look at first: `kubectl --namespace external-dns get pods`, which shows a crash loop or a pod that
 does not start, and the controller's log, `just logs 'kubernetes.pod_namespace:external-dns' --since

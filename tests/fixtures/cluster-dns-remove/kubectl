@@ -1,0 +1,220 @@
+#!/usr/bin/env bash
+# A stand-in for kubectl against a running cluster whose external-dns keeps a zone's records,
+# installed by tests/cluster-dns-remove.bats as <tmp>/bin/kubectl. It finds its files from its own
+# path, answers from <tmp>/state and keeps what a run changes there:
+#   deployment.json     the Deployment external-dns/external-dns; its spec.replicas is the file
+#                       replicas
+#   cluster-config.json the ConfigMap flux-system/cluster-config
+#   secret.json         the Secret external-dns/external-dns-cloudflare, which holds the token; a
+#                       read of a Secret is refused
+#   zone.json           the zone at the DNS provider, which a Job made from the Deployment changes
+#   no-dns-app          the Kustomization flux-system/external-dns does not exist
+#   suspended.<kind>.<namespace>.<name>  the fake flux's record that an object is suspended, which
+#                       the Kustomization flux-system/external-dns and the HelmRelease
+#                       external-dns/external-dns read as spec.suspend
+#   readback-fails.<kind>  reading the object of that kind, kustomization or helmrelease, fails
+#                       once the fake flux has suspended it, with an error that names the API
+#                       server's address
+#   terminating         how many reads of the Deployment's pods find one still there once it is
+#                       scaled to 0, 1 without the file
+#   job-fails.<kind>    a Job of that kind, plan (in dry-run) or delete, fails after its first
+#                       line, with a fatal line that names the zone
+#   job-stuck.<kind>    a Job of that kind never ends
+#   job-expires.<kind>  a Job of that kind is stopped by its deadline: it fails with the reason
+#                       DeadlineExceeded, and its pod is gone with its log
+#   job-action.<kind>   the action, such as CREATE or UPDATE, that the log of a Job of that kind gives
+#                       its first change in place of DELETE
+#   comes-back          once a deleting Job has run, hello's records and its TXT entry, as
+#                       zone.before.json holds them, are in the zone again, as if something made them
+#   noisy               reading the Deployment fails, with an error that names the API server's
+#                       address
+#   jobs/<name>.json, .log, .status   a Job created, what its pod logged and how it ended
+# A Job is run when it is created, as the pinned external-dns would run with its container's
+# arguments (external-dns.jq beside this file), with the zone's identifier the marker in the file
+# zone-marker, and only when its container takes the token from the Secret by reference.
+# Every call goes to <tmp>/record/argv as "kubectl ARGS", the manifest a create reads from its
+# standard input to <tmp>/record/created, and what changes the cluster, in order, to
+# <tmp>/record/events.
+set -uo pipefail
+
+root=${0%/bin/*}
+state=$root/state
+record=$root/record
+fixtures=$(cat "$state/fixtures")
+printf '%s\n' "kubectl $*" >> "$record/argv"
+event() {
+  printf '%s\n' "$*" >> "$record/events"
+}
+
+namespace=default output='' selector='' replicas='' file='' ignore=0 deadline=0
+words=()
+for arg; do
+  case $arg in
+    --namespace=*) namespace=${arg#*=} ;;
+    --output=*) output=${arg#*=} ;;
+    --selector=*) selector=${arg#*=} ;;
+    --replicas=*) replicas=${arg#*=} ;;
+    --filename=*) file=${arg#*=} ;;
+    --request-timeout=*) deadline=1 ;;
+    --ignore-not-found) ignore=1 ;;
+    --wait=false) ;;
+    -*) echo "fake kubectl: unexpected option $arg" >&2 && exit 1 ;;
+    *) words+=("$arg") ;;
+  esac
+done
+((deadline)) || { echo "fake kubectl: a call without --request-timeout" >&2; exit 1; }
+
+not_found() {
+  ((ignore)) && exit 0
+  echo "Error from server (NotFound): $1 \"$2\" not found" >&2
+  exit 1
+}
+
+# unreachable: fails as kubectl does when the API server does not answer.
+unreachable() {
+  echo "Unable to connect to the server: dial tcp 192.0.2.10:6443: i/o timeout" >&2
+  exit 1
+}
+
+# read_back KIND NAMESPACE: fails when the object external-dns of KIND is suspended and
+# readback-fails.KIND is there.
+read_back() {
+  [[ ! -e $state/readback-fails.$1 || ! -e $state/suspended.$1.$2.external-dns ]] || unreachable
+}
+
+# pod_runs: whether a pod of the Deployment runs: while it has a replica, and once scaled to 0 until
+# the reads terminating allows have found it.
+pod_runs() {
+  (($(< "$state/replicas") > 0 || $(cat "$state/terminating" 2> /dev/null || echo 1) > 0))
+}
+
+# job_of NAME: what kind of Job NAME is: plan for one in dry-run, delete otherwise.
+job_of() {
+  if jq -e '.spec.template.spec.containers[0].args | index("--dry-run")' "$state/jobs/$1.json" > /dev/null; then
+    echo plan
+  else
+    echo delete
+  fi
+}
+
+case "${words[0]-} ${words[1]-}" in
+  "get kustomizations.kustomize.toolkit.fluxcd.io")
+    [[ $namespace == flux-system && ${words[2]-} == external-dns && $output == json ]] || { echo "fake kubectl: unexpected $*" >&2; exit 1; }
+    [[ ! -e $state/no-dns-app ]] || not_found kustomizations.kustomize.toolkit.fluxcd.io external-dns
+    read_back kustomization flux-system
+    suspended=false
+    [[ ! -e $state/suspended.kustomization.flux-system.external-dns ]] || suspended=true
+    jq -n --argjson suspended "$suspended" '{kind: "Kustomization", metadata: {namespace: "flux-system", name: "external-dns"}, spec: {suspend: $suspended}}'
+    ;;
+  "get helmreleases.helm.toolkit.fluxcd.io")
+    [[ $namespace == external-dns && ${words[2]-} == external-dns && $output == json ]] || { echo "fake kubectl: unexpected $*" >&2; exit 1; }
+    read_back helmrelease external-dns
+    suspended=false
+    [[ ! -e $state/suspended.helmrelease.external-dns.external-dns ]] || suspended=true
+    jq -n --argjson suspended "$suspended" '{kind: "HelmRelease", metadata: {namespace: "external-dns", name: "external-dns"}, spec: {suspend: $suspended}}'
+    ;;
+  "get configmap")
+    [[ $namespace == flux-system && ${words[2]-} == cluster-config ]] || not_found configmaps "${words[2]-}"
+    cat "$state/cluster-config.json"
+    ;;
+  "get deployment")
+    [[ $namespace == external-dns && ${words[2]-} == external-dns ]] || not_found deployments.apps "${words[2]-}"
+    [[ ! -e $state/noisy ]] || unreachable
+    jq --argjson replicas "$(< "$state/replicas")" '.spec.replicas = $replicas' "$state/deployment.json"
+    ;;
+  "get secret" | "get secrets")
+    echo "fake kubectl: the recipe never reads a Secret" >&2
+    exit 1
+    ;;
+  "get pods")
+    expected=$(jq -r '.spec.selector.matchLabels | to_entries | map("\(.key)=\(.value)") | sort | join(",")' "$state/deployment.json")
+    [[ $namespace == external-dns && $(tr ',' '\n' <<< "$selector" | sort | paste -sd, -) == "$expected" ]] ||
+      { echo "fake kubectl: unexpected pods of $namespace selected by $selector" >&2; exit 1; }
+    pods=0
+    if pod_runs; then
+      pods=1
+      if (($(< "$state/replicas") == 0)); then
+        echo $(($(cat "$state/terminating" 2> /dev/null || echo 1) - 1)) > "$state/terminating"
+      fi
+    fi
+    event "pods $pods"
+    jq -n --argjson pods "$pods" '{items: [range($pods) | {metadata: {namespace: "external-dns", name: "external-dns-6c9f7d9b8d-x2k4p"}}]}'
+    ;;
+  "scale deployment/external-dns")
+    [[ $namespace == external-dns && $replicas =~ ^[0-9]+$ ]] || { echo "fake kubectl: unexpected $*" >&2; exit 1; }
+    echo "$replicas" > "$state/replicas"
+    event "scaled external-dns/external-dns to $replicas"
+    echo "deployment.apps/external-dns scaled"
+    ;;
+  "create "*)
+    [[ ${#words[@]} -eq 1 && $file == - && $namespace == external-dns ]] || { echo "fake kubectl: unexpected $*" >&2; exit 1; }
+    manifest=$(cat)
+    printf '%s\n' "$manifest" >> "$record/created"
+    name=$(jq -er 'select(.kind == "Job" and .apiVersion == "batch/v1" and .metadata.namespace == "external-dns") | .metadata.name' <<< "$manifest") ||
+      { echo "fake kubectl: not a Job of external-dns" >&2; exit 1; }
+    [[ ! -e $state/jobs/$name.json ]] || { echo "Error from server (AlreadyExists): jobs.batch \"$name\" already exists" >&2; exit 1; }
+    printf '%s\n' "$manifest" > "$state/jobs/$name.json"
+    kind=$(job_of "$name")
+    running=''
+    ! pod_runs || running=' while a pod of external-dns/external-dns runs'
+    event "job $kind $name$running"
+    # The token reaches the container only by reference to the Secret that holds it.
+    token=$(jq --slurpfile secret "$state/secret.json" '[.spec.template.spec.containers[0].env[]?
+      | select(.name == "CF_API_TOKEN" and .value == null and .valueFrom.secretKeyRef.name == $secret[0].metadata.name
+          and ($secret[0].data[.valueFrom.secretKeyRef.key] != null))] | length == 1' <<< "$manifest")
+    jq -n --argjson job "$manifest" --slurpfile zone "$state/zone.json" --arg marker "$(< "$state/zone-marker")" \
+      --arg time "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson token "$token" \
+      '{args: $job.spec.template.spec.containers[0].args, zone: $zone[0], marker: $marker, time: $time, token: $token}' |
+      jq -f "$fixtures/external-dns.jq" > "$state/run.json"
+    if [[ -e $state/job-stuck.$kind ]] || [[ $(jq '.exit' "$state/run.json") == null ]]; then
+      jq -r '.log[]' "$state/run.json" > "$state/jobs/$name.log"
+      echo running > "$state/jobs/$name.status"
+    elif [[ -e $state/job-expires.$kind ]]; then
+      echo expired > "$state/jobs/$name.status"
+    elif [[ -e $state/job-fails.$kind ]]; then
+      { jq -r '.log[0]' "$state/run.json"
+        printf '{"level":"fatal","msg":"failed to submit all changes for the following zones: [\\"%s\\"]","time":"%s"}\n' "$(< "$state/zone-marker")" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      } > "$state/jobs/$name.log"
+      echo failed > "$state/jobs/$name.status"
+    else
+      jq -r '.log[]' "$state/run.json" > "$state/jobs/$name.log"
+      if [[ -e $state/job-action.$kind ]]; then
+        sed -i "0,/\"action\":\"DELETE\"/s//\"action\":\"$(< "$state/job-action.$kind")\"/" "$state/jobs/$name.log"
+      fi
+      if [[ $(jq '.exit' "$state/run.json") == 0 ]]; then echo complete; else echo failed; fi > "$state/jobs/$name.status"
+      jq '.zone' "$state/run.json" > "$state/zone.json"
+      if [[ $kind == delete && -e $state/comes-back ]]; then
+        jq --slurpfile before "$state/zone.before.json" '(. + [$before[0][] | select(.name | endswith("hello.example.com"))]) | unique' \
+          "$state/zone.json" > "$state/zone.next"
+        mv "$state/zone.next" "$state/zone.json"
+      fi
+    fi
+    echo "job.batch/$name"
+    ;;
+  "get job")
+    [[ $namespace == external-dns && -f $state/jobs/${words[2]-}.json ]] || not_found jobs.batch "${words[2]-}"
+    case $(< "$state/jobs/${words[2]}.status") in
+      complete) conditions='[{type: "SuccessCriteriaMet", status: "True"}, {type: "Complete", status: "True"}]' ;;
+      failed) conditions='[{type: "FailureTarget", status: "True"}, {type: "Failed", status: "True", reason: "BackoffLimitExceeded"}]' ;;
+      expired) conditions='[{type: "FailureTarget", status: "True", reason: "DeadlineExceeded"}, {type: "Failed", status: "True", reason: "DeadlineExceeded"}]' ;;
+      *) conditions='[]' ;;
+    esac
+    jq --argjson conditions "$(jq -n "$conditions")" '. + {status: {conditions: $conditions}}' "$state/jobs/${words[2]}.json"
+    ;;
+  "logs job/"*)
+    name=${words[1]#job/}
+    [[ $namespace == external-dns && -f $state/jobs/$name.json ]] || not_found jobs.batch "$name"
+    cat "$state/jobs/$name.log"
+    ;;
+  "delete job")
+    name=${words[2]-}
+    [[ $namespace == external-dns && -f $state/jobs/$name.json ]] || not_found jobs.batch "$name"
+    rm -f "$state/jobs/$name".*
+    event "deleted job $name"
+    echo "job.batch \"$name\" deleted"
+    ;;
+  *)
+    echo "fake kubectl: unexpected kubectl $*" >&2
+    exit 1
+    ;;
+esac

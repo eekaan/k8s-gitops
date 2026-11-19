@@ -66,6 +66,40 @@ them is a `just` recipe.
   `just cluster-destroy`, and prints no resource's address. A stack that was never applied, or holds
   data sources only, holds nothing; a state that cannot be read, for any reason, refuses the run
   too.
+  `just infra-destroy --check`, with a stack or without, makes every refusal the run would make, the
+  plumbing stack's, the cluster's and the edge stack's below, and then stops before each stack's
+  plan, printing `<stack>: nothing refuses its destroy; --check planned and destroyed nothing` and
+  exiting 0, or exiting 1 on a refusal: nothing is planned, applied or asked, and no generated file
+  or host key is removed.
+- `just infra-destroy sto2/edge` gives the edges' floating addresses back to the cloud, and the A
+  records external-dns made for the routes' names point at them. So before it plans, it reads the
+  edges' two addresses from the stack's outputs, lists the names the tree's routes on the Gateway
+  `public` publish under `CLUSTER_DOMAIN`, offline, from what `scripts/kubernetes-check` builds of
+  every application, enabled or not, and looks each up at the public resolver over HTTPS, as
+  `just gateway-check` does ([kubernetes.md](kubernetes.md#dns-records)); kubernetes-check and curl
+  run without the stack's secrets. While a name resolves to an address in the stack's outputs, or
+  its lookup gives no answer that tells, as when the resolver cannot be asked, its answer cannot be
+  read, has another status than NOERROR or NXDOMAIN, or holds a CNAME, the recipe plans and
+  destroys nothing, naming each by its label under the domain, never in full or with an address,
+  and saying what takes the records out: `just cluster-dns-remove` while the cluster that made them
+  runs ([cluster.md](cluster.md#recipes)), or, once it is gone, deleting those A records and their
+  `extdns-` TXT entries at the DNS provider. The resolver answers from its cache for up to a
+  record's TTL, five minutes, so a destroy run right after the removal can still refuse until then.
+  A name it found missing when last asked, as before its record was made, it answers as missing
+  for up to the zone's negative TTL ([kubernetes.md](kubernetes.md#dns-records)), so the lookup
+  checks the zone as the resolver last saw it; the zone itself is read by
+  `just cluster-dns-remove`'s second plan, which a teardown runs before this destroy and which
+  fails while a record of the cluster's owner is left.
+  It refuses as well while the addresses are not known: the outputs cannot be read as JSON, name
+  other than two edges, or name none while the state holds a floating IP or cannot be read. Outputs
+  that name no address, of a state that holds no floating IP, as before the stack is applied or once
+  it is destroyed, leave nothing to look up. It refuses too while `CLUSTER_DOMAIN` is unset or the
+  placeholder, or the names cannot be listed, as when `just kubernetes-check` fails, or are none.
+  The names looked up are those the checkout's tree publishes; a record of a route no longer in it
+  still carries its cluster's owner, and `just cluster-dns-remove` takes it out by that owner, not
+  by name. `--ignore-dns`, which goes with `sto2/edge` alone, destroys the stack past all of that: it
+  still looks up every name it can and names, on standard error, each that resolves to the edges and
+  each that could not be looked up, or says in one line that no name was looked up.
 - `just ci-host-setup` and `just ci-host-remove` set up and deregister the CI host's runner
   ([runbooks/ci-host.md](runbooks/ci-host.md)).
 - `just os-images [pattern]` lists, reading only, the names of the public images the cloud offers,
@@ -94,8 +128,9 @@ there.
 Apply `plumbing` before `cluster`, `ci` and `edge`, as all three read the plumbing stack's state.
 Destroy goes the other way round: `ci` and `edge` by name, before `plumbing`, whose network their
 ports are on, and which the recipe refuses to destroy while the `ci` or the `edge` stack holds
-anything. `just infra-destroy sto2/edge` destroys the edge stack the same way as the ci stack;
-`just infra-destroy` without a stack leaves both. State objects stay in the bucket after a destroy.
+anything. `just infra-destroy sto2/edge` destroys the edge stack the same way as the ci stack, once
+no name the routes publish resolves to its addresses (Recipes, above); `just infra-destroy` without
+a stack leaves both. State objects stay in the bucket after a destroy.
 
 ## Before the first plan
 

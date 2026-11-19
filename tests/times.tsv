@@ -21,6 +21,7 @@ tests/check-address-literals.bats	1
 tests/check-conflict-markers.bats	0
 tests/ci-host.bats	3
 tests/ci.bats	24
+tests/cluster-dns-remove.bats	7
 tests/cluster-flux.bats	18
 tests/cluster-last-copies.bats	48
 tests/cluster-lifecycle.bats	155
