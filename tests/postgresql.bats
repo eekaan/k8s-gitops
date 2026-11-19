@@ -149,36 +149,8 @@ pin() {
   awk -v key="$2:" '$1 == key { print prev; print $2; exit } { prev = $0 }' "$1"
 }
 
-# schema_problems SCHEMA DOCUMENT: what is wrong with the JSON DOCUMENT against the JSON schema file
-# SCHEMA, one line each: a field the schema does not define, a value of another type than its field's
-# or outside its enum. Each value's place in the schema: a property, an array's items, a map's
-# additionalProperties, or anything at all below a field that keeps unknown fields. Metadata is the
-# API server's. Every path counts, those of maps and lists and of false and null values included:
-# paths(scalars) would drop the last two, and an empty map or list has no path below it.
-schema_problems() {
-  jq -r --slurpfile schema "$1" '
-    def node($s; $p): reduce $p[] as $k ($s;
-      if . == null or .["x-any"] then .
-      elif ($k | type) == "number" then .items
-      elif ((.properties // {}) | has($k)) then .properties[$k]
-      elif (.additionalProperties | type) == "object" then .additionalProperties
-      elif .["x-kubernetes-preserve-unknown-fields"] then {"x-any": true}
-      else null end);
-    def types($n): if $n["x-kubernetes-int-or-string"] then ["integer", "string"]
-      elif $n.type then [$n.type] else [($n.anyOf // [])[].type | select(. != null)] end;
-    def kind: if type == "number" then (if . == floor then "integer" else "number" end) else type end;
-    def shown: if type == "object" then "a map" elif type == "array" then "a list" else tojson end;
-    . as $doc | $schema[0] as $s
-    | paths as $p | select($p[0] != "apiVersion" and $p[0] != "kind" and $p[0] != "metadata")
-    | ($doc | getpath($p)) as $v | node($s; $p) as $n | ($p | map(tostring) | join(".")) as $at
-    | if $n == null then "\($at): not in the definition"
-      elif $n["x-any"] then empty
-      elif (types($n) | length) > 0 and (any(types($n)[]; . == ($v | kind) or (. == "number" and ($v | kind) == "integer")) | not)
-        then "\($at): \($v | shown) is not of type \(types($n) | join(" or "))"
-      elif ($v | type) != "object" and ($v | type) != "array" and $n.enum != null and (any($n.enum[]; . == $v) | not)
-        then "\($at): \($v | tojson) is not one of \($n.enum | tojson)"
-      else empty end' "$2"
-}
+# schema_problems SCHEMA DOCUMENT, which tests/postgres-restore.bats shares.
+load fixtures/schema-problems
 
 # assert_restricted: every Deployment of $RENDERED meets the checks of the restricted Pod Security
 # level that a pod template can show, and fails with the line of the first that does not.
@@ -1207,17 +1179,24 @@ accepted() {
 }
 
 @test "The restore runbook's manifest is one the pinned operator defines and reads the archive of the cluster it replaces" {
-  local schema runbook="$REPO/docs/runbooks/postgres-restore.md" manifest="$BATS_TEST_TMPDIR/restore.yaml" problems source old new
+  local schema runbook="$REPO/docs/runbooks/postgres-restore.md" manifest="$BATS_TEST_TMPDIR/restore.yaml" problems source old new block
   render
   schema="$BATS_TEST_TMPDIR/cluster-schema.json"
   yq -N -o json 'select(.kind == "CustomResourceDefinition" and .metadata.name == "clusters.postgresql.cnpg.io")
     | .spec.versions[] | select(.name == "v1") | .schema.openAPIV3Schema' "$RENDERED" >"$schema"
   [ -s "$schema" ]
   [ -f "$runbook" ]
-  # The one fenced YAML block of the runbook that is a Cluster, whatever list item it is indented in.
+  # The point-in-time restore's Cluster: the one fenced YAML block of the runbook that is a Cluster
+  # bootstrapped by recovery, whatever list item it is indented in; the dump restore's bootstraps by
+  # initdb (tests/postgres-restore.bats).
   awk -v dir="$BATS_TEST_TMPDIR" '/^ *```yaml$/ { inside = 1; block++; match($0, /^ */); indent = RLENGTH; next }
     /^ *```$/ { inside = 0; next } inside { print substr($0, indent + 1) > (dir "/block-" block ".yaml") }' "$runbook"
-  grep -lx 'kind: Cluster' "$BATS_TEST_TMPDIR"/block-*.yaml >"$BATS_TEST_TMPDIR/cluster-blocks"
+  : >"$BATS_TEST_TMPDIR/cluster-blocks"
+  for block in "$BATS_TEST_TMPDIR"/block-*.yaml; do
+    if grep -qx 'kind: Cluster' "$block" && [ "$(yq '(.spec.bootstrap // {}) | has("recovery")' "$block")" = true ]; then
+      echo "$block" >>"$BATS_TEST_TMPDIR/cluster-blocks"
+    fi
+  done
   [ "$(grep -c . "$BATS_TEST_TMPDIR/cluster-blocks")" -eq 1 ]
   cp "$(cat "$BATS_TEST_TMPDIR/cluster-blocks")" "$manifest"
   yq -o json '.' "$manifest" >"$BATS_TEST_TMPDIR/restore.json"
