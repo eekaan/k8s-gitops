@@ -153,5 +153,12 @@
       matchFileNames: ["kubernetes/apps/base/ascender/**"],
       automerge: false,
     },
+    {
+      // A new version of the operator can restart the storage pods on every node, so a person reads
+      // the release notes and picks the time (docs/kubernetes.md, Storage).
+      description: "Everything of the Piraeus operator and the storage cluster, the operator's chart included",
+      matchFileNames: ["kubernetes/apps/base/piraeus-datastore/**"],
+      automerge: false,
+    },
   ],
 }
