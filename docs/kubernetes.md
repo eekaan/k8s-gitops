@@ -81,6 +81,9 @@ spec:
 An application the overlay selects also has an entity in Backstage's catalogue, in the same change
 ([Backstage](#backstage)); `tests/backstage.bats` fails without it.
 
+A new test file, such as `tests/<app>.bats`, gets its time with `just test-time tests/<app>.bats` in
+the same change, and `just test` fails until it has one.
+
 Enable the application by listing its namespace directory, once, and its `ks.yaml` in
 `apps/overlays/<cluster>/kustomization.yaml`. A disabled application stays in the list,
 commented out with the reason:
