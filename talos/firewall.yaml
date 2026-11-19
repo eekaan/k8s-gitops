@@ -91,3 +91,18 @@ listeners:
     ports: [9962]
     nodes: all
     from: [members, pods]
+  - name: linstor-satellite
+    protocol: tcp
+    ports: [3366-3367]
+    nodes: all
+    from: [members, pods]
+  - name: drbd
+    protocol: tcp
+    ports: [7000-7999]
+    nodes: all
+    from: [members]
+  - name: drbd-reactor
+    protocol: tcp
+    ports: [9942]
+    nodes: all
+    from: [members, pods]

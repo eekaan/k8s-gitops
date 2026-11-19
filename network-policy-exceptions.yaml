@@ -84,10 +84,10 @@ exceptions:
       flows are not yet enumerated
     covered-by: the namespace's Pod Security level and the node firewall (ADR 0017)
   - namespace: piraeus-datastore
-    reason: the CSI node plugin runs in the host's network namespace, which a pod policy does not
-      select; the LINSTOR controller, the satellites and the CSI plugins talk to each other, the
-      satellites replicate over the pod network, and the API server calls the operator's webhook;
-      its flows are not yet enumerated
+    reason: the CSI node plugin and the satellites run in the host's network namespace, which a pod
+      policy does not select, and DRBD replicates between the nodes' addresses; the LINSTOR
+      controller, the satellites and the CSI plugins talk to each other, and the API server calls
+      the operator's webhook; its flows are not yet enumerated
     covered-by: LINSTOR's API, which takes only clients holding a certificate its own authority
       signs (docs/kubernetes.md, Who may call LINSTOR); the namespace's Pod Security level and the
       node firewall (ADR 0017)

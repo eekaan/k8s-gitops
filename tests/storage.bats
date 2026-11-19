@@ -165,6 +165,13 @@ satellite() {
   kustomize build "$dir" >"$SATELLITE"
 }
 
+# go_func FILE NAME: the Go function or method NAME of FILE, from its signature to its closing brace,
+# a line each with its indentation dropped, runs of blanks made one and whole-line comments left out.
+go_func() {
+  awk -v name="$2" '$0 ~ "^func (\\([^)]*\\) )?" name "\\(" { inside = 1 } inside { print } inside && /^}/ { exit }' "$1" |
+    sed -E 's#^[[:space:]]*//.*$##; s/[[:space:]]+/ /g; s/^ //; s/ $//' | grep .
+}
+
 # nodes: every node's machine configuration, rendered once per run by scripts/talos-check from the
 # repository's patches and its test fixture, as NODES/<hostname>.yaml.
 nodes() {
@@ -643,6 +650,130 @@ controller_start() {
   done
   [ "$workers" -gt 0 ]
   [ "$(grep -c 'kubernetes.io/hostname' "$BUILT")" -eq 0 ]
+}
+
+@test "Satellites run in their node's network namespace and register the node's address" {
+  local pod='select(.kind == "DaemonSet") | .spec.template.spec' configs dialers namespaces names state ready node wanted kept
+  satellite
+  # On the node's network, as Piraeus' how-to puts it (docs/how-to/drbd-host-networking.md of the
+  # operator): DRBD's connections belong to the network namespace that configured them, and the
+  # node's outlives every satellite pod. The default DNS policy, which on the host network is the
+  # node's resolver.
+  echo "the satellite's pod: hostNetwork $(yq -N "$pod | .hostNetwork" "$SATELLITE"), dnsPolicy $(yq -N "$pod | .dnsPolicy" "$SATELLITE")"
+  [ "$(yq -N "$pod | .hostNetwork" "$SATELLITE")" = true ]
+  [ "$(yq -N "$pod | .dnsPolicy" "$SATELLITE")" = null ]
+  # Set by one configuration, in its podTemplate or a patch, which applies to every satellite and
+  # sets nothing else.
+  configs="$(yq -N -o json -I0 'select(.kind == "LinstorSatelliteConfiguration")
+    | select([.spec.podTemplate, ((.spec.patches // [])[] | .patch | from_yaml)] | [.. | select(tag == "!!map" and has("hostNetwork"))] | length > 0)
+    | {"name": .metadata.name, "spec": .spec}' "$BUILT")"
+  echo "configurations that set hostNetwork: ${configs:-none}"
+  [ "$(grep -c . <<<"$configs")" -eq 1 ]
+  [ "$(jq -c '.spec' <<<"$configs")" = '{"podTemplate":{"spec":{"hostNetwork":true}}}' ]
+  # It dials nothing by a name the cluster's DNS serves, which the node's resolver does not: no
+  # container or init container is given the controller's address, LS_CONTROLLERS, or names a
+  # Service or a name of the cluster's domain, whole or as <name>.<namespace> of a namespace of the
+  # tree or default, which only the cluster's search domains complete.
+  dialers="$(yq -N "$pod | (.initContainers // []) + .containers | .[] | select((.env // []) | any_c(.name == \"LS_CONTROLLERS\")) | .name" "$SATELLITE")"
+  echo "containers given the controller's address: ${dialers:-none}"
+  [ -z "$dialers" ]
+  namespaces="$(find "$REPO/kubernetes/apps/base" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort | paste -sd '|')"
+  [ -n "$namespaces" ]
+  names="$(yq -N "$pod | (.initContainers // []) + .containers | .[] | .. | select(tag == \"!!str\")" "$SATELLITE" |
+    grep -E "[.]svc([.:/]|\$)|cluster[.]local[.]?([:/]|\$)|[a-z0-9][.]($namespaces|default)([.:/]|\$)" || true)"
+  echo "cluster names in its containers: ${names:-none}"
+  [ -z "$names" ]
+
+  # The operator at the version the chart runs registers the node in LINSTOR once the satellite's pod
+  # is ready, with the interface default-ipv4 at the pod's IPv4 address, which on the host network
+  # is the node's own (internal/controller/linstorsatellite_controller.go).
+  state="$(go_func "$OPERATOR_SRC/internal/controller/linstorsatellite_controller.go" reconcileLinstorSatelliteState)"
+  ready="$(go_func "$OPERATOR_SRC/internal/controller/linstorsatellite_controller.go" getReadyPod)"
+  grep -qxF 'pod, err := r.getReadyPod(ctx, lsatellite)' <<<"$state"
+  [ "$(grep -cxF 'return pod, nil' <<<"$ready")" -eq 1 ]
+  [ "$(grep -xF -B1 'return pod, nil' <<<"$ready" | head -n 1)" = \
+    'if condition.Type == corev1.PodReady && condition.Status == corev1.ConditionTrue {' ]
+  grep -qxF 'for _, podIP := range pod.Status.PodIPs {' <<<"$state"
+  grep -qxF 'ip := net.ParseIP(podIP.IP)' <<<"$state"
+  [ "$(grep -xF -A1 'case ip.To4() != nil:' <<<"$state" | tail -n 1)" = 'name = "default-ipv4"' ]
+  [ "$(sed -n '/^netIfs = append(netIfs, lapi.NetInterface{$/,/^})$/p' <<<"$state" | grep -xE 'Name: .*|Address: .*' | paste -sd " ")" = \
+    'Name: name, Address: ip,' ]
+  node="$(sed -n '/^lnode, err := lc.CreateOrUpdateNode(ctx, lapi.Node{$/,/^})$/p' <<<"$state")"
+  echo "the node it registers: $(paste -sd " " <<<"$node")"
+  grep -qxF 'Name: pod.Spec.NodeName,' <<<"$node"
+  grep -qxF 'NetInterfaces: netIfs,' <<<"$node"
+  # No configuration leaves IPv4 out of what it registers.
+  [ -z "$(yq -N 'select(.kind == "LinstorSatelliteConfiguration") | select(.spec.ipFamilies != null)
+    | select((.spec.ipFamilies | any_c(. == "IPv4")) | not) | .metadata.name' "$BUILT")" ]
+  # And changes the address of an existing interface of that name in place: its client of LINSTOR's
+  # API (pkg/linstorhelper/client.go) creates the node only when LINSTOR has none of that name,
+  # deletes no node, modifies a wanted interface it finds and creates one it does not, and deletes
+  # only an interface it manages that is no longer wanted.
+  node="$(go_func "$OPERATOR_SRC/pkg/linstorhelper/client.go" CreateOrUpdateNode)"
+  wanted="$(go_func "$OPERATOR_SRC/pkg/linstorhelper/client.go" ensureWantedInterface)"
+  [ "$(grep -cF 'c.Nodes.Create(' <<<"$node")" -eq 1 ]
+  [ "$(grep -xF -B5 'if err := c.Nodes.Create(ctx, node); err != nil {' <<<"$node" | grep -cxF 'if !errors.Is(err, lapi.NotFoundError) {')" -eq 1 ]
+  [ "$(grep -cE 'Nodes[.](Delete|Lost)[(]' <<<"$node")" -eq 0 ]
+  [ "$(grep -xF -A1 'for _, nic := range node.NetInterfaces {' <<<"$node" | tail -n 1)" = 'err = c.ensureWantedInterface(ctx, existingNode, nic)' ]
+  kept="$(sed -n '/^for _, existingNic := range existingNode.NetInterfaces {$/,/DeleteNetinterface/p' <<<"$node")"
+  grep -qxF 'if slices.ContainsFunc(node.NetInterfaces, func(netInterface lapi.NetInterface) bool {' <<<"$kept"
+  [ "$(grep -xF -A2 'return netInterface.Name == existingNic.Name' <<<"$kept" | tail -n 1)" = continue ]
+  [ "$(grep -cF 'DeleteNetinterface' <<<"$node")" -eq 1 ]
+  echo "for a wanted interface: $(paste -sd " " <<<"$wanted")"
+  [ "$(grep -xF -A1 'if nodeIf.Name != wanted.Name {' <<<"$wanted" | tail -n 1)" = continue ]
+  grep -qxF 'return c.Nodes.ModifyNetInterface(ctx, node.Name, wanted.Name, wanted)' <<<"$wanted"
+  grep -qxF 'return c.Nodes.CreateNetInterface(ctx, node.Name, wanted)' <<<"$wanted"
+  [ "$(grep -c 'Delete' <<<"$wanted")" -eq 0 ]
+}
+
+@test "Every node admits the satellites, DRBD's replication and the DRBD reactor from those who use them" {
+  local inventory="$REPO/talos/firewall.yaml" listeners declared protocol port admitting drbd overlapping moved
+  # The ports of the one rule that admits each declared port: the satellite's, 3366 and 3367, as the
+  # operator registers a satellite on either (internal/controller/linstorsatellite_controller.go),
+  # and the reactor's alone.
+  local -A spans=([3366]='["3366-3367"]' [9942]='["9942"]')
+  satellite
+  # TCP and UDP listeners of the nodes' firewall, each with its ports as [low, high].
+  listeners="$(yq -o json -I0 '.listeners' "$inventory" |
+    jq -c '[.[] | . + {"ranges": [.ports[] | tostring | split("-") | map(tonumber) | [.[0], .[-1]]]}]')"
+  # Every port the satellite's containers and init containers declare: LINSTOR's satellite port and
+  # the DRBD reactor's metrics, which on the node's network are ports of the node itself.
+  declared="$(yq -N 'select(.kind == "DaemonSet") | .spec.template.spec | (.initContainers // []) + .containers | .[]
+    | (.ports // [])[] | ((.protocol // "TCP") | downcase) + " " + (.containerPort | tostring)' "$SATELLITE" | sort -u)"
+  echo "the satellite's pod declares: $(xargs <<<"$declared")"
+  [ "$(xargs <<<"$declared")" = "tcp 3366 tcp 9942" ]
+  while read -r protocol port; do
+    admitting="$(jq -c --arg protocol "$protocol" --argjson port "$port" '[.[] | select(.protocol == $protocol
+      and any(.ranges[]; .[0] <= $port and $port <= .[1]))]' <<<"$listeners")"
+    echo "$protocol $port: admitted by $(jq -c 'map({name, ports, nodes, from})' <<<"$admitting")"
+    # One rule, on every node, from the nodes' own addresses, which a pod on another node arrives
+    # from, and from the pod range, which a pod on the node itself arrives from.
+    [ "$(jq 'length' <<<"$admitting")" -eq 1 ]
+    [ "$(jq -c '.[0].ports | map(tostring)' <<<"$admitting")" = "${spans[$port]}" ]
+    [ "$(jq -r '.[0].nodes' <<<"$admitting")" = all ]
+    [ "$(jq -c '.[0].from | sort' <<<"$admitting")" = '["members","pods"]' ]
+  done <<<"$declared"
+
+  # DRBD's replication: LINSTOR gives each volume a TCP port on each node from its range, by default
+  # 7000 to 7999 (server/src/main/java/com/linbit/linstor/core/objects/Node.java of linstor-server
+  # v1.35.3, lines 89-90, the satellite image of the operator's version), on which DRBD in the kernel
+  # listens at the node's address and connects to its peers from theirs.
+  drbd=7000-7999
+  overlapping="$(jq -c --argjson low "${drbd%-*}" --argjson high "${drbd#*-}" '[.[] | select(.protocol == "tcp"
+    and any(.ranges[]; .[0] <= $high and $low <= .[1]))]' <<<"$listeners")"
+  echo "TCP rules for ports of $drbd: $(jq -c 'map({name, ports, nodes, from})' <<<"$overlapping")"
+  [ "$(jq 'length' <<<"$overlapping")" -eq 1 ]
+  [ "$(jq -c '.[0].ports | map(tostring)' <<<"$overlapping")" = "[\"$drbd\"]" ]
+  [ "$(jq -r '.[0].nodes' <<<"$overlapping")" = all ]
+  # The kernels connect to each other from the nodes' own addresses, and nothing else does.
+  [ "$(jq -c '.[0].from' <<<"$overlapping")" = '["members"]' ]
+  # Nothing in the tree moves that range or the interface LINSTOR takes a resource's address from: a
+  # resource's address is its node's PrefNic interface, else the one named default, else the node's
+  # first (satellite/src/main/java/com/linbit/linstor/layer/drbd/resfiles/ConfFileBuilder.java of
+  # linstor-server v1.35.3).
+  moved="$(grep -rliE 'TcpPortAutoRange|PrefNic' "$REPO/kubernetes" || true)"
+  echo "files that set LINSTOR's port range or preferred interface: ${moved:-none}"
+  [ -z "$moved" ]
 }
 
 @test "Each worker's data device is an LVM-thin storage pool" {

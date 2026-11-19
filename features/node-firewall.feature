@@ -86,7 +86,7 @@ Feature: Nodes firewall themselves
   Scenario: The account of what a rollout proves names every port the firewall admits
     Given the inventory in talos/firewall.yaml and the section of docs/cluster.md on what the rollout's checks prove and what to watch afterwards
     When the section is read
-    Then every port and every port range of the inventory's thirteen rules is in it as a whole word
+    Then every port and every port range of the inventory's sixteen rules is in it as a whole word
 
   Scenario: The first rollout applies to one node in a self-reverting mode and stops unless the checks pass
     Given a cluster whose configuration changes a worker and a control plane

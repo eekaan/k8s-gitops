@@ -405,13 +405,17 @@ reads:
 - A port that a process on the host network opens without declaring it in its pod: Cilium's health
   checks on TCP 4240, which the agent serves on its node's address
   ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/pkg/health/server/server.go#L436-L465)),
-  Envoy's health listener on TCP 9878 and the kernel's VXLAN port, UDP 8472. No rule admits such a
-  port unless the inventory names it, so one that a client off the node needs and that has no rule
-  shows as a path that does not work, as the health checks and the overlay would without theirs.
-  Their rules are entries under `no-pod`, which say in prose what listens there.
-- A pod that an operator creates at run time, which no render holds. LINSTOR's CSI node plugin is
-  such a pod on the host network, and its ports are accounted for in prose, under
-  [What gets no rule](#what-gets-no-rule), from the operator's template. Pod Security refuses the
+  Envoy's health listener on TCP 9878, the kernel's VXLAN port, UDP 8472, and DRBD's replication,
+  which the kernel serves on a TCP port of 7000-7999 for each volume a node holds. No rule admits
+  such a port unless the inventory names it, so one that a client off the node needs and that has
+  no rule shows as a path that does not work, as the health checks, the overlay and DRBD's
+  replication would without theirs. Their rules are entries under `no-pod`, which say in prose what
+  listens there.
+- A pod that an operator creates at run time, which no render holds. LINSTOR's CSI node plugin and
+  its satellites are such pods on the host network, from the operator's templates: the plugin's
+  ports are accounted for in prose, under [What gets no rule](#what-gets-no-rule), and the
+  satellites' ports, LINSTOR's and their DRBD reactor's, have rules of their own
+  ([What each node admits](#what-each-node-admits)), named under `no-pod`. Pod Security refuses the
   host network and host ports below the privileged level
   ([kubernetes.md](kubernetes.md#pod-security)), so only a namespace that enforces that level,
   `kube-system`, `monitoring`, `piraeus-datastore` or `security-system`, can hold another. A
@@ -482,6 +486,9 @@ BGP sessions to it, and ICMP at up to five packets a second.
 | `hubble` | TCP 4244 | all | `members`, `pods` | The Hubble server in each node's Cilium agent, from which Hubble Relay reads the node's flows. |
 | `node-exporter` | TCP 9100 | all | `members`, `pods` | node-exporter, on the host network, which Prometheus scrapes. |
 | `cilium-agent-metrics` | TCP 9962 | all | `members`, `pods` | The Cilium agent's metrics, on the host network, which Prometheus scrapes: the workers' BGP sessions among them ([kubernetes.md](kubernetes.md#monitoring)). |
+| `linstor-satellite` | TCP 3366-3367 | all | `members`, `pods` | LINSTOR's satellites, on the host network of the workers: the LINSTOR controller, a pod, connects to each on the port the operator registers it with, 3366 or 3367 ([Piraeus](https://github.com/piraeusdatastore/piraeus-operator/blob/v2.12.1/internal/controller/linstorsatellite_controller.go#L460-L465)). |
+| `drbd` | TCP 7000-7999 | all | `members` | DRBD's replication, between the workers' kernels: a volume's resource listens at the node's own address on a port of LINSTOR's range, 7000-7999 by default ([LINSTOR](https://github.com/LINBIT/linstor-server/blob/v1.35.3/server/src/main/java/com/linbit/linstor/core/objects/Node.java#L89-L90)), on each node that holds it, and its peers connect from theirs. |
+| `drbd-reactor` | TCP 9942 | all | `members`, `pods` | The DRBD reactor beside each satellite, on the host network, whose metrics Prometheus scrapes ([kubernetes.md](kubernetes.md#storage-monitoring)). |
 
 ### What gets no rule
 
@@ -527,14 +534,6 @@ BGP sessions to it, and ICMP at up to five packets a second.
   `cilium-bgp` sets `localPort`
   ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/pkg/bgp/manager/manager.go#L961-L966)).
   What an edge router sends on a session is a reply to the worker's connection, which Talos admits.
-- LINSTOR's satellites, which the controller reaches on TCP 3366-3367, and DRBD's replication, on a
-  TCP port per volume that LINSTOR takes from its `TcpPortAutoRange`, 7000-7999 unless the controller
-  is told otherwise ([LINBIT](https://kb.linbit.com/linstor/linstor-change-tcp-port-range-for-drbd-resources/)),
-  run on the pod network: the Piraeus operator gives the satellites, and DRBD with them, the host
-  network only when asked
-  ([Piraeus](https://github.com/piraeusdatastore/piraeus-operator/blob/v2.12.1/docs/how-to/drbd-host-networking.md)),
-  which `linstor-cluster` does not. Cilium carries that traffic between pods, where the firewall does
-  not look.
 
 ### What the firewall does not see
 
@@ -683,7 +682,10 @@ scheduler's ports, TCP 2381, 10257 and 10259, and node-exporter's and the kubele
 which keeps its scrape connections; the Cilium agents' metrics, TCP 9962, which Prometheus scrapes
 on a connection it keeps as well, and which no check asks for: their job, `cilium-agent`, is none of
 those `cluster-check` reads ([kubernetes.md](kubernetes.md#ciliums-metrics)); Hubble, TCP 4244,
-which Hubble Relay keeps; any path from a pod on the node itself, from the pod range; trustd, TCP
+which Hubble Relay keeps; LINSTOR's satellites, TCP 3366-3367, to each of which the LINSTOR
+controller keeps its connection; DRBD's replication, TCP 7000-7999, whose peers keep theirs; the
+DRBD reactors' metrics, TCP 9942, which Prometheus scrapes on connections it keeps, and which no
+check asks for either; any path from a pod on the node itself, from the pod range; trustd, TCP
 50001, which a worker reaches when it joins; the CI host; and the nodes' floating addresses.
 `tests/node-firewall.bats` pins their rules offline.
 
@@ -691,17 +693,23 @@ After the rollout, each of these is proved once its client opens a new connectio
 makes it do. Until each has been, watch:
 
 1. Prometheus, restarted once: two scrape intervals later, `up` is 1 for every target of the
-   kubelet, node-exporter and `cilium-agent` jobs, a target on every node, and of the etcd,
-   controller manager and scheduler jobs, a target on every control plane. `just cluster-check`
-   reads the targets of each of those jobs but `cilium-agent`, whose targets, the proof of the rule
-   for TCP 9962, are read in Prometheus itself.
+   kubelet, node-exporter and `cilium-agent` jobs, a target on every node, of the etcd, controller
+   manager and scheduler jobs, a target on every control plane, and of the `linstor-satellite` job,
+   a target on every worker. `just cluster-check` reads the targets of each of those jobs but
+   `cilium-agent` and `linstor-satellite`, whose targets, the proof of the rules for TCP 9962 and
+   9942, are read in Prometheus itself.
 2. metrics-server, restarted once: `kubectl top nodes` answers for every node.
 3. Hubble Relay, restarted once: it reports every node connected.
 4. Cilium's agents, restarted one node at a time: `cilium-health status` reports every node
    reachable on the health port and through the overlay.
 5. One control plane, rebooted with `just cluster-reboot`: once it is back, `etcd status` from every
    control plane shows the same leader and no error, as its peers have opened their streams again.
-6. trustd and the CI host stay unproved until a worker joins and the CI host connects; the paths
+6. A worker's satellite pod, replaced: once its new pod is ready, `linstor node list` shows the node
+   Online, which the controller reaches on a new connection to TCP 3366. A volume made afterwards:
+   `linstor resource list` shows its resource Connected between the nodes that hold it, whose
+   kernels connect to each other afresh on its port of 7000-7999
+   ([kubernetes.md](kubernetes.md#storage)).
+7. trustd and the CI host stay unproved until a worker joins and the CI host connects; the paths
    from pods on a node to the node itself, until a pod there, such as Prometheus on a control
    plane, uses one.
 

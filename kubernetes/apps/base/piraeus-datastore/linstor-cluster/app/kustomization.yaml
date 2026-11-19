@@ -6,6 +6,7 @@ resources:
   - tls.yaml
   - linstorcluster.yaml
   - talos.yaml
+  - host-network.yaml
   - storage-pool.yaml
   - storageclasses.yaml
   - volumesnapshotclass.yaml
