@@ -18,8 +18,10 @@ a failing one ends with a line naming the step it failed in ([cluster.md](../clu
   bundle, so it has the same certificate authorities and keys: the credentials in a kubeconfig or
   talosconfig made for the old cluster are valid for the new one, and a copy kept anywhere works
   again once it is pointed at the new addresses.
-- The OpenBao custody file, which `just bao-recovery` wrote and the operator holds: the old store's
-  recovery keys and its seal key, which a snapshot of the old store opens with and no other
+- The OpenBao custody file, which `just bao-recovery` wrote and the operator holds, or after a
+  rotation of the seal key the newest one, which `just bao-seal-keep` wrote, and the older ones the
+  operator keeps beside it: the old store's recovery keys and its seal keys, the current one and
+  after a rotation the previous one, which a snapshot of the old store opens with and no other
   ([openbao.md](openbao.md#restoring-a-snapshot)).
 - The volume backups' master, in the custody file `just bao-seed-volsync` wrote, which the operator
   holds: it opens the repositories in the VolSync bucket, and the rebuilt cluster's store is seeded
@@ -44,9 +46,9 @@ a failing one ends with a line naming the step it failed in ([cluster.md](../clu
   `bootstrap` section with initdb, empty. The database comes back from its archive or a dump in the
   postgres bucket ([Building it again](#building-it-again)).
 - OpenBao's store and every key in it, as its data is on LINSTOR's volumes: the rebuilt cluster's
-  OpenBao initialises anew, with a new seal key, and the recovery keys in the old store's custody
+  OpenBao initialises anew, with new seal keys, and the recovery keys in the old store's custody
   file open nothing in it, unless the old store's newest snapshot is restored into it with the old
-  seal key in place before its first member starts
+  seal keys in place before its first member starts
   ([openbao.md](openbao.md#restoring-a-snapshot)).
 - Everything in etcd: every object of the Kubernetes API, the Secrets made in the cluster among
   them. Flux applies again what Git holds. A snapshot restores into the same nodes only
@@ -60,11 +62,12 @@ a failing one ends with a line naming the step it failed in ([cluster.md](../clu
 
 1. **`just cluster-last-copies <openbao file> <volsync file> <postgres file>`**, while the cluster
    still runs and while its applications are idle, as what they write after a copy is not in it. The
-   files are the three custody files: `just bao-recovery`'s, `just bao-seed-volsync`'s and
-   `just bao-seed-postgres`'s. Once the cluster is gone, they and the Talos and Flux age keys are the
-   only copies of what they hold, and nothing compares them any more, so the recipe first compares
-   each with what the cluster holds, reading only: the seal key with the Secret `openbao-seal-1`, the
-   volume backups' master with every backed-up application's derived password, the customer key
+   files are the three custody files: `just bao-recovery`'s (after a rotation of the seal key, the
+   newest one `just bao-seal-keep` wrote), `just bao-seed-volsync`'s and `just bao-seed-postgres`'s.
+   Once the cluster is gone, they and the Talos and Flux age keys are the only copies of what they
+   hold, and nothing compares them any more, so the recipe first compares each with what the cluster
+   holds, reading only: each seal key the stanza names with the Secret of its id, `openbao-seal-1`
+   today, the volume backups' master with every backed-up application's derived password, the customer key
    with every database's backup Secret, and each age key with the recipient its `.sops.yaml` names. A
    file or key that does not hold what the cluster holds stops it, named, before any copy is taken;
    with `--check` it stops after the comparison and the plan, having changed nothing. Run it with
@@ -142,8 +145,8 @@ keys, then the volumes, then the databases.
    segment.
 
    Decide too whether OpenBao's store comes back from its snapshot (step 5), rather than starting
-   anew with every key written again. The old seal key then has to be in the cluster before
-   OpenBao's first member starts, soon after `just cluster-flux`, so step 2 puts it in place.
+   anew with every key written again. The old seal keys then have to be in the cluster before
+   OpenBao's first member starts, soon after `just cluster-flux`, so step 2 puts them in place.
 
 2. **The build.** The build order in [cluster.md](../cluster.md#from-nothing-to-a-ready-cluster),
    from the start, up to and with `just cluster-flux`, leaving out the steps that make the age keys
@@ -154,12 +157,15 @@ keys, then the volumes, then the databases.
    have new public addresses, which the records external-dns makes follow once `cluster-config`
    holds them ([kubernetes.md](../kubernetes.md#dns-records)).
 
-   When the store comes back from its snapshot, put the old seal key in place right after
+   When the store comes back from its snapshot, put the old seal keys in place right after
    `just cluster-flux`, before OpenBao's first member starts, as step 2 of
    [Restoring a snapshot](openbao.md#restoring-a-snapshot) says for a rebuilt cluster: once Flux has
    made the namespace `openbao`, and while `flux get kustomization openbao` shows it waiting for its
    dependencies, `flux suspend kustomization openbao`, then `just bao-seal-restore <openbao file>`,
-   then `flux resume kustomization openbao`. The rest of that restore waits for step 5.
+   then `flux resume kustomization openbao`. After a rotation of the seal key, `<openbao file>` is
+   the custody file `just bao-seal-keep` wrote, and the run writes the previous key's Secret too,
+   which a snapshot taken before the rotation needs ([Rotating](openbao.md#rotating)). The rest of
+   that restore waits for step 5.
 
 3. **`just cluster-check`**: every check passes. Before the namespace `flux-system` exists, the
    check of its pods is skipped, and the recipe says so.
@@ -183,7 +189,7 @@ keys, then the volumes, then the databases.
    times in the machine's own time zone.
 
    Then either the old store's snapshot, restored as [openbao.md](openbao.md#restoring-a-snapshot)
-   says, with the seal key step 2 put in place and the snapshot the summary of
+   says, with the seal keys step 2 put in place and the snapshot the summary of
    `cluster-last-copies` named; it brings back every key the store held, and the recovery keys of the
    old custody file then open the restored store, as
    [Restoring access with the recovery keys](openbao.md#restoring-access-with-the-recovery-keys)

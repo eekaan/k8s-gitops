@@ -130,13 +130,14 @@ real_render() {
   # And the reason etcd's restore is not one the rebuild takes.
   grep -qF '](etcd-restore.md#when-to-restore)' "$REBUILD"
   # Building it again, step by step: the hold, in the artifact Flux applies, before the build that
-  # installs Flux; the old seal key put in place in that build, before OpenBao's first member starts;
-  # the secret store before the volumes, whose key it holds, and the volumes before the databases,
-  # each step with the restores it leads to.
+  # installs Flux; the old seal key put in place in that build, before OpenBao's first member starts,
+  # after a seal-key rotation from the custody file bao-seal-keep wrote, with the previous key's
+  # Secret too; the secret store before the volumes, whose key it holds, and the volumes before the
+  # databases, each step with the restores it leads to.
   hold=$(step_holds 'Building it again' 'The hold.' 'CNPG_BACKUPS_SUSPENDED: "true"' \
     'merged and published before `just cluster-flux`' '](../kubernetes.md#publishing)')
   build=$(step_holds 'Building it again' 'The build.' '`just cluster-flux`' '`just bao-seal-restore <openbao file>`' \
-    '](openbao.md#restoring-a-snapshot)')
+    '](openbao.md#restoring-a-snapshot)' '`just bao-seal-keep`' "the previous key's Secret" '](openbao.md#rotating)')
   store=$(step_holds 'Building it again' 'The secret store.' '](openbao.md#restoring-a-snapshot)' \
     '](openbao.md#restoring-access-with-the-recovery-keys)' '](openbao.md#first-initialisation)')
   volumes=$(step_holds 'Building it again' 'The volumes.' '](volume-backups.md#the-stores-key-is-lost-and-the-file-is-kept)' \

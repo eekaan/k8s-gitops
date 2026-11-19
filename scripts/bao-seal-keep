@@ -1,0 +1,141 @@
+#!/usr/bin/env bash
+# Writes the OpenBao custody file of a store whose seal key was rotated (docs/runbooks/openbao.md,
+# Rotating), once the rotation's pull request is applied and every member runs it: the seal stanza of
+# this checkout names a current key and, as its previous key, the one FILE holds as its seal. NEW FILE
+# gets FILE's recovery keys, the key of the current key's Secret as its seal, and FILE's seal as its
+# previous_seal, which bao-seal-restore writes back into the previous key's Secret and a snapshot from
+# before the rotation needs. FILE is read only where no one but this user can have written it
+# (bao_custody_trusted in scripts/lib/openbao.sh), into memory only, and left as it was. NEW FILE is
+# written as bao-recovery writes its file: outside the repository, in a place bao_custody_place
+# accepts, encrypted to the Talos age key's recipient in talos/.sops.yaml, opened again with the
+# operator's key and compared with what was written, and put in place with a hard link, never over a
+# file. It refuses, naming why and writing nothing, when the stanza names no previous key, when
+# FILE's seal is not the previous key, when the previous key's Secret does not hold FILE's key, and
+# when the current key's Secret is missing or holds no key of 64 hexadecimal digits. It ends with
+# bao-seal-restore NEW FILE --check, whose failure fails the run; NEW FILE then stays, as a recipe
+# deletes no custody file. It needs no port-forward: kubectl reads the two Secrets, and the check the
+# server ConfigMap and the two Secrets. Nothing of a key is printed or passed as an argument; each
+# reaches kubectl, jq and age on standard input.
+# Usage: scripts/bao-seal-keep <file> <new file>
+set -euo pipefail
+
+here=$(dirname "$0")
+# shellcheck source=scripts/lib/openbao.sh
+. "$here/lib/openbao.sh"
+
+if (($# != 2)); then
+  echo "bao-seal-keep: give the custody file of the seal key before the rotation and the new file to write, outside the repository: just bao-seal-keep <file> <new file>" >&2
+  exit 1
+fi
+file=$1 new_file=$2
+
+# An empty argument, so cluster-env takes lab-sto2 and not this script's own arguments.
+# shellcheck source=scripts/cluster-env
+. "$here/cluster-env" ""
+complete=1
+require_commands kubectl jq yq age mktemp sha256sum stat ln || complete=0
+require_kubeconfig || complete=0
+require_age_key || complete=0
+recipient=$(sops_recipient)
+if is_placeholder "$recipient" || [[ ! $recipient =~ ^age1[0-9a-z]+$ ]]; then
+  infra_error "talos/.sops.yaml holds no age recipient yet; just cluster-age-key writes it"
+  complete=0
+fi
+if [[ ! -f $file ]]; then
+  infra_error "$file is not a file; give the custody file of the seal key before the rotation"
+  complete=0
+elif ! bao_custody_trusted "$file"; then
+  complete=0
+fi
+dir=$(dirname -- "$new_file")
+if inside_repository "$new_file"; then
+  infra_error "$new_file lies inside the repository; the custody files are kept outside it"
+  complete=0
+elif [[ -e $new_file || -L $new_file ]]; then
+  infra_error "$new_file exists; bao-seal-keep writes a new file"
+  complete=0
+elif [[ ! -d $dir || ! -w $dir ]]; then
+  infra_error "$dir is not a directory this user can write to"
+  complete=0
+elif ! bao_custody_place "$new_file"; then
+  # bao-root and bao-seal-restore read the file only from such a place.
+  complete=0
+fi
+if ! bao_seal_ids; then
+  complete=0
+elif [[ -z $bao_seal_previous ]]; then
+  infra_error "this checkout's seal stanza names no previous key: bao-seal-keep is the step after a rotation's pull request is applied and every member runs it (docs/runbooks/openbao.md, Rotating)"
+  complete=0
+fi
+((complete))
+
+step="opening $file with the Talos age key"
+custody=$(bao_decrypt "$file")
+if ! printf '%s' "$custody" | jq -e '.recovery.keys_base64 | type == "array" and . != []' > /dev/null; then
+  infra_error "$file holds no recovery keys; give the custody file bao-recovery or bao-seal-keep wrote"
+  exit 1
+fi
+if ! printf '%s' "$custody" | jq -e --arg id "$bao_seal_previous" '.seal | type == "object" and .secret == $id
+  and .key_id == $id and (.key | type == "string" and test("^[0-9a-f]{64}$"))' > /dev/null; then
+  if printf '%s' "$custody" | jq -e '.seal.key_id | type == "string"' > /dev/null; then
+    infra_error "$file holds the seal key $(printf '%s' "$custody" | jq -r '.seal.key_id' | printable), and the stanza's previous seal key is $bao_seal_previous: give the custody file written before the rotation, whose seal key that is"
+  else
+    infra_error "$file holds no seal key; give the custody file written before the rotation, whose seal key is $bao_seal_previous"
+  fi
+  exit 1
+fi
+
+# The previous key's Secret holds the key FILE holds, compared by digest, so the new file pairs the
+# current key with the key the storage was sealed with before the rotation.
+step="reading the Secret $bao_seal_previous"
+# kubectl's errors can name the API server, so they are shown without its address (bao_kubectl).
+existing=$(bao_kubectl get secret "$bao_seal_previous" --namespace "$bao_namespace" --output json --ignore-not-found)
+if [[ -z $existing ]]; then
+  infra_error "the Secret $bao_seal_previous does not exist in $bao_namespace, so $file cannot be compared with it"
+  exit 1
+elif [[ $(printf '%s' "$existing" | jq -r '.data.key // "" | @base64d' | sha256sum) != \
+  "$(printf '%s' "$custody" | jq -r '.seal.key' | sha256sum)" ]]; then
+  infra_error "the Secret $bao_seal_previous holds another key than $file"
+  exit 1
+fi
+step="reading the Secret $bao_seal_current"
+existing=$(bao_kubectl get secret "$bao_seal_current" --namespace "$bao_namespace" --output json --ignore-not-found)
+if [[ -z $existing ]]; then
+  infra_error "the Secret $bao_seal_current does not exist in $bao_namespace; External Secrets writes it once the rotation's pull request is applied"
+  exit 1
+fi
+if ! seal=$(printf '%s' "$existing" | jq -ce --arg id "$bao_seal_current" '.data.key // "" | @base64d
+  | if test("^[0-9a-f]{64}$") then {secret: $id, key_id: $id, key: .} else false end' 2> /dev/null); then
+  infra_error "the Secret $bao_seal_current holds no key of 64 hexadecimal digits"
+  exit 1
+fi
+existing=
+
+step="writing $new_file"
+written=$({
+  printf '%s\n' "$custody"
+  printf '%s\n' "$seal"
+} | jq -sc --arg cluster "$cluster" --arg created "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  '{cluster: $cluster, created: $created, recovery: .[0].recovery, seal: .[1], previous_seal: .[0].seal}')
+custody="" seal=""
+partial=$(mktemp "$dir/.${new_file##*/}.XXXXXXXXXX")
+trap 'status=$?; [[ -z $partial ]] || rm -f -- "$partial"; failed_step "$status"' EXIT
+printf '%s' "$written" | age --encrypt --recipient "$recipient" --output "$partial"
+# The file opens with the operator's age key, to what was written, or it is not put in place.
+step="opening $new_file with the Talos age key"
+if [[ $(bao_decrypt "$partial" | sha256sum) != "$(printf '%s' "$written" | sha256sum)" ]]; then
+  infra_error "$new_file does not open with the Talos age key to what was written; check the recipient in talos/.sops.yaml"
+  exit 1
+fi
+written=
+step="putting $new_file in place"
+bao_place "$partial" "$new_file" "nothing is written" || exit 1
+rm -- "$partial"
+partial=""
+echo "bao-seal-keep: wrote $new_file, which the recipes take from now on: the recovery keys of $file, the key of the Secret $bao_seal_current as its seal, and the key of $bao_seal_previous from $file as its previous_seal; keep $file as well, with the custody files before it, which hold the keys before $bao_seal_previous"
+
+step="checking $new_file with bao-seal-restore --check"
+if ! "$here/bao-seal-restore" "$new_file" --check; then
+  infra_error "$new_file is written and does not pass bao-seal-restore's check above; it is kept, as a recipe deletes no custody file: put right what the check names, then run just bao-seal-restore $new_file --check"
+  exit 1
+fi

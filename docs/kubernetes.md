@@ -6057,14 +6057,21 @@ A CronJob takes a snapshot of the raft storage every six hours and uploads it en
 ### How it unseals
 
 OpenBao's static seal unseals each member at every start with a 32-byte key from a file, without a
-person. The key is in the Secret `openbao-seal-1` in `openbao`, mounted into the servers alone, not
-into the chart's test pod. External Secrets makes it, once: its `Password` generator gives 32
-characters of letters, digits and symbols, about 190 bits, hex-encoded into the 64 hexadecimal
-digits the seal reads, and the ExternalSecret `openbao-seal-1` writes them into the Secret when it is
-first synced and never again (`refreshPolicy: CreatedOnce`). The Secret has no owner, so deleting the
-ExternalSecret or the application leaves it, and it is immutable, so nothing changes the key; an
-ExternalSecret made again later finds it and keeps its key. Nothing in the repository holds it,
-encrypted or not.
+person. The seal stanza names the key by a permanent id, `current_key_id`, and after a rotation the
+key before it too, `previous_key_id`: the seal seals with the current key, stamping its id on what it
+seals, and opens what was sealed with either by the id it carries, and with no other key
+([static seal](https://openbao.org/docs/configuration/seal/static/#key-rotation)). Each key is in
+the Secret of its id in `openbao`, `openbao-seal-1` today, mounted into the servers alone, at
+`/openbao/userconfig/<id>/key`, not into the chart's test pod. External Secrets makes each, once: a
+`Password` generator of that name gives 32 characters of letters, digits and symbols, about 190
+bits, hex-encoded into the 64 hexadecimal digits the seal reads, and the ExternalSecret of that name
+writes them into the Secret when it is first synced and never again (`refreshPolicy: CreatedOnce`).
+The Secret has no owner, so deleting the ExternalSecret or the application leaves it, and it is
+immutable, so nothing changes the key; an ExternalSecret made again later finds it and keeps its key.
+Nothing in the repository holds it, encrypted or not. The recipes take the ids from the stanza of
+the checkout they run from, and `tests/openbao.bats` holds every id it names to that convention. A
+rotation adds a key and makes the current one the previous one
+([runbook](runbooks/openbao.md#rotating)).
 
 The key protects OpenBao's storage and every copy of it, such as a volume or its snapshot, read
 outside the cluster: without the key it is ciphertext. It does not protect against whoever can read
@@ -6158,14 +6165,20 @@ token holds cluster-admin, and with it the seal Secret and every Secret the stor
 Self-initialisation makes no recovery keys. Right after the first reconcile, `just bao-recovery <file>`
 makes them, through OpenBao's authenticated rotation as the role `operator`: five shares, any three
 of which make a short-lived root token when the roles no longer reach what has to be fixed. It writes
-them, with the seal key, to `<file>`, a new file outside the repository, encrypted with age to the
-Talos age key's recipient in `talos/.sops.yaml`, a key the cluster does not hold; opens it again with
-the operator's Talos age key and compares it with what it wrote; and has OpenBao commit the shares
-only then. A rotation it starts and does not complete is cancelled and its file removed; one left in
-progress by an earlier run is cancelled first; a file made at the path meanwhile is never replaced.
-Nothing of the shares or the key is printed or passed as an argument. OpenBao makes recovery keys
-only while none exist, so the recipe refuses once they do: the file holds the only copy. The operator
-keeps it outside the cluster, with the Talos age key.
+them, with the seal keys the servers mount, to `<file>`, a new file outside the repository, encrypted
+with age to the Talos age key's recipient in `talos/.sops.yaml`, a key the cluster does not hold;
+opens it again with the operator's Talos age key and compares it with what it wrote; and has OpenBao
+commit the shares only then. A rotation it starts and does not complete is cancelled and its file
+removed; one left in progress by an earlier run is cancelled first; a file made at the path meanwhile
+is never replaced. Nothing of the shares or the keys is printed or passed as an argument. OpenBao
+makes recovery keys only while none exist, so the recipe refuses once they do: the file holds the
+only copy. The operator keeps it outside the cluster, with the Talos age key.
+
+The file holds `{cluster, created, recovery, seal}`: `seal` is the current seal key as
+`{secret, key_id, key}`, and after a rotation of the seal key `previous_seal`, of the same shape,
+holds the previous one. A rotation's custody file is a new one, which `just bao-seal-keep` writes
+from the file before it ([The recipes](#the-recipes)); the older files stay with the operator, as
+they hold the keys before the previous one.
 
 ### The recipes
 
@@ -6179,9 +6192,15 @@ with the Talos age key from `SOPS_AGE_KEY_FILE`, or `SOPS_AGE_KEY`, into memory 
 - A custody file is read only where no one but the operator can have written it, as age does not say
   who wrote a file and the recipient is public: the file is the operator's and writable by no one
   else, and each directory above it, on its path and as it resolves, is the operator's or root's and
-  writable by no one else unless its sticky bit is set. A recipe that writes one, `bao-recovery` or
-  `bao-seed-volsync`, writes it only to such a place, which is a directory only the operator can
-  write, beside the Talos age key.
+  writable by no one else unless its sticky bit is set. A recipe that writes one, `bao-recovery`,
+  `bao-seal-keep` or `bao-seed-volsync`, writes it only to such a place, which is a directory only the
+  operator can write, beside the Talos age key.
+- The ids of the seal keys come from the seal stanza in the checkout's
+  `apps/base/openbao/openbao/app/values.yaml`, as the tree is what a rebuild applies and the servers'
+  ConfigMap does not exist before OpenBao is installed: its `current_key_id` and, after a rotation,
+  its `previous_key_id`, each the name of the Secret that holds the key. The stanza of the ConfigMap
+  `openbao-config`, which the servers run, is the check, read by `bao-seal-restore --check` and
+  `bao-recovery`: a recipe run from a checkout whose stanza differs refuses, naming both.
 - A recipe refuses to run while the shell traces its commands, as bash would print every secret it
   reads: under `bash -x`, with `SHELLOPTS=xtrace` or a `BASH_ENV` that sets `-x`. A command it
   starts, such as the one `bao-root` or `bao-volsync-password` runs, gets no `BASH_ENV` or `ENV`.
@@ -6196,8 +6215,11 @@ with the Talos age key from `SOPS_AGE_KEY_FILE`, or `SOPS_AGE_KEY`, into memory 
   the two arguments, and a refusal repeats none of them, so a value typed where an argument goes is
   not printed. The value travels only in the body of the write; the recipe prints the path and the
   key.
-- `just bao-recovery <file> [cluster]` makes the recovery keys once, as above; it also reads the
-  Secret `openbao-seal-1`.
+- `just bao-recovery <file> [cluster]` makes the recovery keys once, as above. Before it asks OpenBao
+  for anything, it reads the ConfigMap `openbao-config` and the Secret of each seal key its stanza
+  names, and refuses, sending no request, when the stanza is not the checkout's, a Secret is missing
+  or its key is not 64 hexadecimal digits; it writes the current key as `seal` and the previous one
+  as `previous_seal`.
 - `just bao-root <file> <command> [argument...]` makes a root token from three shares of the file,
   mints with it an orphan token of the root policy that lasts fifteen minutes at most, and revokes
   the root token before the command runs; if minting fails, it revokes the root token and runs
@@ -6209,12 +6231,26 @@ with the Talos age key from `SOPS_AGE_KEY_FILE`, or `SOPS_AGE_KEY`, into memory 
   else; when OpenBao does not revoke a token, it names the token by its accessor, which serves to
   look up, renew or revoke a token but not to act as it, prints the step that revokes it by that
   accessor, and fails even when the command succeeded. No command runs while the root token lives.
-- `just bao-seal-restore <file> [--replace]` writes the seal key from the file back into the Secret
-  `openbao-seal-1`, immutable; a Secret that holds the same key is left alone, and one that holds
-  another key is replaced only with `--replace`. Before deleting it, `--replace` keeps its key in a
-  new file `<file>.replaced-<time>.age` beside the file, encrypted to the same recipient and opened
-  again with the operator's key, and deletes nothing when it cannot. It needs no port-forward, only
-  to read, create and, with `--replace`, delete that Secret.
+- `just bao-seal-restore <file> [--replace|--check]` writes the seal keys from the file back into
+  the Secrets of the keys the stanza names, each immutable: the file's `seal` must be the current key
+  and, after a rotation, its `previous_seal` the previous one, and a file of an older key is refused,
+  naming the custody file to give. A Secret that holds the same key is left alone, and one that holds
+  another key is replaced only with `--replace`; without it nothing is written. Before deleting any,
+  `--replace` keeps their keys in a new file `<file>.replaced-<time>.age` beside the file, encrypted
+  to the same recipient and opened again with the operator's key, and deletes nothing when it cannot.
+  `--check` writes nothing: it reads the ConfigMap `openbao-config`, whose stanza must name the
+  checkout's keys, and checks that the file holds the current key, naming both mismatches in one run,
+  and only then compares each Secret's key with the file's. It needs no port-forward, only to read
+  that ConfigMap and to read, create and, with `--replace`, delete those Secrets.
+- `just bao-seal-keep <file> <new file>` writes, once a rotation of the seal key is applied and every
+  member runs it, the custody file of the rotated store: `<new file>` gets the recovery keys of
+  `<file>`, the custody file of the key before the rotation, the key of the current key's Secret as
+  its `seal`, and `<file>`'s seal, which the previous key's Secret must hold, as its `previous_seal`.
+  It refuses, writing nothing, while the stanza names no previous key, for a file whose seal is not
+  the previous key, and while the current key's Secret is missing or malformed. It writes as
+  `bao-recovery` does, never over a file, leaves `<file>` as it was, and ends with
+  `bao-seal-restore <new file> --check`, whose failure is its own. It needs no port-forward: kubectl
+  reads the two Secrets and, for the check, the ConfigMap.
 - `just bao-seed-volsync <file> [cluster]` seeds the key `volsync` the volume backups read, once for
   each store, with the master password in `<file>`, which its first run makes;
   `just bao-seed-volsync --rotate-s3 [cluster]` replaces only the S3 key in it.
@@ -6472,8 +6508,15 @@ of `secrets/`, every version, the policies, the roles and the auth methods' conf
 keeps that data encrypted with a keyring that a root key protects, which the seal protects
 ([seal](https://openbao.org/docs/concepts/seal/)), so a snapshot is ciphertext until it is restored
 into a store that unseals with the same seal key; the archive's checksums are sealed with the
-store's seal, which is how a restore checks that the snapshot was sealed with the seal key the store
-unseals with; a new store with the same seal key passes. A restore that skips that check, `snapshot-force`, installs data that still opens only with the seal key
+current seal key of the member that took it, under that key's id (`sealer` in the pinned release's
+`internal/physical/raft/raft.go`), which is how a restore checks that the snapshot was sealed with a
+key the store unseals with; a new store with the same seal key passes. So a snapshot needs the key
+that was current when it was taken: it restores into a store whose stanza holds that key under that
+id, as its current key or, after one rotation, its previous one; with both, the restore ends by
+sealing the restored root key and recovery key again with the current key, as a member does when it
+takes the lead ([runbook](runbooks/openbao.md#rotating)). A snapshot taken before the rotation
+before the last one restores into the tree as it stands no more. A restore that skips that check,
+`snapshot-force`, installs data that still opens only with the seal key
 ([API](https://openbao.org/docs/api/system/storage/raft/)). The age layer keeps a copy that leaves
 the cluster unreadable to anyone who holds the S3 key without the operator's age key.
 
@@ -6494,9 +6537,9 @@ the same checksums, which a restore checks (`handleStorageRaftSnapshotWrite` in
 it, as the plain checksums are not signed and the age recipient is public; and that the store's
 keyring opens the data. Of the entries of `state.bin` the check knows the checksum alone.
 
-This backup covers the loss of the three volumes, or of the cluster, while the seal key is kept in
-the operator's file, which `just bao-recovery` writes with the recovery keys: the store is started
-again with that key and the snapshot restored into it
+This backup covers the loss of the three volumes, or of the cluster, while the seal keys are kept in
+the operator's file, which `just bao-recovery` writes with the recovery keys, and after a rotation
+`just bao-seal-keep`: the store is started again with those keys and the snapshot restored into it
 ([runbook](runbooks/openbao.md#restoring-a-snapshot)). It does not cover the loss of the seal key,
 which makes every snapshot as unreadable as the volumes; of the Talos age key, which leaves every
 snapshot undecryptable; or of the bucket's contents. What was written after the newest snapshot, up
@@ -6546,27 +6589,34 @@ the state key and reach nothing but the object storage. The alerts are
 
 ### When something is lost
 
-- **The seal Secret, with the volumes intact**: the members that run keep serving, unsealed; one that
-  restarts cannot start, as the Secret it mounts is missing, and the data stays sealed on its volume.
-  `just bao-seal-restore` writes the key back from the operator's file; an etcd snapshot also holds
-  it ([runbook](runbooks/openbao.md#bringing-the-seal-key-back)).
+- **A seal Secret, with the volumes intact**: the members that run keep serving, unsealed; one that
+  restarts cannot start, as a Secret it mounts is missing, and the data stays sealed on its volume.
+  `just bao-seal-restore` writes the keys back from the operator's file, after a rotation the one
+  `just bao-seal-keep` wrote; an etcd snapshot also holds them
+  ([runbook](runbooks/openbao.md#bringing-the-seal-key-back)).
 - **The volume backups' key `volsync`, or the master's file**:
   [the runbook](runbooks/volume-backups.md) says what each loss means, and how the key is seeded
   again from the file.
-- **The seal Secret and every copy of it**: every runtime secret is lost, the snapshots in the bucket
-  with them, as they are ciphertext that only the seal key opens. OpenBao starts again empty only
-  once its three claims, the Secret and the ExternalSecret `openbao-seal-1` are deleted: the
-  ExternalSecret has synced once and never makes a missing Secret again, so Flux makes it anew, it
+- **The seal Secrets and every copy of them**: every runtime secret is lost, the snapshots in the
+  bucket with them, as they are ciphertext that only the seal keys open. OpenBao starts again empty
+  only once its three claims, the seal Secrets and their ExternalSecrets are deleted: an
+  ExternalSecret that has synced once never makes a missing Secret again, so Flux makes it anew, it
   makes a new key, and every secret is written again.
 - **The operator's file**: nothing is lost while the roles work. If a role or policy breaks, the way
   back to privileged access is gone, and new recovery keys need a threshold of the old ones; what is
-  left is a new OpenBao with every secret written again. The seal key in the file is the key a
-  snapshot needs, so without the file and the Secret a snapshot restores nothing either.
+  left is a new OpenBao with every secret written again. The seal keys in the file are the keys a
+  snapshot needs, so without the file and the Secrets a snapshot restores nothing either.
+- **The custody file after a rotation of the seal key, with the one before it kept**: the older file
+  holds the previous key as its seal and not the current key, which `bao-seal-restore` and
+  `cluster-last-copies` refuse, naming the file to give, while its recovery keys still serve
+  `bao-root`; `just bao-seal-keep` writes the
+  custody file of both keys from it while the previous key's Secret holds its key and the current
+  key's Secret exists ([runbook](runbooks/openbao.md#rotating)).
 - **One member's volume**: the member starts empty, does not initialise, and joins the others, which
   hold every secret; [the runbook](runbooks/openbao.md#a-member-that-does-not-rejoin) says what to do
   when it does not rejoin.
 - **The three volumes, or the whole cluster, while the operator's file is kept**: the snapshots cover
-  this loss. The store is started again empty with the seal key of the file in its Secret, and the
+  this loss. The store is started again empty with the seal keys of the file in their Secrets, and the
   newest snapshot is restored into it ([the runbook](runbooks/openbao.md#restoring-a-snapshot)); what
   was written after that snapshot, up to six hours of it, is lost. The snapshots do not cover the loss
   of the seal key, of the Talos age key that opens them, or of the object storage's bucket.

@@ -1299,12 +1299,16 @@ take one now, `kubectl --namespace etcd-snapshots create job --from=cronjob/etcd
 - `just cluster-last-copies <openbao file> <volsync file> <postgres file> [cluster] [--check]` takes
   and checks, before the cluster is taken down, a last copy of everything the rebuild restores from
   ([runbooks/rebuild.md](runbooks/rebuild.md#taking-it-down)). The files are the custody files of
-  `bao-recovery`, `bao-seed-volsync` and `bao-seed-postgres`. First, before anything runs, it names
+  `bao-recovery` (after a rotation of the seal key, the newest one `bao-seal-keep` wrote),
+  `bao-seed-volsync` and `bao-seed-postgres`. First, before anything runs, it names
   each thing it needs that is missing: the kubeconfig, the Talos age key, the Flux age key, what
   `openbao-snapshot-check`, `postgres-dump-check` and `bao-volsync-password` need, and each file there
   and where only this user can have written it, each file named by its role. Then, reading only, it
-  compares: each age key with the recipient its `.sops.yaml` names; the seal key in the OpenBao file
-  with the Secret `openbao-seal-1` (`bao-seal-restore <file> --check`); for every ReplicationSource,
+  compares: each age key with the recipient its `.sops.yaml` names; the seal keys in the OpenBao file
+  with the Secrets of the keys the checkout's seal stanza names, the current one and after a rotation
+  the previous one, `openbao-seal-1` today (`bao-seal-restore <file> --check`, which also checks
+  that the servers run that stanza, and refuses a file older than the current key with its reason on
+  the lines above the recipe's own); for every ReplicationSource,
   the password the volume backups' file derives for its application with its Secret's
   (`bao-volsync-password`), by the hashes of the two; and the customer key in the PostgreSQL file
   with every database's backup Secret, by digest. It also needs every Cluster's primary, archiver
@@ -1329,8 +1333,8 @@ take one now, `kubectl --namespace etcd-snapshots create job --from=cronjob/etcd
   ahead of the cluster's by more than a Job takes to start and name its copy fails every run, on the
   snapshot, as not taken by this run. Every wait is bounded by `LAST_COPIES_TIMEOUT` seconds, five
   between two reads, and every kubectl call the run makes itself but `exec` by 30 seconds; a `psql`
-  in a pod is bounded by neither, as kubectl gives the stream of an exec no deadline, nor is the read
-  of the seal Secret that `bao-seal-restore --check` makes. A copy that fails, fails its check, is
+  in a pod is bounded by neither, as kubectl gives the stream of an exec no deadline, nor are the
+  reads of the seal Secrets that `bao-seal-restore --check` makes. A copy that fails, fails its check, is
   older than the run or outlasts the wait fails the run, naming the copy and why, and no later copy
   is taken. Every run uploads a snapshot and a dump of each database it reaches, a run that fails
   later included, and the buckets keep the newest 56 snapshots and 14 dumps of each database, so
