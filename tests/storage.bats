@@ -6,6 +6,13 @@
 # and with only the directories read; building, rendering and the nodes' machine configurations,
 # which scripts/talos-check renders, are offline. flux build rewrites the kustomization.yaml of what
 # it builds while it runs, so every build reads a copy of kubernetes/, never this checkout.
+#
+# One test also needs docker and openssl: the proof of "The pinned LINSTOR controller refuses an API
+# request without its authority's client certificate and keeps serving its metrics", which runs the
+# controller from the image the rendered chart's image list names. It skips, saying why, where no
+# docker daemon answers, as in the CI containers; with one, a pull or a run that fails is a failure.
+# The container has no network, no capability and a read-only root, runs as the user the
+# LinstorCluster gives the controller's pod, and is removed with what it made.
 
 # The tests run one at a time even where bats runs a file's tests side by side: a test that starts
 # while another pulls the chart or clones a repository finds its directory before it is complete.
@@ -35,6 +42,13 @@ setup() {
   # Nothing to connect to: a step that needed a cluster fails instead of finding one.
   export KUBECONFIG="$BATS_TEST_TMPDIR/no-kubeconfig"
   unset KUBERNETES_SERVICE_HOST KUBERNETES_SERVICE_PORT
+}
+
+teardown() {
+  # A start of the controller does not outlive its test, nor does what it made.
+  if [ -n "${CONTROLLER:-}" ]; then
+    docker rm -f -v "$CONTROLLER" >/dev/null 2>&1 || true
+  fi
 }
 
 # built NAMESPACE APP: the application as Flux applies it: its app/ built from the copy with its
@@ -112,26 +126,36 @@ render_operator() {
   kustomize build "$dir" >"$RENDERED"
 }
 
+# operator_source: the operator's repository at the version the pinned chart runs, cloned once per
+# run with only the directories read: the templates and patches the operator makes the storage
+# cluster's objects from (pkg/resources), the controllers that apply them (internal/controller) and
+# its own client of LINSTOR's API (pkg/linstorhelper). Leaves the piraeus-operator application built
+# in BUILT and sets CHART and OPERATOR_SRC.
+operator_source() {
+  local source version
+  operator_chart
+  source="$(helm show chart "$CHART" | yq '.sources[0]')"
+  version="$(helm show chart "$CHART" | yq '.appVersion')"
+  echo "operator source: $source at $version"
+  [ "$source" = https://github.com/piraeusdatastore/piraeus-operator ]
+  OPERATOR_SRC="$BATS_FILE_TMPDIR/piraeus-operator/$version"
+  if [ ! -d "$OPERATOR_SRC" ]; then
+    git -c advice.detachedHead=false clone --quiet --depth 1 --branch "$version" --filter=blob:none --sparse "$source" "$OPERATOR_SRC"
+    git -C "$OPERATOR_SRC" sparse-checkout set pkg/resources internal/controller pkg/linstorhelper
+  fi
+}
+
 # satellite: the operator's satellite DaemonSet, from the operator's repository at the version the
 # pinned chart runs, with the podTemplate of every LinstorSatelliteConfiguration of linstor-cluster
 # applied as the operator applies it: as a strategic merge patch of the DaemonSet linstor-satellite
 # whose spec.template is the podTemplate. Leaves linstor-cluster built in BUILT and writes
 # $BATS_TEST_TMPDIR/satellite.yaml, setting SATELLITE.
 satellite() {
-  local source version src dir="$BATS_TEST_TMPDIR/satellite"
-  operator_chart
-  source="$(helm show chart "$CHART" | yq '.sources[0]')"
-  version="$(helm show chart "$CHART" | yq '.appVersion')"
-  echo "operator source: $source at $version"
-  [ "$source" = https://github.com/piraeusdatastore/piraeus-operator ]
-  src="$BATS_FILE_TMPDIR/piraeus-operator/$version"
-  if [ ! -d "$src" ]; then
-    git -c advice.detachedHead=false clone --quiet --depth 1 --branch "$version" --filter=blob:none --sparse "$source" "$src"
-    git -C "$src" sparse-checkout set pkg/resources/satellite/satellite
-  fi
+  local dir="$BATS_TEST_TMPDIR/satellite"
+  operator_source
   built piraeus-datastore linstor-cluster
   mkdir -p "$dir"
-  cp "$src/pkg/resources/satellite/satellite/daemonset.yaml" "$dir/daemonset.yaml"
+  cp "$OPERATOR_SRC/pkg/resources/satellite/satellite/daemonset.yaml" "$dir/daemonset.yaml"
   yq ea -N '[select(.kind == "LinstorSatelliteConfiguration" and .spec.podTemplate != null)]
     | {"apiVersion": "kustomize.config.k8s.io/v1beta1", "kind": "Kustomization", "resources": ["daemonset.yaml"],
        "patches": map({"target": {"group": "apps", "version": "v1", "kind": "DaemonSet", "name": "linstor-satellite"},
@@ -194,6 +218,325 @@ replicas() {
   echo "${count:-1}"
 }
 
+# cm_object KIND NAME: cert-manager's object KIND NAME of BUILT as JSON on one line; fails unless the
+# build holds exactly one.
+cm_object() {
+  local found
+  found="$(KIND="$1" NAME="$2" yq -N -o json -I0 'select(.apiVersion == "cert-manager.io/v1" and .kind == strenv(KIND)
+    and .metadata.name == strenv(NAME))' "$BUILT")"
+  [ "$(grep -c . <<<"$found")" -eq 1 ] || { echo "$1 $2: $(grep -c . <<<"$found") in the build" >&2; return 1; }
+  echo "$found"
+}
+
+# api_authority: the authority the LinstorCluster of BUILT names for its API, as JSON on one line: the
+# one Certificate of the build that writes the Secret the Issuer of apiTLS signs from. Fails, saying
+# which link is missing, when there is none.
+api_authority() {
+  local issuer secret found
+  issuer="$(yq -N 'select(.kind == "LinstorCluster") | .spec.apiTLS.certManager.name // ""' "$BUILT")"
+  [ -n "$issuer" ] || { echo "the LinstorCluster names no issuer for its API (spec.apiTLS.certManager)" >&2; return 1; }
+  secret="$(cm_object Issuer "$issuer" | jq -r '.spec.ca.secretName // ""')"
+  [ -n "$secret" ] || { echo "the Issuer $issuer signs from no authority's Secret (spec.ca)" >&2; return 1; }
+  found="$(SECRET="$secret" yq -N -o json -I0 'select(.apiVersion == "cert-manager.io/v1" and .kind == "Certificate"
+    and .spec.secretName == strenv(SECRET))' "$BUILT")"
+  [ "$(grep -c . <<<"$found")" -eq 1 ] || { echo "$(grep -c . <<<"$found") Certificates of the build write the Secret $secret" >&2; return 1; }
+  echo "$found"
+}
+
+# api_callers: every workload of the operator's templates, its patches left out, whose containers or
+# init containers set LS_CONTROLLERS, the address of LINSTOR's API its clients read, one JSON object a
+# line: its kind, name and file, relative to the repository, and those containers.
+api_callers() {
+  local file
+  while IFS= read -r -d '' file; do
+    FILE="${file#"$OPERATOR_SRC"/}" yq -N -o json -I0 'select(.spec.template.spec != null)
+      | {"kind": .kind, "name": .metadata.name, "file": strenv(FILE),
+         "containers": [(.spec.template.spec.initContainers // []) + (.spec.template.spec.containers // []) | .[]
+           | select((.env // []) | any_c(.name == "LS_CONTROLLERS")) | .name]}
+      | select(.containers | length > 0)' "$file"
+  done < <(find "$OPERATOR_SRC/pkg/resources" -name '*.yaml' -not -path '*/patches/*' -print0 | LC_ALL=C sort -z)
+}
+
+# patch_containers FILE KIND NAME: each container and init container that the patch for KIND NAME in
+# the operator's patch list FILE writes, with the patch's volumes beside it, as JSON lines.
+patch_containers() {
+  # shellcheck disable=SC2016 # $spec is a yq variable.
+  KIND="$2" NAME="$3" yq -N -o json -I0 '.[] | select(.target.kind == strenv(KIND) and .target.name == strenv(NAME))
+    | .patch | from_yaml | .spec.template.spec as $spec
+    | (($spec.initContainers // []) + ($spec.containers // [])) | .[] | . + {"volumes": ($spec.volumes // [])}' "$1"
+}
+
+# renders PATCH: the function of the operator's internal/controller/patches.go that renders the patch
+# list pkg/resources/cluster/patches/PATCH.
+renders() {
+  awk -v want="\"patches/$1\"" '/^func [A-Za-z0-9_]+\(/ { name = $2; sub(/\(.*/, "", name) } index($0, want) { print name }' \
+    "$OPERATOR_SRC/internal/controller/patches.go"
+}
+
+# client_certificate DIR: the name of the operator's Certificate template in
+# pkg/resources/cluster/DIR whose one usage is client auth; fails unless there is one.
+client_certificate() {
+  local found
+  found="$(yq -N -o json -I0 'select(.kind == "Certificate") | {"name": .metadata.name, "usages": .spec.usages}' \
+    "$OPERATOR_SRC/pkg/resources/cluster/$1"/*.yaml | jq -r 'select(.usages == ["client auth"]) | .name')"
+  [ "$(grep -c . <<<"$found")" -eq 1 ] || { echo "$1: $(grep -c . <<<"$found") client certificates in its cert-manager templates" >&2; return 1; }
+  echo "$found"
+}
+
+# api_wiring: what the operator's patches for the API's address and apiTLS write into the workloads
+# that call the API (pkg/resources/cluster/patches/api-endpoint.yaml and api-tls*.yaml), one a line:
+# the environment variables their clients read, and the names and mount paths of the volumes the TLS
+# patches add.
+api_wiring() {
+  # shellcheck disable=SC2016 # $s is a yq variable.
+  yq -N '.[] | .patch | from_yaml | select(.spec.template.spec != null) | .spec.template.spec as $s
+    | ((($s.initContainers // []) + ($s.containers // [])) as $c
+      | [$c[] | (.env // [])[] | .name] + [($s.volumes // [])[] | .name] + [$c[] | (.volumeMounts // [])[] | .mountPath])
+    | .[]' "$OPERATOR_SRC/pkg/resources/cluster/patches/api-endpoint.yaml" "$OPERATOR_SRC/pkg/resources/cluster/patches"/api-tls*.yaml |
+    LC_ALL=C sort -u
+}
+
+# overrides: every name and mount path that the podTemplates and patches of the storage cluster's
+# objects in BUILT write over the operator's own templates, one a line: the object, a tab and the
+# value.
+overrides() {
+  # shellcheck disable=SC2016 # $o is a yq variable.
+  yq -N 'select(.apiVersion == "piraeus.io/*") | (.kind + "/" + .metadata.name) as $o
+    | ([.spec | .. | select(tag == "!!map") | select(has("podTemplate")) | .podTemplate]
+      + [(.spec.patches // [])[] | .patch | from_yaml])
+    | .[] | .. | select(tag == "!!map") | (.name, .mountPath) | select(tag == "!!str") | $o + "\t" + .' "$BUILT"
+}
+
+# api_names NAMESPACE: the DNS names the operator gives the controller's certificate when apiTLS names
+# a cert-manager issuer, in place of its template's, for an operator in NAMESPACE, one a line
+# (internal/controller/linstorcluster_controller.go).
+api_names() {
+  local go="$OPERATOR_SRC/internal/controller/linstorcluster_controller.go"
+  grep -Eq 'ClusterApiTLSCertManagerPatch\(apiSecretName, lcluster\.Spec\.ApiTLS\.CertManager, serviceNames\)' "$go" ||
+    { echo "the operator gives the controller's certificate other names than serviceNames" >&2; return 1; }
+  sed -n '/serviceNames := \[\]string{/,/^[[:space:]]*}/p' "$go" |
+    sed -nE 's/^[[:space:]]*(fmt\.Sprintf\()?"([^"]+)"(, r\.Namespace\))?,$/\2/p' | sed "s/%s/$1/"
+}
+
+# docker_or_skip: skips the test, saying why, where no docker daemon answers. Past it, whatever
+# docker fails at fails the test, a pull of the image included.
+docker_or_skip() {
+  type -P docker >/dev/null || skip "no docker daemon answers: docker is not on PATH"
+  docker version --format '{{.Server.Version}}' >/dev/null 2>&1 ||
+    skip "no docker daemon answers: docker version reaches none"
+}
+
+# in_docker ARG...: docker ARG..., run with none of the secrets the environment may hold, as the
+# recipes run it (scripts/lib/tools.sh).
+in_docker() {
+  (
+    # shellcheck source=scripts/lib/tools.sh
+    . "$REPO/scripts/lib/tools.sh"
+    docker "$@"
+  )
+}
+
+# issue CERT_JSON NAME DIR [AUTHORITY]: DIR/NAME.crt and DIR/NAME.key, made with openssl as cert-manager
+# makes the Certificate CERT_JSON: self-signed without AUTHORITY, as the SelfSigned issuer signs, or
+# signed with DIR/AUTHORITY.crt and its key, as the CA issuer signs. The key is the one the Certificate
+# names, RSA of 2048 bits when it names none, in the encoding cert-manager writes when it names none,
+# PKCS#1, which is SEC 1 for ECDSA (pkg/util/pki/generate.go of cert-manager v1.21.3); the
+# lifetime its duration, 90 days when it names none; the subject its common name, or empty; isCA a
+# critical CA constraint; its usages, digital signature and key encipherment when it names none and
+# cert sign added for an authority (pkg/util/pki/csr.go), the key usages critical, as Go marks them;
+# and its DNS names, critical when the subject is empty (pkg/util/pki/certificatetemplate.go).
+issue() {
+  local cert=$1 name=$2 dir=$3 ca=${4:-} algorithm size duration ca_flag usage subject san
+  local ku=() eku=()
+  algorithm="$(jq -r '.spec.privateKey.algorithm // "RSA"' <<<"$cert")"
+  size="$(jq -r '.spec.privateKey.size // 0' <<<"$cert")"
+  [ "$(jq -r '.spec.privateKey.encoding // "PKCS1"' <<<"$cert")" = PKCS1 ] ||
+    { echo "$name: the key encoding $(jq -r '.spec.privateKey.encoding' <<<"$cert") is not made here" >&2; return 1; }
+  case $algorithm:$size in
+    RSA:0) openssl genrsa -traditional -out "$dir/$name.key" 2048 2>/dev/null ;;
+    RSA:*) openssl genrsa -traditional -out "$dir/$name.key" "$size" 2>/dev/null ;;
+    ECDSA:0 | ECDSA:256) openssl ecparam -name prime256v1 -genkey -noout -out "$dir/$name.key" ;;
+    ECDSA:384) openssl ecparam -name secp384r1 -genkey -noout -out "$dir/$name.key" ;;
+    *) echo "$name: the key $algorithm $size is not made here" >&2 && return 1 ;;
+  esac
+  [ "$(head -n 1 "$dir/$name.key")" = "-----BEGIN $([ "$algorithm" = ECDSA ] && echo EC || echo RSA) PRIVATE KEY-----" ] ||
+    { echo "$name: the key is not encoded as cert-manager writes it: $(head -n 1 "$dir/$name.key")" >&2; return 1; }
+  duration="$(jq -r '.spec.duration // "2160h"' <<<"$cert")"
+  [[ $duration =~ ^([0-9]+)h$ ]] || { echo "$name: the duration $duration is not in whole hours" >&2; return 1; }
+  duration=$((BASH_REMATCH[1] / 24))
+  ca_flag="$(jq -r '.spec.isCA // false' <<<"$cert")"
+  if [ "$ca_flag" = true ]; then ku+=(keyCertSign); fi
+  while IFS= read -r usage; do
+    case $usage in
+      "digital signature" | signing) ku+=(digitalSignature) ;;
+      "key encipherment") ku+=(keyEncipherment) ;;
+      "cert sign") ku+=(keyCertSign) ;;
+      "server auth") eku+=(serverAuth) ;;
+      "client auth") eku+=(clientAuth) ;;
+      *) echo "$name: the usage $usage is not made here" >&2 && return 1 ;;
+    esac
+  done < <(jq -r 'if (.spec.usages // []) == [] then ["digital signature", "key encipherment"] else .spec.usages end | .[]' <<<"$cert")
+  subject="$(jq -r 'if .spec.commonName then "/CN=" + .spec.commonName else "/" end' <<<"$cert")"
+  san="$(jq -r '[(.spec.dnsNames // [])[] | "DNS:" + .] | join(",")' <<<"$cert")"
+  {
+    if [ "$ca_flag" = true ]; then echo "basicConstraints=critical,CA:TRUE"; fi
+    if [ "${#ku[@]}" -gt 0 ]; then echo "keyUsage=critical,$(printf '%s\n' "${ku[@]}" | sort -u | paste -sd, -)"; fi
+    if [ "${#eku[@]}" -gt 0 ]; then echo "extendedKeyUsage=$(printf '%s\n' "${eku[@]}" | sort -u | paste -sd, -)"; fi
+    if [ -n "$san" ]; then echo "subjectAltName=$([ "$subject" = / ] && echo critical,)$san"; fi
+  } >"$dir/$name.ext"
+  openssl req -new -key "$dir/$name.key" -subj "$subject" -out "$dir/$name.csr"
+  if [ -z "$ca" ]; then
+    openssl x509 -req -in "$dir/$name.csr" -signkey "$dir/$name.key" -days "$duration" -sha256 \
+      -extfile "$dir/$name.ext" -out "$dir/$name.crt" 2>/dev/null
+  else
+    openssl x509 -req -in "$dir/$name.csr" -CA "$dir/$ca.crt" -CAkey "$dir/$ca.key" -CAcreateserial \
+      -days "$duration" -sha256 -extfile "$dir/$name.ext" -out "$dir/$name.crt" 2>/dev/null
+  fi
+}
+
+# api_pki DIR NAMESPACE: the certificates of the controller's start, in DIR: the API's authority as its
+# Certificate in BUILT, linstor-cluster built, states it; another authority made from the same
+# Certificate, so of the same name, with a key of its own; and, as the operator's Certificate
+# templates state them (pkg/resources/cluster/controller/cert-manager), the controller's server
+# certificate, linstor-api-tls, with the DNS names the operator in NAMESPACE gives it in place of the
+# template's, and the operator's client certificate, linstor-client-tls, signed by the API's
+# authority, and the same client certificate signed by the other one.
+api_pki() {
+  local dir=$1 authority expected names templates="$OPERATOR_SRC/pkg/resources/cluster/controller/cert-manager"
+  authority="$(api_authority)"
+  echo "the API's authority: $authority"
+  expected="$(api_names "$2")"
+  issue "$authority" authority "$dir"
+  issue "$authority" other-authority "$dir"
+  issue "$(yq -N -o json -I0 'select(.kind == "Certificate" and .metadata.name == "linstor-api-tls")' "$templates"/api/*.yaml |
+    NAMES="$expected" jq -c '.spec.dnsNames = (env.NAMES | split("\n"))')" server "$dir" authority
+  names="$(openssl x509 -in "$dir/server.crt" -noout -ext subjectAltName | sed '1d' | tr ',' '\n' | sed -E 's/^[[:space:]]*DNS://')"
+  echo "the controller's certificate holds: $(xargs <<<"$names")"
+  [ "$(LC_ALL=C sort <<<"$names")" = "$(LC_ALL=C sort <<<"$expected")" ] ||
+    { echo "the operator gives the controller's certificate the names $(xargs <<<"$expected")" >&2; return 1; }
+  issue "$(yq -N -o json -I0 'select(.kind == "Certificate" and .metadata.name == "linstor-client-tls")' "$templates"/api-client/*.yaml)" client "$dir" authority
+  issue "$(yq -N -o json -I0 'select(.kind == "Certificate" and .metadata.name == "linstor-client-tls")' "$templates"/api-client/*.yaml)" other-client "$dir" other-authority
+}
+
+# controller_start: starts, detached, the LINSTOR controller as the operator's template with its
+# apiTLS patch runs it at the version the pinned chart runs (pkg/resources/cluster/controller and
+# patches/api-tls.yaml), offline: the image the rendered chart's image list names; the container's
+# arguments and the literal values of its environment, the leader election left out, as it needs an
+# API server and the start has one controller; the user the LinstorCluster gives the pod, a read-only
+# root, no capability and no privilege escalation; and each of the container's mounts: an empty
+# directory for an emptyDir, the ConfigMap's files and the projected Secrets' tls.crt, tls.key and
+# ca.crt, of mode 0644, the default of those volumes. The ConfigMap's linstor.toml is the patch's with
+# its [db] table alone replaced by the image's own, a local database, as the k8s database the patch
+# names needs an API server. The other authority's client certificate is mounted at
+# /run/other-authority. The host the client configuration dials resolves to the loopback. Leaves
+# linstor-cluster built in BUILT and sets CONTROLLER, the container, and START, the directory of what
+# it mounts and read.
+controller_start() {
+  local image config spec user host patch path kind ro ns etc="" i
+  local mounts=() envs=() args=()
+  START="$BATS_TEST_TMPDIR/controller-start"
+  mkdir -p "$START/pki" "$START/etc" "$START/api" "$START/client" "$START/other"
+  render_operator
+  # The image list the chart renders for the operator, with no override.
+  config="$(yq -N 'select(.kind == "ConfigMap" and .data["0_piraeus_datastore_images.yaml"] != null)' "$RENDERED")"
+  [ -z "$(yq '.data | keys | .[] | select(test("_helm_override"))' <<<"$config")" ] ||
+    { echo "the chart's image list carries an override, which this start does not read"; return 1; }
+  image="$(yq '.data["0_piraeus_datastore_images.yaml"] | from_yaml
+    | .base + "/" + .components["linstor-controller"].image + ":" + .components["linstor-controller"].tag' <<<"$config")"
+  echo "the controller's image: $image"
+  operator_source
+  ns="$(yq -N 'select(.kind == "HelmRelease") | .spec.targetNamespace // .metadata.namespace' "$BUILT")"
+  patch="$OPERATOR_SRC/pkg/resources/cluster/patches/api-tls.yaml"
+  built piraeus-datastore linstor-cluster
+  api_pki "$START/pki" "$ns"
+  # The container as the template and the patch make it, which adds mounts and a port.
+  spec="$START/spec.json"
+  jq -s '.[0] as $base | .[1] as $patch
+    | ($base.containers[] | select(.name == "linstor-controller")) as $c
+    | ($patch.containers[] | select(.name == "linstor-controller")) as $p
+    | {"container": ($c + {"volumeMounts": ($c.volumeMounts + $p.volumeMounts), "ports": ($c.ports + $p.ports)}),
+       "volumes": ($base.volumes + $patch.volumes)}' \
+    <(yq -o json '.spec.template.spec' "$OPERATOR_SRC/pkg/resources/cluster/controller/controller-deployment.yaml") \
+    <(yq -o json '.[] | select(.target.kind == "Deployment" and .target.name == "linstor-controller") | .patch | from_yaml
+      | .spec.template.spec' "$patch") >"$spec"
+  [ "$(jq -r '.container.securityContext.readOnlyRootFilesystem' "$spec")" = true ]
+  user="$(yq -N 'select(.kind == "LinstorCluster") | .spec.controller.podTemplate.spec.securityContext
+    | (.runAsUser // "" | tostring) + ":" + (.runAsGroup // "" | tostring)' "$BUILT")"
+  [[ $user =~ ^[1-9][0-9]*:[0-9]+$ ]] || { echo "the LinstorCluster gives the controller's pod no user that is not root: $user"; return 1; }
+  # The ConfigMap's files: the patch's, linstor.toml with the image's [db].
+  yq '.[] | select(.target.kind == "ConfigMap" and .target.name == "linstor-controller-config") | .patch | from_yaml
+    | .data["linstor.toml"]' "$patch" >"$START/patch.toml"
+  grep -q '^[[:space:]]*connection_url = "k8s"$' "$START/patch.toml"
+  in_docker run --rm --network none --entrypoint cat "$image" /etc/linstor/linstor.toml >"$START/image.toml"
+  {
+    awk '/^[[:space:]]*\[/ { keep = ($0 !~ /^[[:space:]]*\[db[].]/) } keep' "$START/patch.toml"
+    awk '/^[[:space:]]*\[/ { keep = ($0 ~ /^[[:space:]]*\[db[].]/) } keep' "$START/image.toml"
+  } >"$START/etc/linstor.toml"
+  grep -q '^\[https\]$' "$START/etc/linstor.toml"
+  yq '.[] | select(.target.kind == "ConfigMap" and .target.name == "linstor-controller-config") | .patch | from_yaml
+    | .data["linstor-client.conf"]' "$patch" >"$START/etc/linstor-client.conf"
+  echo "linstor.toml:"; cat "$START/etc/linstor.toml"
+  echo "linstor-client.conf:"; cat "$START/etc/linstor-client.conf"
+  # The Secrets: the controller's own, and the client's the CLI reads, each with the authority as
+  # ca.crt, as a CA issuer writes it; the operator's projection of each, without a CA reference, is
+  # the Secret twice.
+  cp "$START/pki/server.crt" "$START/api/tls.crt"
+  cp "$START/pki/server.key" "$START/api/tls.key"
+  cp "$START/pki/client.crt" "$START/client/tls.crt"
+  cp "$START/pki/client.key" "$START/client/tls.key"
+  cp "$START/pki/authority.crt" "$START/api/ca.crt"
+  cp "$START/pki/authority.crt" "$START/client/ca.crt"
+  cp "$START/pki/other-client.crt" "$START/other/tls.crt"
+  cp "$START/pki/other-client.key" "$START/other/tls.key"
+  chmod 0755 "$START/etc" "$START/api" "$START/client" "$START/other"
+  chmod 0644 "$START"/etc/* "$START"/api/* "$START"/client/* "$START"/other/*
+  while IFS=$'\t' read -r path kind ro; do
+    # shellcheck disable=SC2016 # The patch's placeholders, which the operator replaces, are literal.
+    case $kind in
+      emptyDir) mounts+=(--tmpfs "$path:mode=0777") ;;
+      configMap/linstor-controller-config)
+        etc="$path"
+        mounts+=(-v "$START/etc:$path:ro")
+        ;;
+      'projected/$LINSTOR_API_TLS_SECRET_NAME') mounts+=(-v "$START/api:$path:ro") ;;
+      'projected/$LINSTOR_API_TLS_CLIENT_SECRET_NAME') mounts+=(-v "$START/client:$path:ro") ;;
+      *) echo "the controller mounts $kind at $path, which this start does not stand in for"; return 1 ;;
+    esac
+    [ "$kind" = emptyDir ] || [ "$ro" = true ] || { echo "the controller mounts $kind at $path writable"; return 1; }
+  done < <(jq -r '.volumes as $volumes | .container.volumeMounts[] | . as $m | ($volumes[] | select(.name == $m.name)) as $v
+    | [$m.mountPath, (if $v.emptyDir then "emptyDir" elif $v.configMap then "configMap/" + $v.configMap.name
+        elif $v.projected then "projected/" + ([$v.projected.sources[] | objects | .secret.name // empty] | unique | join(","))
+        else "other" end),
+       ($m.readOnly // false | tostring)] | @tsv' "$spec")
+  # The mounts under the ConfigMap's directory need their mount points in it, which the kubelet makes.
+  [ -n "$etc" ]
+  while read -r path; do
+    mkdir -p "$START/etc/${path#"$etc"/}"
+  done < <(jq -r --arg etc "$etc" '.container.volumeMounts[].mountPath | select(startswith($etc + "/"))' "$spec")
+  while IFS= read -r -d '' i; do
+    envs+=(-e "$i")
+  done < <(jq -j '.container.env[] | select(has("value") and (.name | startswith("K8S_AWAIT_ELECTION_") | not))
+    | .name + "=" + .value + "\u0000"' "$spec")
+  mapfile -t args < <(jq -r '.container.args[]' "$spec")
+  host="$(sed -nE 's#^controllers *= *https://([^:/]+):[0-9]+$#\1#p' "$START/etc/linstor-client.conf")"
+  [ -n "$host" ]
+  CONTROLLER="linstor-controller-start-$$-$RANDOM"
+  in_docker run --detach --name "$CONTROLLER" --network none --cap-drop ALL --security-opt no-new-privileges \
+    --user "$user" --read-only --add-host "$host:127.0.0.1" "${mounts[@]}" -v "$START/other:/run/other-authority:ro" \
+    "${envs[@]}" "$image" "${args[@]}" >/dev/null
+  for ((i = 0; i < 120; i++)); do
+    [ "$(in_docker inspect --format '{{.State.Running}}' "$CONTROLLER")" = true ] || break
+    if in_docker exec "$CONTROLLER" curl -fsS -o /dev/null --max-time 2 \
+      "http://localhost:$(jq -r '.container.ports[] | select(.name == "api") | .containerPort' "$spec")/health" 2>/dev/null; then
+      return 0
+    fi
+    sleep 1
+  done
+  in_docker logs "$CONTROLLER" 2>&1 | tail -n 40
+  echo "the controller did not answer its health check"
+  return 1
+}
+
 @test "The storage applications are enabled and wait for what they need" {
   local app ns path
   overlay
@@ -212,7 +555,10 @@ replicas() {
   local depends
   depends="$(yq -N 'select(.metadata.name == "linstor-cluster") | .spec.dependsOn // [] | .[].name' "$OVERLAY" | sort | xargs)"
   echo "linstor-cluster depends on: $depends"
-  [ "$depends" = "piraeus-operator snapshot-controller" ]
+  [ "$depends" = "cert-manager piraeus-operator snapshot-controller" ]
+  # Its issuers and certificates are cert-manager's kinds, which cert-manager's webhook admits: it
+  # starts once cert-manager's release is Ready.
+  [ "$(yq -N 'select(.kind == "Kustomization" and .metadata.name == "cert-manager") | .spec.wait' "$OVERLAY")" = true ]
   # linstor-cluster is Ready only once the operator reports the storage cluster Available, its
   # controller answering, and every satellite configuration Applied, each at the generation it
   # holds: kstatus reads neither from these kinds, which carry no Ready condition.
@@ -479,4 +825,221 @@ replicas() {
   done < <(comm -23 "$keys/ours" "$keys/chart")
   echo "keys the chart does not define:${unknown:- none}"
   [ -z "$unknown" ]
+}
+
+@test "Only holders of a certificate from the storage cluster's API authority call LINSTOR's API" {
+  local ns tls issuer ca bootstrap signed depends go patches resources caller kind name file comp container
+  local tls_patch candidate cert renderer secret callers=() components=() names url conf port service wiring written
+  operator_source
+  # The operator makes its Certificates in its own namespace, the release's, where a Certificate's
+  # issuer of kind Issuer is looked up.
+  ns="$(yq -N 'select(.kind == "HelmRelease") | .spec.targetNamespace // .metadata.namespace' "$BUILT")"
+  echo "the operator's namespace: $ns"
+  [ -n "$ns" ]
+  built piraeus-datastore linstor-cluster
+  tls="$(yq -N -o json -I0 'select(.kind == "LinstorCluster") | .spec.apiTLS // null' "$BUILT")"
+  echo "apiTLS: $tls"
+  # By cert-manager and nothing else: the operator writes its Certificates' Secrets under its default
+  # names and each side trusts the ca.crt the issuer writes beside a certificate, so no Secret name
+  # and no CA reference points anything at a Secret no Certificate of the issuer writes.
+  [ "$(jq -c 'keys' <<<"$tls")" = '["certManager"]' ]
+  [ "$(jq -c '.certManager | [.group, .kind]' <<<"$tls")" = '["cert-manager.io","Issuer"]' ]
+  issuer="$(cm_object Issuer "$(jq -r '.certManager.name' <<<"$tls")")"
+  echo "the API's issuer: $issuer"
+  [ "$(jq -r '.metadata.namespace' <<<"$issuer")" = "$ns" ]
+  # Of kind CA, signing from the Secret of an authority the build makes, which only that authority's
+  # Certificate writes and the build's own self-signed Issuer issues.
+  [ "$(jq -c '.spec | keys' <<<"$issuer")" = '["ca"]' ]
+  ca="$(api_authority)"
+  echo "its authority: $ca"
+  [ "$(jq -r '.metadata.namespace' <<<"$ca")" = "$ns" ]
+  [ "$(jq -r '.spec.isCA' <<<"$ca")" = true ]
+  [ "$(jq -c '.spec.issuerRef | [.group // "cert-manager.io", .kind // "Issuer"]' <<<"$ca")" = '["cert-manager.io","Issuer"]' ]
+  bootstrap="$(cm_object Issuer "$(jq -r '.spec.issuerRef.name' <<<"$ca")")"
+  echo "the authority's issuer: $bootstrap"
+  [ "$(jq -r '.metadata.namespace' <<<"$bootstrap")" = "$ns" ]
+  [ "$(jq -c '.spec' <<<"$bootstrap")" = '{"selfSigned":{}}' ]
+  # The self-signed Issuer signs authorities alone.
+  signed="$(NAME="$(jq -r '.metadata.name' <<<"$bootstrap")" yq -N 'select(.kind == "Certificate"
+    and .spec.issuerRef.name == strenv(NAME) and (.spec.issuerRef.kind // "Issuer") == "Issuer")
+    | .metadata.name + " " + ((.spec.isCA // false) | tostring)' "$BUILT")"
+  echo "the self-signed Issuer signs: $signed"
+  [ "$(grep -vc ' true$' <<<"$signed")" -eq 0 ]
+  # cert-manager's kinds and webhook are in place before linstor-cluster applies them.
+  overlay
+  depends="$(yq -N 'select(.kind == "Kustomization" and .metadata.name == "linstor-cluster") | .spec.dependsOn // [] | .[].name' "$OVERLAY")"
+  echo "linstor-cluster depends on: $(xargs <<<"$depends")"
+  grep -qx cert-manager <<<"$depends"
+
+  # The operator's source at the version the chart runs. Each workload that dials the API reads its
+  # address from LS_CONTROLLERS; with apiTLS, each container that does is pointed at the address the
+  # operator gives (below), reads its client certificate and key from a volume of its own Secret and
+  # trusts the authority beside them, and the operator asks the issuer apiTLS names for that
+  # Certificate. The HA controller and the satellites set no LS_CONTROLLERS: they call no API.
+  go="$OPERATOR_SRC/internal/controller/linstorcluster_controller.go"
+  resources="$OPERATOR_SRC/pkg/resources/cluster"
+  patches="$resources/patches"
+  mapfile -t callers < <(api_callers)
+  printf 'dials the API: %s\n' "${callers[@]}"
+  [ "${#callers[@]}" -gt 0 ]
+  for caller in "${callers[@]}"; do
+    kind="$(jq -r .kind <<<"$caller")" name="$(jq -r .name <<<"$caller")" file="$(jq -r .file <<<"$caller")"
+    [[ $file == pkg/resources/cluster/*/* ]] || { echo "$kind $name is no component of the storage cluster: $file"; return 1; }
+    comp="${file#pkg/resources/cluster/}" comp="${comp%%/*}"
+    components+=("$comp")
+    tls_patch=""
+    for candidate in "$patches"/api-tls*.yaml; do
+      if [ -n "$(patch_containers "$candidate" "$kind" "$name")" ]; then tls_patch="$candidate"; fi
+    done
+    echo "$kind $name ($comp): the TLS patch ${tls_patch:+patches/}$(basename "${tls_patch:-none}")"
+    [ -n "$tls_patch" ]
+    for container in $(jq -r '.containers[]' <<<"$caller"); do
+      # shellcheck disable=SC2016 # The patch's placeholder, which the operator replaces, is literal.
+      [ "$(patch_containers "$patches/api-endpoint.yaml" "$kind" "$name" | C="$container" jq -r 'select(.name == env.C)
+        | .env[] | select(.name == "LS_CONTROLLERS") | .value')" = '$LINSTOR_CONTROLLER_URL' ]
+      patch_containers "$tls_patch" "$kind" "$name" | C="$container" jq -e 'select(.name == env.C)
+        | (.env // [] | map({"key": .name, "value": .}) | from_entries) as $env
+        | [.volumeMounts[]? as $m | .volumes[] | select(.name == $m.name
+            and ((.secret.secretName // "") | test("^[$][A-Z_]+_SECRET_NAME$"))) | $m.mountPath] as $mounts
+        | (($env.LS_USER_CERTIFICATE_FILE.value // "") | sub("/[^/]*$"; "")) as $cert
+        | (($env.LS_USER_KEY_FILE.value // "") | sub("/[^/]*$"; "")) as $key
+        | $env.LS_ROOT_CA != null and ($mounts | index($cert)) != null and ($mounts | index($key)) != null' >/dev/null ||
+        { echo "$kind $name: $container reads no client certificate from a Secret of its own in $tls_patch"; return 1; }
+    done
+    # The operator asks the issuer of apiTLS for the client certificate, and applies the TLS patch
+    # with the Secret that Certificate writes.
+    cert="$(client_certificate "$comp/cert-manager")"
+    renderer="$(renders "$(basename "$tls_patch")")"
+    secret="$(grep -oE "ClusterApiTLSClientCertManagerPatch\(\"$cert\", [A-Za-z]+, lcluster\.Spec\.ApiTLS\.CertManager\)" "$go" |
+      sed -E 's/^[^,]*, ([A-Za-z]+),.*$/\1/')"
+    echo "$kind $name: the Certificate $cert writes ${secret:-nothing}, which ${renderer:-nothing} mounts"
+    [ -n "$renderer" ] && [ -n "$secret" ]
+    grep -qF "resourceDirs = append(resourceDirs, \"$comp/cert-manager\")" "$go"
+    grep -Eq "$renderer\($secret, lcluster\.Spec\.ApiTLS\.CAReference\)" "$go"
+  done
+  # Each of those components' resources takes the address the operator gives.
+  [ "$(grep -c 'ClusterApiEndpointPatch(LinstorControllerUrl(lcluster))' "$go")" -eq "$(printf '%s\n' "${components[@]}" | sort -u | grep -c .)" ]
+  # And keeps it, its client certificate and its authority as the operator writes them: no podTemplate
+  # or patch of the build's storage cluster objects sets an address, a certificate, a key or an
+  # authority the clients read, or names a volume or a mount path the TLS patches add.
+  wiring="$(api_wiring)"
+  echo "the operator's wiring of the API's clients: $(xargs <<<"$wiring")"
+  grep -qx LS_CONTROLLERS <<<"$wiring"
+  written="$(overrides | awk -F '\t' 'NR == FNR { wiring[$0]; next } $2 in wiring' <(printf '%s\n' "$wiring") -)"
+  echo "the build writes over it: ${written:-nothing}"
+  [ -z "$written" ]
+
+  # The operator itself: it dials the controller's Service at the port named secure-api over HTTPS,
+  # which the controller's TLS patch adds, with the client Secret of apiTLS, which the operator's
+  # Certificate linstor-client-tls writes from the same issuer.
+  grep -A1 -F 'if p.Name == "secure-api" {' "$OPERATOR_SRC/pkg/linstorhelper/client.go" | grep -qF 'return "https", p.Port, true'
+  grep -qF 'opts = append(opts, lapi.BaseURL(&url.URL{' "$OPERATOR_SRC/pkg/linstorhelper/client.go"
+  grep -qF 'Host:   fmt.Sprintf("%s.%s.svc:%d", s.Name, s.Namespace, port),' "$OPERATOR_SRC/pkg/linstorhelper/client.go"
+  port="$(yq -N '.[] | select(.target.kind == "Service" and .target.name == "linstor-controller") | .patch | from_yaml
+    | .spec.ports[] | select(.name == "secure-api") | .port' "$patches/api-tls.yaml")"
+  service="$(yq -N 'select(.kind == "Service") | .metadata.name' "$resources/controller/controller-service.yaml")"
+  echo "the controller's Service $service, secure-api: ${port:-none}"
+  [ -n "$port" ]
+  grep -qF 'clientSecret = lcluster.Spec.ApiTLS.GetClientSecretName()' "$go"
+  [ "$(client_certificate controller/cert-manager/api-client)" = linstor-client-tls ]
+  grep -qF '"controller/cert-manager/api-client"' "$go"
+  grep -Eq 'ClusterApiTLSClientCertManagerPatch\("linstor-client-tls", clientSecretName, lcluster\.Spec\.ApiTLS\.CertManager\)' "$go"
+  # The CLI in the controller's pod: the client configuration the patch writes dials HTTPS with the
+  # certificate and key of the volume the patch mounts from that client Secret.
+  conf="$(yq '.[] | select(.target.kind == "ConfigMap" and .target.name == "linstor-controller-config") | .patch | from_yaml
+    | .data["linstor-client.conf"]' "$patches/api-tls.yaml")"
+  echo "the CLI's configuration: $conf"
+  patch_containers "$patches/api-tls.yaml" Deployment linstor-controller | jq -e \
+    --arg cert "$(sed -nE 's#^certfile *= *(.*)/[^/]*$#\1#p' <<<"$conf")" --arg key "$(sed -nE 's#^keyfile *= *(.*)/[^/]*$#\1#p' <<<"$conf")" '
+    select(.name == "linstor-controller")
+    | [.volumeMounts[] as $m | .volumes[] | select(.name == $m.name
+        and ([.projected.sources[]? | objects | .secret.name] | index("$LINSTOR_API_TLS_CLIENT_SECRET_NAME")) != null) | $m.mountPath] as $mounts
+    | ($mounts | index($cert)) != null and ($mounts | index($key)) != null' >/dev/null
+  grep -Eq '"LINSTOR_API_TLS_CLIENT_SECRET_NAME": +clientSecretName,' "$OPERATOR_SRC/internal/controller/patches.go"
+  grep -qF 'p, err := ClusterApiTLSPatch(apiSecretName, clientSecretName, lcluster.Spec.ApiTLS.CAReference)' "$go"
+
+  # Everyone dials HTTPS at the port secure-api, at a name the controller's certificate holds: the
+  # names the operator gives the Certificate it asks the issuer of apiTLS for.
+  names="$(api_names "$ns")"
+  echo "the controller's certificate holds: $(xargs <<<"$names")"
+  url="$(sed -n '/^func LinstorControllerUrl(/,/^}/p' "$go" | sed -n '/cluster\.Spec\.ApiTLS != nil {/,/}/p' |
+    sed -nE 's/^[[:space:]]*return "([^"]*)"$/\1/p')"
+  echo "the components dial $url, the CLI $(sed -n 's/^controllers *= *//p' <<<"$conf"), the operator $service.$ns.svc:$port"
+  for url in "$url" "$(sed -n 's/^controllers *= *//p' <<<"$conf")" "https://$service.$ns.svc:$port"; do
+    [[ $url =~ ^https://([^:/]+):([0-9]+)$ ]]
+    grep -qxF "${BASH_REMATCH[1]}" <<<"$names"
+    [ "${BASH_REMATCH[2]}" = "$port" ]
+  done
+}
+
+@test "The pinned LINSTOR controller refuses an API request without its authority's client certificate and keeps serving its metrics" {
+  local conf api plain ca cert key out version names
+  docker_or_skip
+  # The API's authority, which the certificates are made from, is the build's.
+  built piraeus-datastore linstor-cluster
+  api_authority >/dev/null
+  controller_start
+  conf="$START/etc/linstor-client.conf"
+  api="$(sed -n 's/^controllers *= *//p' "$conf")"
+  ca="$(sed -n 's/^cafile *= *//p' "$conf")" cert="$(sed -n 's/^certfile *= *//p' "$conf")" key="$(sed -n 's/^keyfile *= *//p' "$conf")"
+  plain="http://${api#https://}" plain="${plain%:*}:$(jq -r '.container.ports[] | select(.name == "api") | .containerPort' "$START/spec.json")"
+  echo "the API: $api; the plain port: $plain"
+  # Without a client certificate the handshake fails: over TLS 1.2 within the handshake, which curl
+  # reports as 35, and over TLS 1.3 at the server's first answer; no version is read.
+  run in_docker exec "$CONTROLLER" curl -sS --max-time 10 --tls-max 1.2 --cacert "$ca" "$api/v1/controller/version"
+  echo "no certificate, TLS 1.2: $status $output"
+  [ "$status" -eq 35 ]
+  [[ $output != *'"version"'* ]]
+  run in_docker exec "$CONTROLLER" curl -sS --max-time 10 --cacert "$ca" "$api/v1/controller/version"
+  echo "no certificate: $status $output"
+  [ "$status" -ne 0 ]
+  [[ $output != *'"version"'* ]]
+  # With the client certificate of the API's authority, the version.
+  out="$(in_docker exec "$CONTROLLER" curl -sS --max-time 10 --cacert "$ca" --cert "$cert" --key "$key" -w '\n%{http_code}' "$api/v1/controller/version")"
+  echo "the API's client certificate: $out"
+  [ "$(tail -n 1 <<<"$out")" = 200 ]
+  version="$(head -n 1 <<<"$out" | jq -r '.version')"
+  [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+  # With a certificate of the same name another authority signed, the handshake fails as without one.
+  run in_docker exec "$CONTROLLER" curl -sS --max-time 10 --tls-max 1.2 --cacert "$ca" \
+    --cert /run/other-authority/tls.crt --key /run/other-authority/tls.key "$api/v1/controller/version"
+  echo "another authority's certificate, TLS 1.2: $status $output"
+  [ "$status" -eq 35 ]
+  [[ $output != *'"version"'* ]]
+  run in_docker exec "$CONTROLLER" curl -sS --max-time 10 --cacert "$ca" \
+    --cert /run/other-authority/tls.crt --key /run/other-authority/tls.key "$api/v1/controller/version"
+  echo "another authority's certificate: $status $output"
+  [ "$status" -ne 0 ]
+  [[ $output != *'"version"'* ]]
+  # Over plain HTTP the API answers only with a redirect to the HTTPS port, and a request that would
+  # create a resource definition creates none; one made over HTTPS with the certificate shows the
+  # listing would hold it.
+  out="$(in_docker exec "$CONTROLLER" curl -sS --max-time 10 -w '\n%{http_code} %{redirect_url}' "$plain/v1/controller/version")"
+  echo "plain HTTP: $out"
+  [ "$(tail -n 1 <<<"$out")" = "302 $api/v1/controller/version" ]
+  [[ $out != *'"version"'* ]]
+  out="$(in_docker exec "$CONTROLLER" curl -sS --max-time 10 -X POST -H 'Content-Type: application/json' \
+    -d '{"resource_definition": {"name": "over-plain-http"}}' -w '\n%{http_code} %{redirect_url}' "$plain/v1/resource-definitions")"
+  echo "plain HTTP, a new resource definition: $out"
+  [ "$(tail -n 1 <<<"$out")" = "302 $api/v1/resource-definitions" ]
+  out="$(in_docker exec "$CONTROLLER" curl -sS --max-time 10 -X POST -H 'Content-Type: application/json' \
+    -d '{"resource_definition": {"name": "over-https"}}' --cacert "$ca" --cert "$cert" --key "$key" -o /dev/null -w '%{http_code}' \
+    "$api/v1/resource-definitions")"
+  echo "HTTPS with the certificate, a new resource definition: $out"
+  [ "$out" = 201 ]
+  names="$(in_docker exec "$CONTROLLER" curl -sS --max-time 10 --cacert "$ca" --cert "$cert" --key "$key" \
+    "$api/v1/resource-definitions" | jq -r '.[].name' | xargs)"
+  echo "resource definitions: ${names:-none}"
+  [ "$names" = over-https ]
+  # The metrics, LINSTOR's own series of the same controller, and the health check, over plain HTTP.
+  out="$(in_docker exec "$CONTROLLER" curl -sS --max-time 10 -w '\n%{http_code}' "$plain/metrics")"
+  [ "$(tail -n 1 <<<"$out")" = 200 ]
+  grep -E '^linstor_info\{' <<<"$out"
+  grep -qE "^linstor_info\{.*version=\"$version\".*\} 1(\.0)?$" <<<"$out"
+  [ "$(in_docker exec "$CONTROLLER" curl -sS --max-time 10 -o /dev/null -w '%{http_code}' "$plain/health")" = 200 ]
+  # The CLI in the container, as the runbooks run it in the pod, reaches the API with the client
+  # configuration the operator writes.
+  out="$(in_docker exec "$CONTROLLER" linstor controller version)"
+  echo "the CLI: $out"
+  [[ $out == "linstor controller $version;"* ]]
 }

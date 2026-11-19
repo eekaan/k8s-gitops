@@ -16,6 +16,19 @@ spec:
       - matchExpressions:
           - key: node-role.kubernetes.io/control-plane
             operator: DoesNotExist
+  # LINSTOR's API takes only clients presenting a certificate the API's authority signed (tls.yaml):
+  # the controller serves it over HTTPS on 3371, the port secure-api, and requires a client
+  # certificate, and the operator asks the issuer below for the controller's certificate and for a
+  # client certificate for itself, which the CLI in the controller's pod also uses, for the CSI
+  # controller, the CSI node plugin, the affinity controller and the NFS server, each in a Secret of
+  # its default name, with the issuer's ca.crt beside it as the authority they trust. The port api,
+  # 3370, keeps serving the controller's metrics and health check over plain HTTP, which the scrape
+  # and the liveness probe read, and answers a request for the API with a redirect to 3371.
+  apiTLS:
+    certManager:
+      group: cert-manager.io
+      kind: Issuer
+      name: linstor-api-ca
   # The controllers' pods run as the restricted Pod Security level requires: a non-root user, the
   # runtime's seccomp profile, and no privilege escalation and no capabilities in each container.
   # The operator applies each podTemplate as a patch to its own template, which drops every

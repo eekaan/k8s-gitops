@@ -88,7 +88,9 @@ exceptions:
       select; the LINSTOR controller, the satellites and the CSI plugins talk to each other, the
       satellites replicate over the pod network, and the API server calls the operator's webhook;
       its flows are not yet enumerated
-    covered-by: the namespace's Pod Security level and the node firewall (ADR 0017)
+    covered-by: LINSTOR's API, which takes only clients holding a certificate its own authority
+      signs (docs/kubernetes.md, Who may call LINSTOR); the namespace's Pod Security level and the
+      node firewall (ADR 0017)
   - namespace: volsync-system
     reason: the operator reaches the API server and Prometheus scrapes its metrics; the movers run
       in the applications' namespaces, under their policies; its flows are not yet enumerated

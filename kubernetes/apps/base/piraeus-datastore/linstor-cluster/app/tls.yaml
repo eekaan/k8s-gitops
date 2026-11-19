@@ -1,0 +1,53 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cert-manager.io/issuer_v1.json
+# The authority of LINSTOR's API, made by cert-manager in this namespace, as OpenBao's is: this
+# self-signed Issuer signs the authority's certificate and nothing else. It is an Issuer, not a
+# ClusterIssuer, so it serves this namespace alone and no other namespace can ask it for a
+# certificate.
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: linstor-ca-bootstrap
+spec:
+  selfSigned: {}
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cert-manager.io/certificate_v1.json
+# The API's authority: the certificate and its private key, which cert-manager makes and keeps in the
+# Secret linstor-api-ca of this namespace. It signs the storage cluster's API certificates alone, the
+# controller's and its clients', so the controller's truststore, which holds it, admits no
+# certificate another authority signed, the cluster's own CA included. The key is never in the tree,
+# and a rebuilt cluster makes a new one.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: linstor-api-ca
+spec:
+  isCA: true
+  commonName: linstor-api-ca
+  secretName: linstor-api-ca
+  # Ten years, renewed in the last one, so a long-lived cluster is never left with an expired
+  # authority.
+  duration: 87600h
+  renewBefore: 8760h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    # A renewal gives the same authority a longer life, not a new key, so what it signed stays
+    # valid.
+    rotationPolicy: Never
+  issuerRef:
+    group: cert-manager.io
+    kind: Issuer
+    name: linstor-ca-bootstrap
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cert-manager.io/issuer_v1.json
+# What the LinstorCluster's apiTLS names: the operator asks it for the controller's server
+# certificate and for a client certificate for itself and for each of its components that calls the
+# API, and every one of them trusts the ca.crt it writes beside each certificate, this authority.
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: linstor-api-ca
+spec:
+  ca:
+    secretName: linstor-api-ca
