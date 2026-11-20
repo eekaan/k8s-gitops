@@ -929,8 +929,8 @@ EOF
   echo "$output"
   [ -z "$output" ]
   # A route that no such policy covers probed for the redirect is refused: hello's Probe expecting it,
-  # and hello-sso's, the log store's and Locust's once the policies are gone or ask for no external
-  # authorisation, when each host needs a Probe for 200.
+  # and hello-sso's, the log store's, Locust's and ReportPortal's once the policies are gone or ask
+  # for no external authorisation, when each host needs a Probe for 200.
   jq '(.[] | select(.kind == "Probe" and .metadata.name == "hello") | .spec.module) = "public_https_signin"' "$objects" >"$fixture"
   run unprobed "$fixture"
   echo "$output"
@@ -941,7 +941,7 @@ EOF
     jq "$refusal" "$objects" >"$fixture"
     run unprobed "$fixture"
     echo "$refusal: $output"
-    [ "$(wc -l <<<"$output")" -eq 9 ]
+    [ "$(wc -l <<<"$output")" -eq 12 ]
     [[ $output == *"Probe demo/hello-sso probes the hostname hello-sso.$DOMAIN for the sign-in redirect with public_https_signin, and no external-authorisation SecurityPolicy covers it"* ]]
     [[ $output == *"HTTPRoute demo/hello-sso: no Probe over https through "*" names the hostname hello-sso.$DOMAIN"* ]]
     [[ $output == *"HTTPRoute demo/hello-sso-oauth2: no Probe over https through "*" names the hostname hello-sso.$DOMAIN"* ]]
