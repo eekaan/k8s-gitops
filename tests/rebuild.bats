@@ -4,7 +4,7 @@
 # carries its scenario's title. The restores are read from the runbooks themselves, every
 # "## Restoring" heading of docs/runbooks/*.md and every runbook whose title begins with Restoring, by
 # the anchor GitHub gives the heading; the databases, and Ascender's secret key, from the render of the
-# tree, scripts/render run once for the file, as tests/network-policy.bats renders it: every
+# tree, scripts/render run by the first tests that need it and one render kept for the file: every
 # Cluster.postgresql.cnpg.io_<namespace>_<name>.yaml of lab-sto2, and every AWX.awx.ansible.com_*.yaml
 # with the ExternalSecret that writes the Secret its secret_key_secret names. The render pulls the
 # pinned charts from their public registries and reaches nothing else.
