@@ -1,0 +1,76 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/monitoring.coreos.com/prometheusrule_v1.json
+# Alerts on the escape canary's two CronJobs, from kube-state-metrics' CronJob and Job metrics, which
+# Prometheus already scrapes, as v2.20, the version the pinned kube-prometheus-stack chart runs,
+# writes them (internal/store/cronjob.go and job.go): kube_cronjob_created and
+# kube_cronjob_status_last_successful_time, labelled cronjob and namespace, the latter absent while a
+# CronJob has never succeeded; kube_job_status_start_time; kube_job_owner, which names a Job's
+# owning CronJob in owner_name, a Job made by hand from it included; and kube_job_status_failed,
+# which, once a Job holds a Failed condition, carries the condition's reason, one of
+# BackoffLimitExceeded, DeadlineExceeded and Evicted, or none for another. Times are Unix times in
+# seconds. The rules select the namespace escape-canary, which holds the canary alone. Tests:
+# tests/rules/escape-canary.yaml.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: escape-canary-alerts
+spec:
+  groups:
+    - name: escape-canary
+      rules:
+        # Three hourly runs in a row that did not succeed, for any reason: a result not the table's,
+        # a pod that no third worker took, an image that does not pull, a run that never started. A
+        # CronJob that has never succeeded has no last-success series, so it is stale 3 hours after
+        # it was created. A warning: the layers the canary checks hold or not whatever it says, and
+        # what is missed is the proof that they do.
+        - alert: EscapeCanaryStale
+          expr: |
+            (
+              time() - max by (namespace, cronjob) (kube_cronjob_status_last_successful_time{namespace="escape-canary"}) > 3 * 3600
+            )
+            or
+            (
+              time() - max by (namespace, cronjob) (kube_cronjob_created{namespace="escape-canary"}) > 3 * 3600
+              unless on (namespace, cronjob)
+              kube_cronjob_status_last_successful_time{namespace="escape-canary"}
+            )
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: A check of the escape canary has not succeeded for 3 hours
+            description: The CronJob {{ $labels.cronjob }} in {{ $labels.namespace }} has had no successful run for 3 hours, so for that long nothing shows that what it attempts gives what its table expects.
+            runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#escapecanarystale
+        # A Job of a canary CronJob failed with BackoffLimitExceeded, which with a backoffLimit of 0 is
+        # a pod that exited non-zero, a result not the table's or the check's own error, and started
+        # after the CronJob's last success, or there is none. A Job failed at its deadline,
+        # DeadlineExceeded, as when no third worker takes a pod, is EscapeCanaryStale's after three.
+        # It clears once a later run succeeds. A warning: what the canary attempts may now pass where
+        # the table says it must not, a matter for the working day.
+        - alert: EscapeCanaryUnexpectedResult
+          expr: |
+            max by (namespace, cronjob) (
+              label_replace(
+                (
+                  max by (namespace, job_name) (kube_job_status_start_time{namespace="escape-canary"})
+                  and on (namespace, job_name)
+                  (kube_job_status_failed{namespace="escape-canary", reason="BackoffLimitExceeded"} > 0)
+                )
+                * on (namespace, job_name) group_left (owner_name)
+                max by (namespace, job_name, owner_name) (kube_job_owner{namespace="escape-canary", owner_kind="CronJob"}),
+                "cronjob", "$1", "owner_name", "(.+)"
+              )
+            )
+            > on (namespace, cronjob)
+            (
+              max by (namespace, cronjob) (kube_cronjob_status_last_successful_time{namespace="escape-canary"})
+              or
+              max by (namespace, cronjob) (kube_cronjob_created{namespace="escape-canary"}) * 0
+            )
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: A check of the escape canary gave a result the table does not expect
+            description: A Job of the CronJob {{ $labels.cronjob }} in {{ $labels.namespace }}, started after its last success, failed as a pod exited non-zero, on a result its table does not give or the check's own error.
+            runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#escapecanaryunexpectedresult

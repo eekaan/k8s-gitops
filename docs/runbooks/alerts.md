@@ -1049,3 +1049,111 @@ change, and `flux reconcile helmrelease blackbox-exporter -n monitoring --reset`
 Until the exporter's Kustomization is Ready again, Flux applies no change to the Gateway or to an
 application with a route, which wait for it, from each one's next reconcile
 ([Probes](../kubernetes.md#probes)).
+
+## EscapeCanaryStale
+
+A CronJob of the escape canary, `escape-canary-network` or `escape-canary-rights`, has had no
+successful run for 3 hours, three hourly runs in a row, or it was created more than 3 hours ago and
+has never succeeded ([The escape canary](../kubernetes.md#the-escape-canary)). Network policy, the
+node firewall and RBAC hold or not whatever the canary says: what is missing is the hourly proof that
+what they forbid still gives the result its table records. It is a warning for the working day. Its
+labels name the `namespace` and the `cronjob`.
+
+Look at first: `kubectl --namespace escape-canary get cronjob,job,pod --output wide` for what the
+runs did and on which nodes, `kubectl get nodes` for the workers, and the lines of the latest run's
+pods, `kubectl --namespace escape-canary logs --selector batch.kubernetes.io/job-name=<job> --prefix
+--tail=-1`, one line for each attempt and a summary. A Job's condition says why it failed:
+`kubectl --namespace escape-canary get job <job> --output jsonpath='{.status.conditions}'`.
+
+Usually: a worker cordoned or full, so a run's third pod found no worker free of the other two and
+the Job failed at its deadline with `DeadlineExceeded`, the two other pods' lines all `ok`; a worker
+lost between runs, `NotReady` in `kubectl get nodes`, which leaves the third pod pending too and
+fails most runs at once on the `secret-store` attempt, which
+[EscapeCanaryUnexpectedResult](#escapecanaryunexpectedresult) reports as well; a worker lost while a
+pod of a scheduled run was on it, which stops the CronJob (below); an image that does not pull,
+which the pod's events name; the runs failing on a result, which that alert reports too, or at their
+deadline on lookups that the resolver does not answer, as
+[EscapeCanaryUnexpectedResult](#escapecanaryunexpectedresult) says; or no run at all, a suspended
+CronJob or one whose runs could not start within 600 seconds of their time. Once the cause is gone,
+a run by hand clears it when it succeeds:
+`kubectl --namespace escape-canary create job --from=cronjob/<cronjob> <name>`.
+
+A worker lost while a pod of a scheduled run was on it, placed, starting or running, stops that
+run's CronJob: `kubectl --namespace escape-canary get cronjob` shows it with one active Job and a
+last schedule hours old, its latest event says `JobAlreadyActive`, and that Job holds a pod
+`Terminating` on the `NotReady` worker, whose lines cannot be read. The Job controller adds no
+`Failed` condition to the Job while that pod terminates, so the Job stays active, the CronJob starts
+no run while it is (`concurrencyPolicy: Forbid`), and neither
+[EscapeCanaryUnexpectedResult](#escapecanaryunexpectedresult) nor `KubeJobFailed` fires; this alert
+does, 3 hours after the last success ([The escape canary](../kubernetes.md#the-escape-canary)). A
+run made by hand and stuck the same way stops no schedule, as the CronJob does not count it among
+its active Jobs, but its Job stays active until its pod is removed. Runs start again once the
+worker answers and its kubelet ends the pod, or once the pod is removed:
+`kubectl --namespace escape-canary delete pod <pod> --force --grace-period=0`. The Job then fails,
+the alerts of a failed Job read it, and the next schedule starts a run. The taint
+`node.kubernetes.io/out-of-service` and the deletion of the Node act on every pod of the worker, the
+taint on its volumes as well: they belong to taking a lost worker out for good, which frees the
+canary's pod too.
+
+## EscapeCanaryUnexpectedResult
+
+A CronJob of the escape canary owns a Job that failed because a pod exited non-zero, and that
+started after the CronJob's last success: an attempt gave a result its table, `expected.tsv`, does
+not give for the mode the canary is set to, or the check could not run
+([The escape canary](../kubernetes.md#the-escape-canary)). An attempt that now succeeds where the
+table says it is blocked or forbidden is a layer that no longer holds; one that now fails where the
+table says open is a target or a path gone, or a lost worker's OpenBao member (below). It clears
+once a later run of the CronJob succeeds. A Job that failed at its deadline does not raise it
+([EscapeCanaryStale](#escapecanarystale) does, after three).
+
+Look at first: the failed Job's lines,
+`kubectl --namespace escape-canary logs --selector batch.kubernetes.io/job-name=<job> --prefix
+--tail=-1`: each `UNEXPECTED` line names the node, the attempt, its result and the one the table
+expects, and a check that could not run says why on a line of its own that starts
+`escape-canary <check> error:`. The lines there are those of the pod that failed and of any pod that
+had already ended: once one pod fails, the Job fails and its controller deletes the pods still
+running, whose lines go with them. `kubectl --namespace escape-canary get job,pod --output wide`
+says which pods failed. The table's row of the attempt says what decides its result; for the flows,
+the record of what policy drops, `just network-audit 1h`, shows what the policies made of them, and
+for the rights check, the account's grants:
+`kubectl auth can-i --list --as system:serviceaccount:escape-canary:escape-canary-rights`.
+
+Usually:
+
+- a result of the rights check that is `allowed`: a binding that names the account, its namespace's
+  accounts, every account or every authenticated caller, from a chart or applied by hand, which is a
+  finding to remove, never a row to change;
+- a network result that is `open` where the table says `blocked`: the cluster enforces and the
+  canary's mode is still `audit`, or the other way round, which `tests/escape-canary.bats` refuses in
+  the tree, so the cluster runs another mode than its values say; or a node rule that admits pods
+  where `talos/firewall.yaml` does not;
+- `attempt=secret-store result=blocked expected=open`, with a worker `NotReady` in
+  `kubectl get nodes`: the worker is lost, and OpenBao's member on it is still one of the three
+  backends of the Service `openbao`, which publishes members that are not ready, until its pod
+  object is removed; a connection that lands on it, one time in three, gets no answer. Isolation
+  holds; once the worker is back, a run succeeds and clears the alert;
+- `refused` where the table says `open`: a target without endpoints, as `hello` or OpenBao with no
+  pod, whose Service's address Cilium refuses (`service-no-backend-response: reject` in the rendered
+  `cilium-config`); or, for `secret-store`, an OpenBao member starting, in a rollout or a restart,
+  which is a backend of the Service as soon as its pod has an address, while its init containers
+  run and before it listens, as the Service publishes members that are not ready;
+- `attempt=resolver result=blocked`, with `unresolved` for the attempts by name: the pods' resolver
+  does not answer. `nc` looks a name up before its 3 seconds start, so each of those attempts waits
+  out the resolver's timeouts, and a run whose lookups outlast its 300 seconds fails at its deadline
+  instead, which [EscapeCanaryStale](#escapecanarystale) reports;
+- `other`: a message of the tool the check does not know, such as `nc`'s `No route to host`, which
+  the check does not print, as the tools' messages name addresses;
+- an `error:` line: a table or a script the check cannot read, or an unknown mode in `ks.yaml`;
+- no `UNEXPECTED` line and no `error:` line: a pod deleted from outside during the seconds of a run,
+  as by an eviction, which `kubectl --namespace escape-canary get events` names, the descheduler's
+  among them. The Job controller counts a pod deleted before it succeeded as failed (`isPodFailed`
+  in `pkg/controller/job/job_controller.go` of Kubernetes v1.37.1), so the Job fails with
+  `BackoffLimitExceeded` even when every line that pod printed was `ok`, and its lines go with it.
+
+A live result that differs from the table is reported with its reason, never answered by changing the
+table. Once the cause is fixed, a run by hand clears the alert when it succeeds:
+`kubectl --namespace escape-canary create job --from=cronjob/<cronjob> <name>`. Each failed Job,
+scheduled or by hand, also raises the stock `KubeJobFailed`, a warning, 15 minutes after it failed,
+and that one does not clear when a run succeeds: it fires for as long as the failed Job exists, and
+the CronJob keeps its three newest failed Jobs for their pods' lines. Once those are read, delete the
+Job, which clears it: `kubectl --namespace escape-canary delete job <job>`.

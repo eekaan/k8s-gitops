@@ -1,0 +1,132 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/yannh/kubernetes-json-schema/master/master-standalone-strict/cronjob-batch-v1.json
+# The rights check: every hour, three pods on three different workers each make the rights attempts
+# of expected.tsv with the token of the account escape-canary-rights, which no binding of the tree
+# names, asking the API server for the Secret cluster-secrets of flux-system and for every pod, and
+# fail unless every result is the table's for the mode: the API server's refusal, in either
+# (docs/kubernetes.md, The escape canary). The two alerts read its runs as they read the network
+# check's (prometheusrule.yaml).
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: escape-canary-rights
+  labels:
+    app.kubernetes.io/name: escape-canary
+    app.kubernetes.io/component: rights
+spec:
+  # 10 minutes past every hour in the cluster's UTC: a minute no other CronJob of the tree runs at,
+  # whose runs, deadlines included, stay out of Robot Framework's nightly window, 05:45 to 06:10
+  # (tests/robot.bats).
+  schedule: "10 * * * *"
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 600
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    metadata:
+      # A job kubectl create job --from makes takes these labels.
+      labels:
+        app.kubernetes.io/name: escape-canary
+        app.kubernetes.io/component: rights
+    spec:
+      # As the network check's: three pods at once, a non-zero exit fails the Job with
+      # BackoffLimitExceeded and a pod no worker takes fails it at the deadline.
+      completionMode: Indexed
+      completions: 3
+      parallelism: 3
+      backoffLimit: 0
+      activeDeadlineSeconds: 300
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: escape-canary
+            app.kubernetes.io/component: rights
+            # The pods the canary's resolver policy selects; escape-canary-rights-api-server
+            # selects them by the two labels above.
+            k8s-gitops/escape-canary: "true"
+        spec:
+          restartPolicy: Never
+          # The one token of the namespace: the account mounts none for a pod that does not ask.
+          serviceAccountName: escape-canary-rights
+          automountServiceAccountToken: true
+          enableServiceLinks: false
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                      - key: node-role.kubernetes.io/control-plane
+                        operator: DoesNotExist
+            # One pod of the Job per node, as the network check's.
+            podAntiAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                - labelSelector:
+                    matchLabels:
+                      app.kubernetes.io/name: escape-canary
+                      app.kubernetes.io/component: rights
+                  matchLabelKeys:
+                    - batch.kubernetes.io/controller-uid
+                  topologyKey: kubernetes.io/hostname
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: kubectl
+              # The Flux CLI image whose kubectl OpenBao's guard runs, by its tag, the flux2 pin of
+              # mise.toml, and its digest. busybox's wget validates no certificate and would hand the
+              # token to whatever answered at the API server's address; kubectl verifies the API
+              # server against the CA mounted with the token.
+              image: ghcr.io/fluxcd/flux-cli:v2.10.0@sha256:1a5178b1770052d6e88ab1c7c8434c5ac9bca8a8ab984dcaf6b9df31814ce9f2
+              command: ["/bin/sh", "/scripts/rights.sh"]
+              env:
+                - name: CANARY_MODE
+                  value: ${ESCAPE_CANARY_MODE}
+                - name: CANARY_TABLE
+                  value: /table/expected.tsv
+                - name: NODE_NAME
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: spec.nodeName
+                # kubectl keeps its discovery and HTTP caches under HOME; the image's is the
+                # read-only root.
+                - name: HOME
+                  value: /home/canary
+              # A local run of the image's kubectl for both requests peaked at 24 MiB of the
+              # container's memory, against a stand-in API server whose discovery is far smaller
+              # than the cluster's.
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 64Mi
+                limits:
+                  memory: 128Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop:
+                    - ALL
+              volumeMounts:
+                - name: scripts
+                  mountPath: /scripts
+                  readOnly: true
+                - name: table
+                  mountPath: /table
+                  readOnly: true
+                - name: home
+                  mountPath: /home/canary
+          volumes:
+            - name: scripts
+              configMap:
+                name: escape-canary-scripts
+            - name: table
+              configMap:
+                name: escape-canary-expected
+            # kubectl's caches, 20 KiB in that local run; the cluster's discovery is larger.
+            - name: home
+              emptyDir:
+                medium: Memory
+                sizeLimit: 16Mi
