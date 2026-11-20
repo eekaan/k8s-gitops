@@ -41,6 +41,18 @@
 #                            without it
 #   no-dns-app               the Kustomization external-dns does not exist, as where the cluster's
 #                            overlay does not select DNS records
+#   ratelimit-absent         the BackendTrafficPolicy demo/hello does not exist; without it, it limits
+#                            the route hello to 5 requests a Second and every ancestor accepts it
+#   ratelimit-not-accepted   the policy's ancestor does not accept it
+#   ratelimit-stale          its ancestor accepted it at the generation before its own
+#   ratelimit-second-ancestor  a second ancestor, another Gateway, does not accept it
+#   ratelimit-target         its spec also holds the field the file names, targetRef or
+#                            targetSelectors, for the route hello
+#   ratelimit-global         its rate limit also holds a global rule
+#   ratelimit-client-selectors  its one rule also selects clients, by a header
+#   ratelimit-two-rules      its rate limit holds a second rule, which selects clients by a header
+#   ratelimit-unit          the unit of the policy's rule, the word the file holds
+#   ratelimit-requests       the figure of the policy's rule, the JSON value the file holds
 # Every object it answers with holds addresses from the documentation ranges, and the CA's Secret a
 # private key marker, none of which the recipe may print. Like kubectl, it takes every argument after
 # -- as a name or a type, never as a flag. It records "kubectl ARGS" in <tmp>/record/argv.
@@ -162,9 +174,10 @@ hang() {
     pid=$(awk '{ print $4 }' "/proc/$pid/stat")
   done
   echo "$script" > "$root/record/script-pid"
+  # The system's sleep, not the stand-in the recipe's PATH puts first, which returns at once.
   for ((tick = 0; tick < 200; tick++)); do
     [[ ! -e $state/release ]] || break
-    sleep 0.1
+    command -p sleep 0.1
   done
   echo "Unable to connect to the server: dial tcp 203.0.113.80:6443: i/o timeout" >&2
   exit 1
@@ -224,6 +237,41 @@ routes() {
               route("demo"; "hello"; "https"; "True"),
               route("unlabelled"; "refused"; "https"; "False")]
              + [$others[] | route(.namespace; .name; "https"; .accepted)])}'
+}
+
+# ratelimit: the BackendTrafficPolicy components/ratelimit makes for the demo's route, with the
+# status the controller writes: an Accepted condition at the policy's generation for its ancestor,
+# the Gateway's listener the route attaches to.
+ratelimit() {
+  local accepted=True unit=Second requests=5 observed=2 target='' second=false global=false selectors=false two=false
+  listed ratelimit-absent && not_found 'backendtrafficpolicies.gateway.envoyproxy.io "hello"'
+  listed ratelimit-not-accepted && accepted=False
+  listed ratelimit-stale && observed=1
+  listed ratelimit-second-ancestor && second=true
+  listed ratelimit-target && target=$(< "$state/ratelimit-target")
+  listed ratelimit-global && global=true
+  listed ratelimit-client-selectors && selectors=true
+  listed ratelimit-two-rules && two=true
+  listed ratelimit-unit && unit=$(< "$state/ratelimit-unit")
+  listed ratelimit-requests && requests=$(< "$state/ratelimit-requests")
+  jq -n --arg accepted "$accepted" --arg unit "$unit" --argjson requests "$requests" --argjson observed "$observed" \
+    --arg target "$target" --argjson second "$second" --argjson global "$global" --argjson selectors "$selectors" \
+    --argjson two "$two" '
+    def ancestor($name; $section; $status): {ancestorRef: {group: "gateway.networking.k8s.io", kind: "Gateway",
+        namespace: "envoy-gateway-system", name: $name, sectionName: $section},
+      controllerName: "gateway.envoyproxy.io/gatewayclass-controller",
+      conditions: [{type: "Accepted", status: $status, observedGeneration: $observed,
+        reason: (if $status == "True" then "Accepted" else "Invalid" end), message: "fixture message naming 198.51.100.99"}]};
+    {group: "gateway.networking.k8s.io", kind: "HTTPRoute"} as $route
+    | {limit: {requests: $requests, unit: $unit}} as $rule
+    | {clientSelectors: [{headers: [{name: "x-client", value: "fixture"}]}]} as $selected
+    | ([$rule + (if $selectors then $selected else {} end)] + (if $two then [$rule + $selected] else [] end)) as $rules
+    | {apiVersion: "gateway.envoyproxy.io/v1alpha1", kind: "BackendTrafficPolicy",
+      metadata: {name: "hello", namespace: "demo", generation: 2},
+      spec: ({targetRefs: [$route + {name: "hello"}],
+          rateLimit: ({local: {rules: $rules}} + (if $global then {global: {rules: [$rule]}} else {} end))}
+        + {targetRef: {targetRef: ($route + {name: "hello"})}, targetSelectors: {targetSelectors: [$route + {matchLabels: {app: "hello"}}]}, "": {}}[$target]),
+      status: {ancestors: ([ancestor("public"; "https"; $accepted)] + (if $second then [ancestor("internal"; "https"; "False")] else [] end))}}'
 }
 
 secret() {
@@ -351,6 +399,10 @@ case $kind in
   httproutes.gateway.networking.k8s.io)
     has --all-namespaces || { echo "fake kubectl: unexpected flags$flags" >&2; exit 1; }
     routes
+    ;;
+  backendtrafficpolicies.gateway.envoyproxy.io)
+    [[ $object == hello ]] && has --namespace=demo || not_found "backendtrafficpolicies.gateway.envoyproxy.io \"$object\""
+    ratelimit
     ;;
   *)
     echo "fake kubectl: unexpected $kind" >&2

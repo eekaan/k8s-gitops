@@ -666,7 +666,12 @@ on its public listeners (ADR 0020), which is why the edges are replaced only aft
   another ends. The proxy's connections to one Gateway port all leave from the edge's one address,
   so the kernel's range of ports for them, 32768 to 60999 by default, about 28,000, bounds them for
   each public port, far above the limit. Timeouts: 5 seconds to connect, 5 minutes with nothing
-  sent on either side, 30 seconds for the other side once one has closed.
+  sent on either side, 30 seconds for the other side once one has closed. The Gateway's listeners
+  follow these: their connection limit is `maxconn` times the two edges, and their idle timeout is
+  below the 5 minutes and their stream idle timeout no longer, so a proxy refuses no connection an
+  edge admits and closes an idle one before an edge cuts it ([What one connection may
+  hold](kubernetes.md#the-public-gateway)); `tests/gateway.bats` fails, naming `haproxy.cfg.tftpl`
+  and the Gateway's file, when they part.
 - **No route to the Gateway.** `retries 0`: a connection the Gateway's address has no route for is
   closed at once, not tried again. With FRR running, its reject route for the service range makes
   the kernel refuse the connection; with FRR stopped, before it has learned a route or once zebra
