@@ -467,10 +467,30 @@ linstor node list`, whose state says OFFLINE, or a version mismatch or an authen
 `just cluster-check` says whether the node is Ready.
 
 Usually: the node is down, rebooting or drained, which clears when it is back; the satellite's pod
-crashes, which its log shows, `kubectl --namespace piraeus-datastore logs <pod>`; or the controller
-cannot reach the satellite at its node's address, on TCP 3366 or 3367, as when the node lacks the
-rule `linstor-satellite` of the nodes' firewall, which `just cluster-talos`'s dry run then shows as
-a change it would make ([cluster.md](../cluster.md#what-each-node-admits)).
+crashes, which its log shows, `kubectl --namespace piraeus-datastore logs <pod>`; the controller
+cannot reach the satellite at its node's address, on TCP 3367, as when the node lacks the rule
+`linstor-satellite` of the nodes' firewall, which `just cluster-talos`'s dry run then shows as a
+change it would make ([cluster.md](../cluster.md#what-each-node-admits)); or `linstor node list`
+shows the node `(SSL)` but OFFLINE, as the satellite's certificate is not issued or is not one the
+controller trusts, or the controller's is not one the satellite trusts
+([kubernetes.md](../kubernetes.md#who-may-call-linstor)). Then `kubectl --namespace
+piraeus-datastore get certificates` says whether `linstor-internal-ca`,
+`linstor-controller-internal-tls` and the node's `linstor-satellite.<node>` are Ready; the node's
+`LinstorSatellite`, `kubectl get linstorsatellite <node> --output yaml`, carries the operator's
+conditions; the satellite's log, or the controller's, names a handshake it refused and why; and
+Piraeus' trust check, run where kubectl reaches the cluster, reads each Secret's `tls.crt` and
+`ca.crt` alone, never `tls.key`:
+
+```bash
+kubectl --namespace piraeus-datastore get secret <node>-tls \
+  --output go-template='{{ index .data "tls.crt" | base64decode }}' > satellite.crt
+kubectl --namespace piraeus-datastore get secret linstor-controller-internal-tls \
+  --output go-template='{{ index .data "ca.crt" | base64decode }}' > controller-ca.crt
+openssl verify -CAfile controller-ca.crt satellite.crt
+```
+
+The same with the two Secrets swapped checks the controller's certificate against the satellite's
+authority.
 
 ## LinstorStoragePoolFilling
 
