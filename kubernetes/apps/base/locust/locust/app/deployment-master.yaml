@@ -54,7 +54,8 @@ spec:
               containerPort: 8089
             - name: master
               containerPort: 5557
-          # The interface's page, which asks for no sign-in.
+          # The interface's page, which Locust answers without a sign-in. The cluster's sign-in is the
+          # Gateway's, in front of the route, and the kubelet's probe does not pass through it.
           readinessProbe:
             httpGet:
               path: /

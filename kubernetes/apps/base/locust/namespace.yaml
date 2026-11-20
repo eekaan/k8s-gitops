@@ -10,6 +10,8 @@ metadata:
   labels:
     # Locust's master and workers run as the image's user and group, 1000, as non-root with the
     # runtime's default seccomp profile, a read-only root filesystem, no capabilities and no
-    # privilege escalation, which the restricted level requires. No Gateway label: nothing routes to
-    # Locust's interface (docs/kubernetes.md, Locust).
+    # privilege escalation, which the restricted level requires.
     pod-security.kubernetes.io/enforce: restricted
+    # Routes of this namespace may attach to the public Gateway's https listener: locust-route's,
+    # Locust's interface behind the cluster's sign-in (docs/kubernetes.md, Locust).
+    k8s-gitops/gateway: public

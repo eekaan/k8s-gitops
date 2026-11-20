@@ -657,7 +657,7 @@ once it is not, and the agents' rendered configuration agrees.
 | `security-system` | default deny | Falco takes Prometheus' scrape and the kubelet's probes on 8765, and reaches the resolver alone; the flow recorder takes nothing and reaches the resolver and Hubble Relay on 4245. |
 | `crowdsec` | default deny | the local API takes the agent on 8080, Prometheus on 6060 and the kubelet's probes, and sends nothing; the agent takes Prometheus and the kubelet on 6060 and reaches the resolver, the local API and the API server on 443 and 6443; below. |
 | `open-feature-operator` | default deny | the OpenFeature Operator takes the kubelet's probes on 8081, Prometheus' scrape on 8080 and the API server's calls to its webhooks on 9443, and reaches the API server alone. |
-| `locust` | default deny | Locust's master takes its workers on 5557 and the kubelet's probe on 8089 and sends nothing; the workers take nothing and reach the resolver, the master on 5557 and `hello`'s pods in `demo` on 8080. |
+| `locust` | default deny | Locust's master takes its workers on 5557, and the proxies and the kubelet's probe on 8089, and sends nothing; the workers take nothing and reach the resolver, the master on 5557 and `hello`'s pods in `demo` on 8080. |
 | `robot` | default deny | Robot Framework's runner takes nothing and reaches the resolver, `hello`'s pods in `demo` on 8080 and Ascender's web pods in `ascender` on 8052; the report server takes the kubelet's probe on 8080 and sends nothing. |
 | `ai-system` | listed | applications whose allows are not written, not a namespace that cannot have the posture. n8n takes the proxies on 5678 and reaches its database, the resolver and whatever its workflows call outside; the PostgreSQL instances take n8n, each other and the operator, and reach the API server, and their Barman Cloud sidecars reach the object storage on 443 and the API server; the dump job reaches the database, the hosts age's release is downloaded from and the object storage; Open WebUI takes the proxies on 8080 and reaches nothing until an administrator turns on a connection that calls out; the backup movers reach the object storage on 443. The proxies reach n8n's 5678 and Open WebUI's 8080 alone there and forward only to their Services, PostgreSQL authenticates every client, Pod Security, node firewall. |
 | `etcd-snapshots` | listed | an application whose allows are not written, not a namespace that cannot have the posture. The snapshot job takes nothing and reaches the Talos API through `talos.default`, the object storage, the hosts age's release is downloaded from (its URL redirects to a second host, which serves the file) and the resolver. Talos' own authorisation of its one role, Pod Security, node firewall. |
@@ -689,17 +689,18 @@ once it is not, and the agents' rendered configuration agrees.
   while that carries `k8s-gitops/gateway: public`, on the container port the route sends to and no
   other: `hello` in `demo` on 8080, kromgo in `kromgo` on 8080, n8n on 5678 and Open WebUI on 8080
   in `ai-system`, dex on 5556 and oauth2-proxy on 4180 in `sso-system`, Backstage in `backstage` on
-  7007, Ascender's web pods in `ascender` on 8052, and VictoriaLogs in `monitoring`
-  on 9428. oauth2-proxy's rule also carries the question the proxies ask it about each
-  request of a route that opts in to sign-in ([Sign-in](#sign-in)), which is no route's
-  backend but reaches the same pods and port. `tests/network-policy.bats` reads those
-  ports from the render, from each route's backend through its Service's target port to the
+  7007, Ascender's web pods in `ascender` on 8052, VictoriaLogs in `monitoring`
+  on 9428, and Locust's master in `locust` on 8089. oauth2-proxy's rule also carries the question
+  the proxies ask it about each request of a route that opts in to sign-in ([Sign-in](#sign-in)),
+  which is no route's backend but reaches the same pods and port. `tests/network-policy.bats` reads
+  those ports from the render, from each route's backend through its Service's target port to the
   container port, and fails unless the rules name, in each labelled namespace, exactly them; it
   reads the proxies' egress in every form the evaluation reads, and fails on a port entry or a peer
   it cannot compare, a backend in a namespace without the label and a Service without a selector.
   What a pod of such a namespace takes is its own namespace's to say: in `demo`, `hello` on 8080; in
   `kromgo`, kromgo on 8080; in `sso-system`, dex on 5556 and oauth2-proxy on 4180; in `backstage`,
-  Backstage on 7007; in `ascender`, the web pods on 8052. In `ai-system`, which is
+  Backstage on 7007; in `ascender`, the web pods on 8052; in `locust`, Locust's master on 8089. In
+  `ai-system`, which is
   listed and so has no pod in default deny, every pod takes them on every port, so
   the proxies' rules are what keep them from n8n's other ports, from every port of
   its database and from Open WebUI's other ports; PostgreSQL also authenticates every
@@ -832,17 +833,19 @@ once it is not, and the agents' rendered configuration agrees.
 - **`locust`.** Locust's master, by the labels of its Deployment's selector
   (`app.kubernetes.io/name: locust`, `app.kubernetes.io/component: master`), takes the workers by
   their labels (`app.kubernetes.io/component: worker`) in `locust` on 5557, the port it binds for
-  them, and the node it runs on on 8089, the web port, for the kubelet's readiness probe, which
-  admits every process in that node's network namespace, the node's pods of the host's network
-  among them; it sends nothing, as it runs no users and the one name it looks up, its own, is in the
-  pod's hosts file. The workers take nothing, as they listen on nothing, and reach the resolver,
-  the master's pods on 5557 and the pods the Service `hello` selects in `demo` on 8080, the
-  container port its port 80 targets: the target that `LOCUST_TARGET` names, which admits them by a
-  rule beside it. Once the cluster enforces the policies, whatever host Locust's interface is
-  given, the workers reach nothing else, not the world, the API server, the Gateway's proxies or
-  another application; while it audits them, a flow they would drop is reported and passes
-  ([Service addresses](#service-addresses)), and the load goes wherever the host given points.
-  `just locust` reaches the interface through a port forward, which the container runtime
+  them, the public Gateway's proxies by their labels on 8089, the web port, for the route `locust`
+  behind the cluster's sign-in, and the node it runs on on 8089, for the kubelet's readiness probe,
+  which admits every process in that node's network namespace, the node's pods of the host's
+  network among them; it sends nothing, as it runs no users and the one name it looks up, its own,
+  is in the pod's hosts file. The proxies' egress names the master's pods on 8089 alone, so they
+  reach neither its 5557 nor a worker. The workers take nothing, as they listen on nothing, and
+  reach the resolver, the master's pods on 5557 and the pods the Service `hello` selects in `demo`
+  on 8080, the container port its port 80 targets: the target that `LOCUST_TARGET` names, which
+  admits them by a rule beside it. Once the cluster enforces the policies, whatever host Locust's
+  interface is given, the workers reach nothing else, not the world, the API server, the Gateway's
+  proxies or another application; while it audits them, a flow they would drop is reported and
+  passes ([Service addresses](#service-addresses)), and the load goes wherever the host given
+  points. `just locust` reaches the interface through a port forward, which the container runtime
   connects inside the pod on its loopback, where no policy applies ([Locust](#locust)).
 - **`robot`.** Robot Framework's runner, the pods of the CronJob `robot-suites` by their labels
   (`app.kubernetes.io/name: robot`, `app.kubernetes.io/component: runner`), takes nothing, as it
@@ -986,9 +989,10 @@ the destination both have to allow it, and a pod is in default deny for a direct
 policy that selects it asks for it, as Cilium decides. Over a render that holds what the check
 refuses wherever it is, it gives no answer and exits 2. The tests use it to follow the public path
 hop by hop (the world to the proxies' listener ports, the proxies to `hello`'s port, to kromgo's, to
-n8n's, to Open WebUI's, to dex's and oauth2-proxy's, to Backstage's and to Ascender's
-web pods' but not to kromgo's metrics port, n8n's, Open WebUI's or Ascender's other
-ports, Ascender's task and job pods or any database, the kubelet to every probe port,
+n8n's, to Open WebUI's, to dex's and oauth2-proxy's, to Backstage's, to Ascender's
+web pods' and to Locust's master's web port but not to kromgo's metrics port, n8n's, Open WebUI's,
+Ascender's or Locust's master's other ports, Ascender's task and job pods, Locust's workers or any
+database, the kubelet to every probe port,
 Prometheus to kromgo's metrics port alone), to show that the blackbox exporter, the prober the
 Probes name, reaches the proxies on the listener port each Probe's target asks for, read from the
 render, and that no other pod of the render or of the operators is taken there, to show that no pod
@@ -1327,8 +1331,9 @@ does not matter.
    ([Restoring](#restoring)); the two dry runs that call the OpenFeature Operator's webhooks
    ([OpenFeature Operator](#openfeature-operator)); a job launched in Ascender and a project update
    there, which start a job pod and have the task pod fetch the project ([Ascender](#ascender)); a
-   test started through Locust's interface, whose workers then resolve and reach the target
-   ([Locust](#locust)); and a run started by `just robot-run`, whose runner resolves and reaches its
+   test started through Locust's interface at its route, which has the proxies reach the master,
+   and whose workers then resolve and reach the target ([Locust](#locust)); and a run started by
+   `just robot-run`, whose runner resolves and reaches its
    targets ([Robot Framework](#robot-framework)). The blackbox exporter's probes need nothing to
    start them: its pods reach the proxies on 10080 and 10443 at every scrape of a `Probe`
    ([Probes](#probes)). Then let a night pass, for the paths nobody takes by hand: the nightly dump
@@ -2916,7 +2921,8 @@ a `GET` its route admits, which answers 200 without a session once every plugin 
 having migrated its schema in the database, `ascender` one for `ascender.${CLUSTER_DOMAIN}`
 at its ping endpoint `/api/v2/ping/`, which answers 200 without a session once the
 web pod reads the database, `hello-sso` one for `hello-sso.${CLUSTER_DOMAIN}` at
-`/` and `victoria-logs-route` one for `logs.${CLUSTER_DOMAIN}` at the interface `/select/vmui/`,
+`/`, `victoria-logs-route` one for `logs.${CLUSTER_DOMAIN}` at the interface `/select/vmui/` and
+`locust-route` one for `locust.${CLUSTER_DOMAIN}` at Locust's interface `/`,
 each with the module that expects the sign-in redirect (**Behind sign-in**, below), and
 `gateway-public` one for the redirect, which is probed for the apex of the domain, as the redirect
 takes any host. Backstage's endpoint does not ask the database again once Backstage has started, so
@@ -2970,14 +2976,15 @@ proxies ask oauth2-proxy, which answers with the 302 to dex that starts a sign-i
 `skip_provider_button` is set and the probe's request is no AJAX one (`Proxy` and `doOAuthStart` in
 `oauthproxy.go` of the pinned v7.15.6), and the proxies send that answer back. A passing probe
 proves the proxies, the certificate, the route, the policy in its path and oauth2-proxy answering;
-not the backend behind it, which `hello-route`'s probe of the same backend covers, nor dex, which
-dex's own probe covers. The day the policy is lost and the backend answers anyone, the answer is a
-200 and `PublicEndpointWrongStatus` fires. So the probe asks for a path the backend answers 200:
-`/` of `hello-sso`, and the interface of `logs`, not its root, which the route itself redirects with
-a 302 that would pass the probe with the policy lost. The sign-in paths on the same host, the
-routes `hello-sso-oauth2` and `logs-oauth2` that `components/sso` adds and no policy covers, are
-covered by the host's one `Probe`: the probes are of hostnames, and the probe meets the route the
-policy covers.
+not the backend behind it, which `hello-route`'s probe of the same backend covers, and for Locust's
+master the stock alerts on its pods ([Locust](#locust)), nor dex, which dex's own probe covers. The
+day the policy is lost and the backend answers anyone, the answer is a 200 and
+`PublicEndpointWrongStatus` fires. So the probe asks for a path the backend answers 200: `/` of
+`hello-sso`, the interface of `logs`, not its root, which the route itself redirects with a 302 that
+would pass the probe with the policy lost, and `/` of `locust`, Locust's page, which it answers to
+anyone. The sign-in paths on the same host, the routes `hello-sso-oauth2`, `logs-oauth2` and
+`locust-oauth2` that `components/sso` adds and no policy covers, are covered by the host's one
+`Probe`: the probes are of hostnames, and the probe meets the route the policy covers.
 
 **While an application is not running**, the probe of its route fails, and it is
 `PublicEndpointWrongStatus` that fires, not `PublicEndpointDown`: the proxies answer the probe
@@ -2987,9 +2994,9 @@ by its application's Kustomization, which Flux applies once those it names in `d
 So on a new cluster the alert fires for an application whose pods wait for a secret the owner writes
 to the store, from 5 minutes after it is applied until the secret is there: n8n, for its encryption
 key ([n8n](#n8n)); dex, for the GitHub client; and after dex oauth2-proxy, for the list of
-identities, as its route and its `Probe` are applied only once dex is Ready. `hello-sso` and
-`victoria-logs-route` wait for oauth2-proxy in the same way, so their probes meet the redirect from
-their first run
+identities, as its route and its `Probe` are applied only once dex is Ready. `hello-sso`,
+`victoria-logs-route` and `locust-route` wait for oauth2-proxy in the same way, so their probes meet
+the redirect from their first run
 ([What the owner does, in order](#what-the-owner-does-in-order)). A route whose application takes
 longer than the alert's 5 minutes to start, as Backstage on its database's first start, raises it
 until it answers.
@@ -5201,18 +5208,19 @@ login in front of it, and no application brings its own. Two applications in the
   public name, so it needs neither a route out and back through the edge nor trust in the Gateway's
   certificate. Its one callback is `https://auth.${CLUSTER_DOMAIN}/oauth2/callback`, whichever host a
   person starts from, so dex has one redirect URI and an opting application adds none.
-- Two routes opt in: `demo/hello-sso`, `hello-sso.${CLUSTER_DOMAIN}`, a second hostname on the
-  `hello` backend, and `monitoring/victoria-logs-route`, `logs.${CLUSTER_DOMAIN}`, the log store's
-  interface ([The log store's interface](#the-log-stores-interface)). No other application is
+- Three routes opt in: `demo/hello-sso`, `hello-sso.${CLUSTER_DOMAIN}`, a second hostname on the
+  `hello` backend, `monitoring/victoria-logs-route`, `logs.${CLUSTER_DOMAIN}`, the log store's
+  interface ([The log store's interface](#the-log-stores-interface)), and `locust/locust-route`,
+  `locust.${CLUSTER_DOMAIN}`, Locust's interface ([Locust](#locust)). No other application is
   behind it.
 
 Each is its own Kustomization, with `wait`, that nothing but the routes that opt in names in
-`dependsOn` (oauth2-proxy names dex): `hello-sso` and `victoria-logs-route` wait on oauth2-proxy,
-and nothing waits on either route. A cluster that lists neither application builds none of it, and
-a cluster whose overlay lists a route that opts in without them is refused. The namespace enforces
-the restricted Pod Security level, and `just pod-security-check` evaluates their pods. It denies
-traffic by default, and each application's `ciliumnetworkpolicy.yaml` lets its flows through
-([What the namespaces let through](#what-the-namespaces-let-through)).
+`dependsOn` (oauth2-proxy names dex): `hello-sso`, `victoria-logs-route` and `locust-route` wait on
+oauth2-proxy, and nothing waits on any of those routes. A cluster that lists neither application
+builds none of it, and a cluster whose overlay lists a route that opts in without them is refused.
+The namespace enforces the restricted Pod Security level, and `just pod-security-check` evaluates
+their pods. It denies traffic by default, and each application's `ciliumnetworkpolicy.yaml` lets
+its flows through ([What the namespaces let through](#what-the-namespaces-let-through)).
 
 ### Who is admitted
 
@@ -5296,14 +5304,14 @@ Until the first two exist the ExternalSecret `dex-github` reports the missing ke
 in `CreateContainerConfigError`, and the Kustomization `dex` is not Ready, with the pods' state as its
 reason. Until the third exists the Secret `oauth2-proxy-allowed-emails` does not exist, the pods
 of oauth2-proxy stay in `ContainerCreating`, and the Kustomization `oauth2-proxy` is not Ready, and
-neither are `hello-sso` and `victoria-logs-route`, which wait for it and are not applied until it
-is. Nothing else of the cluster waits on any of them, and the generated secrets are made as soon as
-External Secrets runs. Until the first two exist the probe of `dex` under the domain fails, and
-`PublicEndpointWrongStatus` fires for it; then, until the third exists, the probe of `auth` does.
-The routes and `Probe`s of oauth2-proxy, of `hello-sso` and of `victoria-logs-route` are applied
-with their applications, each once the one it waits for is Ready, so the probe of `auth` is not
-there while dex waits, and the probes of `hello-sso` and of `logs` meet the redirect from their
-first run ([Probes](#probes)).
+neither are `hello-sso`, `victoria-logs-route` and `locust-route`, which wait for it and are not
+applied until it is. Nothing else of the cluster waits on any of them, and the generated secrets are
+made as soon as External Secrets runs. Until the first two exist the probe of `dex` under the domain
+fails, and `PublicEndpointWrongStatus` fires for it; then, until the third exists, the probe of
+`auth` does. The routes and `Probe`s of oauth2-proxy, of `hello-sso`, of `victoria-logs-route` and
+of `locust-route` are applied with their applications, each once the one it waits for is Ready, so
+the probe of `auth` is not there while dex waits, and the probes of `hello-sso`, of `logs` and of
+`locust` meet the redirect from their first run ([Probes](#probes)).
 
 The wait is not open-ended. Each release's install times out after 10 minutes and is retried three
 times (the root's release defaults, [What the root sets](#what-the-root-sets)); after that
@@ -8061,7 +8069,8 @@ the simulated users. It runs in the namespace `locust`, which enforces the restr
 level and denies traffic by default, from its publisher's image `docker.io/locustio/locust`, by
 plain manifests with kustomize: the chart `stable/locust` of `github.com/deliveryhero/helm-charts`
 is at 0.35.0 with the `appVersion` 2.32.2, older than the release the tree runs. A cluster selects
-it with two entries of its overlay, the namespace directory and the application's `ks.yaml`. Its
+it with two entries of its overlay, the namespace directory and the application's `ks.yaml`, and
+its interface's route, the application `locust-route`, with one more (The route, below). Its
 `ks.yaml` names `cilium` alone in `dependsOn`, for its policies' kind, as Locust starts without its
 target; sets `wait`; and sets one variable of its own, `LOCUST_TARGET`, the target (below).
 `tests/locust.bats` holds what follows on the application built as Flux applies it and on the render
@@ -8076,7 +8085,8 @@ in a run of the pinned image offline (Resources, below).
     workers connect to on 5557 (`--master-bind-port`), and both are ports of the Service
     `locust-master`. It runs no users itself (`docs/running-distributed.rst`) and opens no
     connection: the workers connect to it. Its readiness probe asks for the interface's page, `/`,
-    which asks for no sign-in (`locust/web.py`).
+    which Locust answers without a sign-in (`locust/web.py`): the cluster's sign-in is the
+    Gateway's, in front of the route, and the kubelet's probe does not pass through it.
   - The workers, the Deployment `locust-worker`: two replicas, each `locust --worker` with the
     locustfile and the master's Service and port, `--master-host=locust-master` and
     `--master-port=5557`. Each opens one connection to the master, a ZeroMQ socket of its own to the
@@ -8106,32 +8116,114 @@ in a run of the pinned image offline (Resources, below).
   master waits, with no users, until a request to `/swarm` starts a test: offline, five seconds
   after both workers had connected, it reported the state `ready`, no user and no request, and the
   stand-in target had logged none.
-- **Opening it.** `just locust [cluster]` forwards a local port, `LOCUST_PORT` or 8089, on 127.0.0.1
-  only, to port 8089 of the Service `locust-master`, through the cluster's kubeconfig, until Ctrl-C,
-  as `just grafana` does ([cluster.md](cluster.md#recipes)); then open `http://127.0.0.1:8089`.
-  **The interface has no sign-in.** Its login page, `--web-login`, is a hook the locustfile fills
-  with a check of its own, and Locust ships none (`docs/extending-locust.rst`, Adding Authentication
-  to the Web UI), so it is not used. Every route answers whoever reaches it, and answers the
+- **Opening it.** Two ways, each to port 8089 of the Service `locust-master`. At
+  `https://locust.<domain>/`, through the public Gateway, behind the cluster's sign-in (The route,
+  below). And with `just locust [cluster]`, which forwards a local port, `LOCUST_PORT` or 8089, on
+  127.0.0.1 only, through the cluster's kubeconfig, until Ctrl-C, as `just grafana` does
+  ([cluster.md](cluster.md#recipes)); then open `http://127.0.0.1:8089`. **The interface has no
+  sign-in of its own.** Its login page, `--web-login`, is a hook the locustfile fills with a check
+  of its own, and Locust ships none (`docs/extending-locust.rst`, Adding Authentication to the Web
+  UI), so it is not used. Every path of the interface answers whoever reaches it, and answers the
   requests of any web page, as the interface allows cross-origin requests from every origin
   (`CORS(app)` in `locust/web.py`): while the forward runs, anything on the machine that runs it, a
   page open in its browser among them, can start, change and stop a test. Whoever reaches it may
   also give any host, in the interface's form or in the `host` field of `/swarm`, and the workers
-  put the load on it. Locust bounds neither who reaches it nor where the load goes; the policies do
-  (Network, below): the workers' egress keeps the load inside the cluster, and the master's ingress
-  keeps every pod but those of its node's host network from the interface. This holds once the
-  cluster enforces the policies; while it audits them, a flow they would drop is reported and
-  passes ([Service addresses](#service-addresses)). **While the cluster audits, nothing bounds
-  either:** a host given to the interface is reached wherever it is, outside the cluster included,
-  and every pod of the cluster reaches the master's 8089 and 5557, through the Service
-  `locust-master` or the pod's own address, and can start a test as the forward can. Nothing routes
-  to the interface and nothing announces it: no `HTTPRoute`, no Gateway label on the namespace, and
-  a Service of the cluster alone. The forward needs, in `locust`, get on `services`, get and list
-  on `pods`, as kubectl finds a pod the Service selects (and watch, when none runs yet), and create
-  on `pods/portforward` (`portforward.go` and `polymorphichelpers/helpers.go` of kubectl at
-  Kubernetes v1.37.1).
+  put the load on it. Locust bounds neither who reaches it nor where the load goes. Through the
+  Gateway, the cluster's sign-in and the route bound who reaches it; inside the cluster, the
+  policies do (Network, below): the workers' egress keeps the load inside the cluster, and the
+  master's ingress keeps every pod but the Gateway's proxies and those of its node's host network
+  from the interface. This holds once the cluster enforces the policies; while it audits them, a
+  flow they would drop is reported and passes ([Service addresses](#service-addresses)). **While
+  the cluster audits, the policies bound neither:** a host given to the interface is reached
+  wherever it is, outside the cluster included, and every pod of the cluster reaches the master's
+  8089 and 5557, through the Service `locust-master` or the pod's own address, and can start a test
+  as the forward can. The Service is of the cluster alone and nothing announces it: the Gateway
+  reaches it through the route `locust` only. The forward needs, in `locust`, get on `services`,
+  get and list on `pods`, as kubectl finds a pod the Service selects (and watch, when none runs
+  yet), and create on `pods/portforward` (`portforward.go` and `polymorphichelpers/helpers.go` of
+  kubectl at Kubernetes v1.37.1).
+- **The route.** The application `locust-route` (`apps/base/locust/locust-route/`) holds it, shaped
+  as the log store's ([The log store's interface](#the-log-stores-interface)): its `app/` holds the
+  one `HTTPRoute` `locust` and its `Probe` (Monitoring, below), and its `ks.yaml` adds
+  `components/sso` with `SSO_ROUTE` and `SSO_HOSTNAME` both `locust`, so the component makes the
+  `SecurityPolicy` `locust`, which asks oauth2-proxy about each request of the route and does not
+  fail open, and the route `locust-oauth2`, which sends `/oauth2/` on the same host to oauth2-proxy
+  ([Putting a route behind it](#putting-a-route-behind-it)). Its `targetNamespace` is `locust`,
+  which carries `k8s-gitops/gateway: public`, and the `ReferenceGrant` `oauth2-proxy` names
+  `locust`. It names `gateway-public`, `locust`, `oauth2-proxy` and `blackbox-exporter` in
+  `dependsOn` and waits, so it is applied once the master answers its readiness probe and the
+  sign-in can answer for the route, and a cluster that lists it without any of the four is refused.
+  Its own Ready says that its objects are applied, not that the Gateway took them: `just
+  gateway-check`, which counts the routes the Gateway accepted and names the DNS record of each
+  host, is what shows it. external-dns publishes the name as for every route on the Gateway
+  ([DNS records](#dns-records)). The first visit signs in through dex and GitHub, as for every route
+  that opts in, and oauth2-proxy returns the person to `/`, the interface; a session that another
+  route which opts in started passes here too.
+- **What the route sends on, and why.** One rule, which `tests/locust.bats` pins in full, with no
+  filter, to the Service `locust-master` on 8089, its web port, which targets the master's 8089 and
+  never 5557, admits by an allowlist of methods and paths, in the form of Backstage's route
+  ([Backstage](#backstage)):
+  - `GET` and `HEAD` of any path: the interface's page, `/`, its files under `/assets/`, the reads
+    its bundle polls, `/stats/requests`, `/tasks`, `/exceptions`, `/logs` and `/worker-count`, and
+    the report, `/stats/report`, and the four CSVs the page links. None of them changes anything.
+  - `POST` of exactly `/swarm`, `/stop` and `/stats/reset`, the page's three posts, each only with
+    the header `Origin` exactly `https://locust.<domain>`, the route's own origin (below).
+
+  Nothing else matches, and the Gateway answers it itself, 404, without reaching the master: a post
+  without that `Origin`; `POST /user`, which sets any attribute of a user class
+  (`update_user_class` in `locust/env.py`) and which the page posts only from its user-class
+  picker, which `--class-picker` turns on and the master does not set; a post's path with a
+  trailing slash or in another letter case; and `PUT`, `DELETE`, `PATCH`, `OPTIONS` and every other
+  method. The sources are Locust 2.47.0, the tag of the master's image: the routes of
+  `locust/web.py`, its options in `locust/argument_parser.py`, and the wheel's built interface,
+  `locust/webui/dist/index.html` and its bundle `assets/src-Cl6CiemE.js`, whose requests are RTK
+  Query's, relative to the page, with no `WebSocket` and no `EventSource`. The interface is at the
+  host's root: `--web-base-path` is empty unless it is set, and it is not, and Flask checks no
+  `Host` while `SERVER_NAME` and `TRUSTED_HOSTS` are unset, which `web.py` does not set; the pinned
+  image answered its page offline for another host than its own. So the master's arguments do not
+  change for the route. The interface polls with plain requests, so the route needs no upgrade and
+  no timeout of its own, and Envoy's default for a route, 15 seconds, applies, as for the log
+  store's route. Locust answers each request at once but `/stop`, which waits, up to 60 seconds, for
+  the workers to report their users stopped (`stop` in `locust/runners.py`), and with no
+  `--stop-timeout` they stop them at once: a stop that took longer than 15 seconds would be
+  answered 504 by the Gateway and go on in the master. The route has no web application firewall:
+  it admits only the identities on the owner's list, so the firewall would inspect only their
+  requests, and it fails open ([Web application firewall](#web-application-firewall)).
+- **Why the posts need their `Origin`.** oauth2-proxy's session cookie is `SameSite=Lax`, for
+  `.${CLUSTER_DOMAIN}`, so a browser sends it with a page's request from any host under the domain,
+  the same site, and Locust checks no origin: without the check, a page of another host under the
+  domain could post a form to `/swarm` with the person's session and aim the workers anywhere. A
+  browser sends `Origin` with every `POST` (the Fetch standard, "append a request `Origin` header"),
+  and a page cannot set it. The interface's posts are fetches in the default `cors` mode, and
+  neither its page nor its fetches set a referrer policy, so they carry the page's origin and never
+  `null`. The `GET`s need no check: they change nothing, and `CORS(app)` answers another origin
+  with that origin and no `Access-Control-Allow-Credentials` (the defaults of flask-cors 6.0.5, the
+  release in the image, leave `supports_credentials` off; seen offline), so no other origin reads
+  an answer to a request sent with the session. A page of another site has the cookie sent only with
+  a top-level navigation by `GET`, which changes nothing and whose answer that site does not see.
+- **What the route gives a signed-in person: the right to start load from the cluster's workers**,
+  on the target `ks.yaml` names, which the form shows, or on any host typed into the form or posted
+  as `host`, which Locust 2.47.0 takes (`web.py`, lines 288 to 291), and to stop a test and reset
+  its numbers; the form's other fields set the master's options of their names (lines 308 to 326).
+  Who gets it is the sign-in list ([Who is admitted](#who-is-admitted)), the same people who pass
+  every other route that opts in. Where the load goes is bound by the workers' egress, to the
+  target, the cluster's resolver and the master, once the cluster enforces its policies; **while
+  the cluster audits them, as it does, nothing bounds it**: a host typed in is reached wherever it
+  is, outside the cluster included (Network, below).
+- **An expired session.** The policy sends oauth2-proxy the request's cookie, host and method, and
+  none of its other headers but the `Authorization` Envoy always adds
+  ([Putting a route behind it](#putting-a-route-behind-it)). The interface's fetches send
+  `Accept: application/json` (RTK Query's `fetchBaseQuery`, in the bundle), but oauth2-proxy never
+  sees it, so it takes them for no AJAX request (`isAjax` in `oauthproxy.go` of v7.15.6 reads
+  `Accept`) and answers them as it answers a page: the 302 to dex, not 401, a post's as well. The
+  fetch follows the redirect to dex, another origin, which sends no cross-origin permission, as it
+  is given no allowed origins (`HandleCORS` in `server/router/router.go` of dex v2.46.0, the
+  chart's), and the fetch fails. So an open interface stops updating and its buttons fail until the
+  page is reloaded, which goes through sign-in again; a running test runs on in the master.
 - **Running a test.** In the interface: the number of users, the rate they are started at (ramp up)
   and the host, which shows the target, and, among the advanced options, a run time; then Start, the
-  charts and the statistics, and Stop. Through its HTTP API, on the forwarded port:
+  charts and the statistics, and Stop. Through its HTTP API, on the forwarded port, as the route
+  sends a post on only with a session and the interface's own `Origin`:
 
   ```sh
   curl -s http://127.0.0.1:8089/worker-count
@@ -8172,16 +8264,19 @@ in a run of the pinned image offline (Resources, below).
   the workers' one rule to that namespace names exactly its labels and that port and the target's
   own policy admits the workers there and no other pod of `locust`.
 - **Network.** The namespace holds the default deny, and the application's two policies let through,
-  to the master, the workers on 5557 and the node it runs on on 8089, for the kubelet's probe, and
-  from the workers, the cluster's resolver on 53, the master on 5557 and `hello`'s pods on 8080.
-  The master sends nothing and the workers take nothing; `hello`'s own policy admits the workers,
-  by their labels, on 8080 ([What the namespaces let through](#what-the-namespaces-let-through)).
+  to the master, the workers on 5557, the public Gateway's proxies on 8089, by their labels, for the
+  route, and the node it runs on on 8089, for the kubelet's probe, and from the workers, the
+  cluster's resolver on 53, the master on 5557 and `hello`'s pods on 8080. The master sends nothing
+  and the workers take nothing; `hello`'s own policy admits the workers, by their labels, on 8080,
+  and the proxies' policy `public-proxy` lets them reach the master's pods on 8089 alone, not 5557
+  and no worker ([What the namespaces let through](#what-the-namespaces-let-through)).
   This holds once the cluster enforces the policies; while it audits them, a flow they would drop
   is reported and passes ([Service addresses](#service-addresses)), as Opening it, above, says.
   Once they are enforced, the workers' egress bounds where the load can go, not that it goes to the
   target: a host that names the cluster's resolver on 53 or the master on 5557, both of which the
   workers reach, puts the load there, and a test aimed at the resolver can slow the name lookups of
-  every application of the cluster. The interface takes nothing but the node the master runs on:
+  every application of the cluster. The interface takes nothing but the Gateway's proxies, which
+  send it only what the route passes behind the sign-in, and the node the master runs on:
   `host` is every process in that node's network namespace, the kubelet and the pods of the host's
   network there among them, and the agent lets the local host reach the pods of its node on every
   port whatever the policies say (the local host, in
@@ -8253,13 +8348,18 @@ in a run of the pinned image offline (Resources, below).
   (`PROPAGATE_EXCEPTIONS`) to gevent, which logs its traceback and answers 500 without it
   (`handle_error` in `gevent/pywsgi.py`). Locust's routes have a handler for every exception, which
   answers with the exception's message and its code, whatever the mode (`locust/web.py`).
-- **Monitoring.** None of its own. Locust 2.47.0 serves no metrics: `locust/web.py` has no
-  `/metrics` route, the wheel holds no Prometheus client, and it sends telemetry only with `--otel`
-  (`locust/main.py`), which is not set. So no monitor scrapes it, it has no alert or dashboard, and
-  no row of [Dashboards](#dashboards)' tables names it. Its pods are covered by the monitoring
-  chart's stock alerts on every workload, `KubePodCrashLooping`, `KubePodNotReady`,
-  `KubeDeploymentReplicasMismatch` and `KubeContainerWaiting` among them. A change that wants
-  Locust's numbers in Prometheus adds an exporter.
+- **Monitoring.** No metrics. Locust 2.47.0 serves none: `locust/web.py` has no `/metrics` route,
+  the wheel holds no Prometheus client, and it sends telemetry only with `--otel`
+  (`locust/main.py`), which is not set. So no monitor scrapes it, it has no alert or dashboard of
+  its own, and no row of [Dashboards](#dashboards)' tables names it. Its route has a `Probe`,
+  `locust`, copied from `hello-sso`'s: the module `public_https_signin` at `/`, which Locust answers
+  200 to anyone, so the probe passes on the sign-in's redirect alone, and the day the policy is lost
+  it meets that 200 and `PublicEndpointWrongStatus` fires ([Probes](#probes)). A request without a
+  session never reaches the master, so the probe proves the Gateway, the route, its policy and
+  oauth2-proxy, not the master. Its pods are covered by the monitoring chart's stock alerts on every
+  workload, `KubePodCrashLooping`, `KubePodNotReady`, `KubeDeploymentReplicasMismatch` and
+  `KubeContainerWaiting` among them. A change that wants Locust's numbers in Prometheus adds an
+  exporter.
 - **What it calls on its own.** Nothing but the resolver, the master and the target, which the
   workers reach:
 
@@ -8281,13 +8381,25 @@ in a run of the pinned image offline (Resources, below).
   registry also tags each build of Locust's master branch as `x.y.z.devN` and holds moving tags. The
   master and the workers run one reference, which Renovate moves in one pull request: a worker of
   another version than its master is only warned of (`locust/runners.py`, `client_ready`). It
-  merges by the auto-merge switch alone. No check runs the image: a release that renames an option
-  the arguments use, or changes where the interface listens, shows first on the cluster, as pods
-  that do not become ready and the Kustomization `locust` failing its wait. What this section says
-  from Locust's source, its wheel and the image's packages, gevent's and Flask's releases among
-  them, is of 2.47.0, so the pull request that moves the image is read against Locust's changelog
-  for the arguments of What runs and for this section.
-- **Removing it.** Take the two overlay entries out. Flux prunes the application, its pods, its
+  merges by the auto-merge switch alone, which waits for the pull request's checks, and the paths
+  test fails them until the record moves: the route's header records, in `# locust-paths:` beside
+  its `Source:` line, the release its matches were read from, and `tests/locust.bats` holds it to
+  the tag of the master's image, failing, saying what to read again and what to set, until the
+  interface's routes and requests are read at the new tag, the route's matches and the test's
+  requests follow them and the record is set, as `.renovate/by-hand.tsv` lists it. No check runs
+  the image: a release that renames an option the arguments use, or changes where the interface
+  listens, shows first on the cluster, as pods that do not become ready and the Kustomization
+  `locust` failing its wait. What this section says from Locust's source, its wheel and the image's
+  packages, gevent's, Flask's and flask-cors' releases among them, is of 2.47.0, so the pull request
+  that moves the image is read against Locust's changelog for the arguments of What runs and for
+  this section.
+- **Removing it.** The route's entry goes first, `locust-route`, as a cluster that lists it without
+  `locust` is refused: take it out with what the tests hold to it, its catalogue entity, the
+  `ReferenceGrant`'s two entries for `locust` and `public-proxy`'s rule to the master, and with the
+  master's rule from the proxies and the namespace's Gateway label, which let nothing through
+  without the route. Flux prunes the route, its sign-in route, its policy and its `Probe`, and
+  external-dns the name's record ([DNS records](#dns-records)). Then take the two overlay entries of
+  Locust out, in the same pull request or a later one. Flux prunes the application, its pods, its
   Service, its ConfigMap and its policies, and the root prunes the namespace's default deny and its
   `app-template-defaults` ConfigMap; the namespace stays, by its prune annotation, as Flux reads
   that annotation on each object it would prune and not on the object's namespace (`Delete` in
@@ -8341,6 +8453,44 @@ the pinned sources, and the list is what to look at when the application first r
   reads `(index 1) reported as ready. 2 workers connected.`; then `/worker-count` answers
   `{"worker_count": 2}`, and the answers of `/swarm`, `/stats/requests` and `/stop` are those of
   Running a test, above.
+- **The order the route, the label and the rules land in.** The root applies the namespace's
+  Gateway label as it reconciles the merge, and creates `locust-route`, which is applied only once
+  `gateway-public`, `locust`, `oauth2-proxy` and `blackbox-exporter` are Ready, so after the label,
+  without which the Gateway would not accept the route. `envoy-gateway` applies `public-proxy`'s
+  rule to the master and `locust` the master's rule from the proxies, each as it reconciles, and
+  nothing orders the route after them. While the cluster audits, as it does, a flow they would drop
+  passes, so the order does not matter; on a cluster that enforced, a request the route sent on
+  before both had landed would fail at the Gateway, 503, until they had. Nor does anything order the
+  route after the grant: each application reads an artifact of its own, and kustomize-controller
+  compares a dependency's applied revision with its own only when both read the same source, so
+  `locust-route` can apply while `oauth2-proxy` is Ready at the revision before, whose
+  `ReferenceGrant` does not name `locust` yet. Until it does, Envoy Gateway v1.10.0 refuses the
+  policy's reference to oauth2-proxy's Service (`internal/gatewayapi/validate.go`) and gives the
+  route a direct answer of 500 (`internal/gatewayapi/securitypolicy.go`), so the route fails closed
+  until `oauth2-proxy` applies the grant, and the `SecurityPolicy` `locust` is `Accepted` `False`,
+  reason `Invalid`, until then.
+- **Envoy's translation of the matches, and its 404.** Envoy Gateway v1.10.0 makes each match of the
+  rule one Envoy route, of the path and of header matches, the method as `:method` beside `Origin`,
+  each exact (`processHTTPRouteRule` in `internal/gatewayapi/route.go`, `buildXdsRouteMatch` in
+  `internal/xds/translator/route.go`), and Envoy answers a request that matches no route of the
+  host with 404. `tests/locust.bats` evaluates the Gateway API's matching, not Envoy's: a
+  signed-out `POST /swarm` answered 404 without `Origin` and 302 with the host's is the proof.
+- **The method oauth2-proxy is asked with.** Envoy asks oauth2-proxy with the request's method, as
+  it always passes the method to an HTTP authorisation service (`headersToExtAuth` in
+  `api/v1alpha1/ext_auth_types.go` of Envoy Gateway v1.10.0), so a post is asked as
+  `POST /?rd=https://locust.<domain>/`. oauth2-proxy's catch-all takes every method
+  (`PathPrefix("/")` in `oauthproxy.go` of v7.15.6), and its static upstream answers any of them 200
+  (`ServeHTTP` in `pkg/upstream/static.go`), so a post with a session passes and one without gets
+  the 302; the first test started through the route is the proof.
+- **The browser's `Origin`.** That a browser sends `https://locust.<domain>` with the interface's
+  posts is the Fetch standard's and the bundle's, read rather than run: a test started from the
+  interface, which the route sends on only with that `Origin`, shows it.
+- **The proxies' identity at the master in audit mode.** The proxies reach the master by its pod's
+  address, as every backend, and the master's rule names them by their labels; while the cluster
+  audits, a line of `just network-drops` from
+  `envoy-gateway-system/envoy-envoy-gateway-system-public-…` to `locust/locust-master-…` on
+  `8089/TCP` would mean that rule does not match them; the first opening of the interface through
+  the route is the time to look.
 
 ### Robot Framework
 

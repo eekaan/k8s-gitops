@@ -628,6 +628,19 @@ E
   # store's port either.
   denied "$VIEW" "$PROXY" monitoring/DaemonSet/vector 9428/tcp
   denied "$VIEW" "$PROXY" "monitoring:app=${grafana% *}" 9428/tcp
+  # Locust's route sends the proxies to its master's web port, 8089, in locust, which carries the
+  # Gateway label and denies by default: the proxies' egress and the master's own ingress both take
+  # that port, and neither the port the master takes its workers on nor a worker; the controller's
+  # pods do not reach the master.
+  local locust_master=locust/Deployment/locust-master locust_worker=locust/Deployment/locust-worker
+  allowed "$VIEW" "$PROXY" "$locust_master" 8089/tcp
+  allowed_in "$VIEW" "$PROXY" "$locust_master" 8089/tcp
+  denied "$VIEW" "$PROXY" "$locust_master" 5557/tcp
+  denied_in "$VIEW" "$PROXY" "$locust_master" 5557/tcp
+  denied "$VIEW" "$PROXY" "$locust_worker" 8089/tcp
+  denied "$VIEW" "$PROXY" "$locust_worker" 5557/tcp
+  denied_in "$VIEW" envoy-gateway-system/Deployment/envoy-gateway "$locust_master" 8089/tcp
+  denied "$VIEW" @world "$locust_master" 8089/tcp
   allowed "$VIEW" "$PROXY" envoy-gateway-system/Deployment/envoy-gateway 18000/tcp
   allowed "$VIEW" "$PROXY" "$DNS" 53/udp
   # Nothing but the listener ports reaches the proxies from outside.
@@ -725,6 +738,7 @@ E
     && " $routed " == *" kromgo:8080 "* && " $routed " == *" backstage:7007 "* && " $routed " == *" ascender:8052 "* ]]
   [[ " $routed " == *" sso-system:4180 "* && " $routed " == *" sso-system:5556 "* ]]
   [[ " $routed " == *" monitoring:9428 "* ]]
+  [[ " $routed " == *" locust:8089 "* ]]
   [ "$named" = "$routed" ]
   # A route to a backend in a namespace without the Gateway label, or behind a Service without a
   # selector, has no port the comparison could name, and fails it saying why.
