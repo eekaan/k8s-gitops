@@ -116,6 +116,10 @@ resources:
   - ../../base/robot/robot-ascender/ks.yaml
   - ../../base/locust/locust-route/ks.yaml
   - ../../base/escape-canary/escape-canary/ks.yaml
+  - ../../base/reportportal
+  - ../../base/reportportal/reportportal/ks.yaml
+  - ../../base/reportportal/reportportal-route/ks.yaml
+  - ../../base/reportportal/reportportal-volsync-movers/ks.yaml
 
 patches:
   # The issuer of the public Gateway's certificate, the place this cluster chooses it, which the next

@@ -176,5 +176,14 @@
       matchPackageNames: ["ghcr.io/nvidia/openshell/**"],
       automerge: false,
     },
+    {
+      // An update of the chart or of an image runs the migrations of its release on the database,
+      // and a release can change how the files are kept, as 26.1 changed 26.0's object layout and
+      // renamed the superadmin's login: a person reads the release first (docs/kubernetes.md,
+      // ReportPortal).
+      description: "Everything of ReportPortal's application, its chart and images included",
+      matchFileNames: ["kubernetes/apps/base/reportportal/**"],
+      automerge: false,
+    },
   ],
 }

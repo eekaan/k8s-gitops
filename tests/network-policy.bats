@@ -271,7 +271,7 @@ proxies_egress() {
   real_render
   run "$REPO/scripts/network-policy-check" "$REAL" "$REPO/network-policy-exceptions.yaml"
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-  [ "$(grep ' denies ingress and egress' <<<"$output" | cut -d' ' -f1 | paste -sd' ')" = "ascender backstage crowdsec demo envoy-gateway-system escape-canary kromgo locust open-feature-operator robot security-system sso-system" ]
+  [ "$(grep ' denies ingress and egress' <<<"$output" | cut -d' ' -f1 | paste -sd' ')" = "ascender backstage crowdsec demo envoy-gateway-system escape-canary kromgo locust open-feature-operator reportportal robot security-system sso-system" ]
   [ "$(grep -c ' listed' <<<"$output")" -eq "$(yq '.exceptions | length' "$REPO/network-policy-exceptions.yaml")" ]
 }
 
@@ -570,6 +570,22 @@ E
   denied "$VIEW" "$PROXY" 'ascender:ansible_job=' 8052/tcp
   denied "$VIEW" "$PROXY" 'ascender:cnpg.io/cluster=ascender-db,cnpg.io/podRole=instance' 5432/tcp
   denied "$VIEW" @world "$ascender_web" 8052/tcp
+  # ReportPortal's route sends them to the ui's 8080 and the api's 8585 in reportportal, which
+  # carries the Gateway label and denies by default: the proxies' egress and each pod's ingress take
+  # its port and no other, and neither reaches the jobs service, RabbitMQ or the database.
+  allowed "$VIEW" "$PROXY" reportportal/Deployment/reportportal-ui 8080/tcp
+  allowed_in "$VIEW" "$PROXY" reportportal/Deployment/reportportal-ui 8080/tcp
+  allowed "$VIEW" "$PROXY" reportportal/Deployment/reportportal-api 8585/tcp
+  allowed_in "$VIEW" "$PROXY" reportportal/Deployment/reportportal-api 8585/tcp
+  denied "$VIEW" "$PROXY" reportportal/Deployment/reportportal-ui 8585/tcp
+  denied "$VIEW" "$PROXY" reportportal/Deployment/reportportal-api 8080/tcp
+  denied_in "$VIEW" "$PROXY" reportportal/Deployment/reportportal-api 8080/tcp
+  denied "$VIEW" "$PROXY" reportportal/Deployment/reportportal-jobs 8686/tcp
+  denied_in "$VIEW" "$PROXY" reportportal/Deployment/reportportal-jobs 8686/tcp
+  denied "$VIEW" "$PROXY" reportportal/StatefulSet/reportportal-rabbitmq 5672/tcp
+  denied "$VIEW" "$PROXY" reportportal/StatefulSet/reportportal-rabbitmq 15672/tcp
+  denied "$VIEW" "$PROXY" 'reportportal:cnpg.io/cluster=reportportal-db,cnpg.io/podRole=instance' 5432/tcp
+  denied "$VIEW" @world reportportal/Deployment/reportportal-api 8585/tcp
   # The proxies' egress names each routed backend's pods and the port its route sends to, and no
   # other, so in a namespace that is listed, and takes them on every port, they reach neither n8n's
   # other ports, demo's backend's port among them, nor its database on any port.
@@ -715,7 +731,7 @@ E
   local probes pod port
   probes=$(yq -N -o json -I0 'select(. != null)' "$VIEW"/*/*/*.yaml | jq -r '
     select(.kind | IN("Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob"))
-    | select(.metadata.namespace | IN("ascender", "backstage", "demo", "envoy-gateway-system", "kromgo", "open-feature-operator", "security-system", "sso-system"))
+    | select(.metadata.namespace | IN("ascender", "backstage", "demo", "envoy-gateway-system", "kromgo", "open-feature-operator", "reportportal", "security-system", "sso-system"))
     | . as $w
     | (if .kind == "CronJob" then .spec.jobTemplate.spec.template else .spec.template end).spec.containers[]
     | . as $c
@@ -753,6 +769,7 @@ E
   [[ " $routed " == *" sso-system:4180 "* && " $routed " == *" sso-system:5556 "* ]]
   [[ " $routed " == *" monitoring:8427 "* && " $routed " != *" monitoring:9428 "* ]]
   [[ " $routed " == *" locust:8089 "* ]]
+  [[ " $routed " == *" reportportal:8080 "* && " $routed " == *" reportportal:8585 "* ]]
   [ "$named" = "$routed" ]
   # A route to a backend in a namespace without the Gateway label, or behind a Service without a
   # selector, has no port the comparison could name, and fails it saying why.

@@ -1,0 +1,22 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/catalog-info.json
+apiVersion: backstage.io/v1alpha1
+kind: Resource
+metadata:
+  name: reportportal-route
+  description: The HTTPRoute that serves ReportPortal at reportportal under the cluster's domain on the public Gateway, behind the cluster's sign-in, by the chart's own paths.
+  links:
+    - url: https://github.com/eekaan/k8s-gitops/blob/main/docs/kubernetes.md#reportportal
+      title: Documentation
+    - url: https://github.com/eekaan/k8s-gitops/tree/main/kubernetes/apps/base/reportportal/reportportal-route
+      title: Manifests
+spec:
+  type: route
+  lifecycle: production
+  owner: group:default/operators
+  system: applications
+  dependsOn:
+    - component:default/blackbox-exporter
+    - resource:default/gateway-public
+    - component:default/oauth2-proxy
+    - component:default/reportportal

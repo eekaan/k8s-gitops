@@ -76,6 +76,7 @@ tests/rebuild.bats	78
 tests/recipes.bats	5
 tests/render.bats	92
 tests/renovate-pins.bats	22
+tests/reportportal.bats	299
 tests/robot.bats	222
 tests/rules-check.bats	974
 tests/runtime-check.bats	171

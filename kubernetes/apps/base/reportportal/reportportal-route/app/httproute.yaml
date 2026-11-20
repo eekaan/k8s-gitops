@@ -1,0 +1,40 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/gateway.networking.k8s.io/httproute_v1.json
+# ReportPortal at reportportal under the cluster's domain, on the public Gateway's https listener,
+# which this namespace reaches through its k8s-gitops/gateway label. The SecurityPolicy of
+# components/sso covers both rules by the route's name, so a request without a session goes to
+# sign-in and neither Service receives anything.
+#
+# The rules are the chart's own route's at the version below, which the release's values leave off:
+# the prefix /api to the api, where every call of the interface goes, its login among them, and
+# everything else to the ui, which serves the interface's files and its /ui/ paths itself and
+# proxies nothing. tests/reportportal.bats holds the rules to the chart's at the version the release
+# pins, and fails while the record below names another (docs/kubernetes.md, ReportPortal).
+# Source: https://github.com/reportportal/kubernetes/blob/reportportal-26.11.18/reportportal/templates/ingress/gateway-http-route.yaml
+# reportportal-paths: 26.11.18
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: ${SSO_ROUTE}
+spec:
+  parentRefs:
+    - name: public
+      namespace: envoy-gateway-system
+      sectionName: https
+  hostnames:
+    - ${SSO_HOSTNAME}.${CLUSTER_DOMAIN}
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api
+      backendRefs:
+        - name: reportportal-api
+          port: 8585
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: reportportal-ui
+          port: 8080

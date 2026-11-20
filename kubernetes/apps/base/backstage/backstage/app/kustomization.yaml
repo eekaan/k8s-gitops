@@ -105,6 +105,9 @@ configMapGenerator:
       - catalogue/prometheus-operator-crds.yaml
       - catalogue/reflector.yaml
       - catalogue/reloader.yaml
+      - catalogue/reportportal-route.yaml
+      - catalogue/reportportal-volsync-movers.yaml
+      - catalogue/reportportal.yaml
       - catalogue/robot-ascender.yaml
       - catalogue/robot.yaml
       - catalogue/runtime-classes.yaml

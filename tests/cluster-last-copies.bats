@@ -255,9 +255,9 @@ secret() {
 }
 
 # a_cluster: the cluster the recipe reads: the secret store with its seal Secret, the server
-# ConfigMap whose seal stanza names it, and its snapshot CronJob; three databases from the component, n8n's, Ascender's and Backstage's, each with its
+# ConfigMap whose seal stanza names it, and its snapshot CronJob; four databases from the component, n8n's, Ascender's, Backstage's and ReportPortal's, each with its
 # primary, its dump CronJob, its ObjectStore with a recovery window, and its backup Secret with the
-# customer key; two volumes backed up by VolSync, n8n's and Open WebUI's, each owned by its
+# customer key; three volumes backed up by VolSync, n8n's, Open WebUI's and ReportPortal's, each owned by its
 # application's Kustomization, which is not suspended, and with its Secret's password; and in the
 # buckets the copies of an earlier night.
 # shellcheck disable=SC2016 # the $ words are jq variables.
@@ -265,10 +265,10 @@ a_cluster() {
   local db ns name app
   secret openbao openbao-seal-1 key "$SEAL"
   running_config
-  DATABASES=(ai-system/n8n-db ascender/ascender-db backstage/backstage-db)
-  PRIMARIES=(n8n-db-1 ascender-db-3 backstage-db-2)
-  VOLUMES=(ai-system/n8n ai-system/open-webui)
-  for i in 0 1 2; do
+  DATABASES=(ai-system/n8n-db ascender/ascender-db backstage/backstage-db reportportal/reportportal-db)
+  PRIMARIES=(n8n-db-1 ascender-db-3 backstage-db-2 reportportal-db-1)
+  VOLUMES=(ai-system/n8n ai-system/open-webui reportportal/reportportal)
+  for i in 0 1 2 3; do
     db=${DATABASES[i]}
     ns=${db%/*} name=${db#*/}
     jq -n --arg ns "$ns" --arg name "$name" --arg primary "${PRIMARIES[i]}" '{kind: "Cluster",
@@ -404,12 +404,17 @@ job ascender/$tag-ascender-db-pgdump from ascender-db-pgdump
 switched ascender/ascender-db 0000000100000000000000A3
 job backstage/$tag-backstage-db-pgdump from backstage-db-pgdump
 switched backstage/backstage-db 00000001000000000000002A
+job reportportal/$tag-reportportal-db-pgdump from reportportal-db-pgdump
+switched reportportal/reportportal-db 00000001000000000000002A
 suspended flux-system/n8n
 patched ai-system/n8n manual $tag while its Kustomization is suspended
 resumed flux-system/n8n
 suspended flux-system/open-webui
 patched ai-system/open-webui manual $tag while its Kustomization is suspended
-resumed flux-system/open-webui"
+resumed flux-system/open-webui
+suspended flux-system/reportportal
+patched reportportal/reportportal manual $tag while its Kustomization is suspended
+resumed flux-system/reportportal"
   diff <(echo "$expected") "$RECORD/events"
   # Each copy was checked: the snapshot and every dump downloaded and decrypted, every dump read by
   # pg_restore, each switch made through psql in the postgres container of the primary.
@@ -417,8 +422,8 @@ resumed flux-system/open-webui"
   for db in "${DATABASES[@]}"; do
     [ "$(calls '^rclone copyto ' | grep -c "/lab-sto2/$db/$(newest "marker-prefix-postgres/lab-sto2/$db") ")" -eq 1 ]
   done
-  [ "$(calls '^docker run ' | grep -c ' --list /dump/plain.dump$')" -eq 3 ]
-  for i in 0 1 2; do
+  [ "$(calls '^docker run ' | grep -c ' --list /dump/plain.dump$')" -eq 4 ]
+  for i in 0 1 2 3; do
     [ "$(calls "^kubectl exec ${PRIMARIES[i]} --namespace ${DATABASES[i]%/*} --container postgres -- psql " | grep -c 'pg_switch_wal')" -eq 1 ]
   done
   # Every call the recipe makes of kubectl but exec, whose stream kubectl gives no deadline, is
@@ -432,7 +437,7 @@ resumed flux-system/open-webui"
   since=$(date -u -d "@$start" '+%Y-%m-%d %H:%M:%S')
   expected="cluster-last-copies: the last copies of lab-sto2, each taken since $since UTC:
   openbao/openbao-snapshots: snapshot $(newest marker-prefix-openbao/lab-sto2)"
-  for i in 0 1 2; do
+  for i in 0 1 2 3; do
     db=${DATABASES[i]}
     line="  $db: dump $(newest "marker-prefix-postgres/lab-sto2/$db"); WAL archived through $(cat "$STATE/segment.${db%/*}.${db#*/}" 2>/dev/null || echo 00000001000000000000002A)"
     expected+=$'\n'"$line"
@@ -442,13 +447,13 @@ resumed flux-system/open-webui"
   done
   echo "expected summary:"
   echo "$expected"
-  [ "${lines[${#lines[@]} - 7]}" = "cluster-last-copies: the last copies of lab-sto2, each taken since $since UTC:" ]
-  for i in 1 2 3 4 5 6; do
+  [ "${lines[${#lines[@]} - 9]}" = "cluster-last-copies: the last copies of lab-sto2, each taken since $since UTC:" ]
+  for i in 1 2 3 4 5 6 7 8; do
     line=$(sed -n "$((i + 1))p" <<<"$expected")
-    if ((i >= 2 && i <= 4)); then
-      [[ ${lines[${#lines[@]} - 7 + i]} =~ ^"$line, which holds every transaction committed before "[0-9]{4}-[0-9]{2}-[0-9]{2}\ [0-9]{2}:[0-9]{2}:[0-9]{2}" UTC"$ ]]
+    if ((i >= 2 && i <= 5)); then
+      [[ ${lines[${#lines[@]} - 9 + i]} =~ ^"$line, which holds every transaction committed before "[0-9]{4}-[0-9]{2}-[0-9]{2}\ [0-9]{2}:[0-9]{2}:[0-9]{2}" UTC"$ ]]
     else
-      [ "${lines[${#lines[@]} - 7 + i]}" = "$line" ]
+      [ "${lines[${#lines[@]} - 9 + i]}" = "$line" ]
     fi
   done
   # Every copy in a bucket is this run's, beside the earlier night's.
@@ -701,18 +706,20 @@ resumed flux-system/open-webui"
   # It reads the cluster, and compares every custody file with it.
   [ "$(calls '^kubectl ' | grep -cv '^kubectl get ')" -eq 0 ]
   grep -qxF "bao-seal-restore: the Secret openbao-seal-1 holds the key in $OPENBAO_FILE" <<<"$output"
-  [ "$(calls '^kubectl get secret ' | grep -cE ' (n8n|open-webui)-volsync ')" -eq 2 ]
-  [ "$(calls '^kubectl get secret ' | grep -cE ' (n8n|ascender|backstage)-db-backup ')" -eq 3 ]
+  [ "$(calls '^kubectl get secret ' | grep -cE ' (n8n|open-webui|reportportal)-volsync ')" -eq 3 ]
+  [ "$(calls '^kubectl get secret ' | grep -cE ' (n8n|ascender|backstage|reportportal)-db-backup ')" -eq 4 ]
   # The plan, by namespace and name, and that the check took none of it.
   expected="cluster-last-copies: the last copies of lab-sto2, in this order:
   openbao/openbao-snapshots: a snapshot, by a Job from the CronJob openbao/openbao-snapshots
   ai-system/n8n-db: a dump, by a Job from the CronJob ai-system/n8n-db-pgdump, and its WAL archived through a segment switched on ai-system/n8n-db-1
   ascender/ascender-db: a dump, by a Job from the CronJob ascender/ascender-db-pgdump, and its WAL archived through a segment switched on ascender/ascender-db-3
   backstage/backstage-db: a dump, by a Job from the CronJob backstage/backstage-db-pgdump, and its WAL archived through a segment switched on backstage/backstage-db-2
+  reportportal/reportportal-db: a dump, by a Job from the CronJob reportportal/reportportal-db-pgdump, and its WAL archived through a segment switched on reportportal/reportportal-db-1
   ai-system/n8n: a backup of its volume, by its manual trigger, with the Kustomization flux-system/n8n suspended meanwhile
   ai-system/open-webui: a backup of its volume, by its manual trigger, with the Kustomization flux-system/open-webui suspended meanwhile
+  reportportal/reportportal: a backup of its volume, by its manual trigger, with the Kustomization flux-system/reportportal suspended meanwhile
 cluster-last-copies: --check takes none of them"
-  diff <(echo "$expected") <(tail -n 8 <<<"$output")
+  diff <(echo "$expected") <(tail -n 10 <<<"$output")
 }
 
 @test "The last copies print no key, password, address or bucket name, and pass none as an argument" {
@@ -736,7 +743,7 @@ cluster-last-copies: --check takes none of them"
   secrets=("$SEAL" "$(printf %s "$SEAL" | base64 -w0)" "$MASTER" "$SSE" "$(printf %s "$SSE" | base64 -w0)"
     marker-customer-key marker-state-access-key-id marker-state-secret-key marker-cluster-access-key-id
     marker-cluster-secret-key marker-recovery-share "$(grep -h '^AGE-SECRET-KEY-' "$KEY")" "$(grep -h '^AGE-SECRET-KEY-' "$FLUX_KEY")")
-  for app in n8n open-webui; do
+  for app in n8n open-webui reportportal; do
     secrets+=("$(password "$app")" "$(password "$app" | base64 -w0)")
   done
   leaked "${secrets[@]}"

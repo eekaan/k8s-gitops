@@ -1,0 +1,26 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/catalog-info.json
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: reportportal
+  description: ReportPortal, where test runs are kept as launches with their history and read in the browser, with its database from the PostgreSQL component and its files on a backed-up volume.
+  links:
+    - url: https://github.com/eekaan/k8s-gitops/blob/main/docs/kubernetes.md#reportportal
+      title: Documentation
+    - url: https://github.com/eekaan/k8s-gitops/tree/main/kubernetes/apps/base/reportportal/reportportal
+      title: Manifests
+spec:
+  type: service
+  lifecycle: production
+  owner: group:default/operators
+  system: applications
+  dependsOn:
+    - component:default/cilium
+    - component:default/cloudnative-pg
+    - component:default/external-secrets
+    - resource:default/linstor-cluster
+    - resource:default/openbao-store
+    - component:default/plugin-barman-cloud
+    - resource:default/prometheus-operator-crds
+    - component:default/volsync

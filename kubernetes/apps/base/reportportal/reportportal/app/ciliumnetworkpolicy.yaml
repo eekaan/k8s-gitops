@@ -1,0 +1,581 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
+# What the pods of the database let through among themselves and with the operator, on top of the
+# namespace's default deny: every pod the operator makes for a cluster of the namespace,
+# reportportal-db's instances and the jobs that create, join and recover them, and those of a cluster
+# a restore adds beside it (docs/runbooks/postgres-restore.md). The operator labels each of them
+# cnpg.io/cluster with its own cluster's name (pkg/specs/pods.go and jobs.go), so this policy and the
+# database's below select by the label existing, not by its value: a restore's cluster has the
+# database's flows from its start, and its pull request adds none. Every cluster of the namespace
+# shares them, and every one is ReportPortal's, from the reviewed tree. The pinned operator's
+# documentation asks that the operator reach every pod of a cluster on 8000, the instance manager's
+# status port, and 5432, PostgreSQL's, and that the cluster's pods connect to each other
+# (docs/src/security.md, Exposed Ports; docs/src/networking.md); a replica streams from the primary
+# through the Service reportportal-db-rw. The instance manager reads and writes the Cluster and its
+# Secrets through the API server, and so does the Barman Cloud plugin's sidecar in each instance's
+# pod and in a recovery job's, for its ObjectStore and the Secret of its credentials.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: reportportal-db
+spec:
+  endpointSelector:
+    matchExpressions:
+      - key: cnpg.io/cluster
+        operator: Exists
+  # The namespace's default deny alone denies; this policy only allows.
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  ingress:
+    # The operator, the pods of its Deployment in cnpg-system.
+    - fromEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": cnpg-system
+            app.kubernetes.io/name: cloudnative-pg
+      toPorts:
+        - ports:
+            - port: "8000"
+              protocol: TCP
+            - port: "5432"
+              protocol: TCP
+    # The pods of the namespace's clusters: replication, and a joining instance's copy of the
+    # primary. They listen on 5432, 8000 and 9187 alone.
+    - fromEndpoints:
+        - matchExpressions:
+            - key: cnpg.io/cluster
+              operator: Exists
+  egress:
+    # The cluster's resolver.
+    - toEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": kube-system
+            "k8s:k8s-app": kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+    # Each other.
+    - toEndpoints:
+        - matchExpressions:
+            - key: cnpg.io/cluster
+              operator: Exists
+    # The API server. A Service's address is translated to the control plane's before policy
+    # applies, so 6443 is the port that counts.
+    - toEntities:
+        - kube-apiserver
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+            - port: "6443"
+              protocol: TCP
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
+# Who reaches the database's instances besides the operator and each other: the api, the jobs
+# service, the migrations and the dump job on PostgreSQL's port, Prometheus on the exporter's port the
+# PodMonitor names, metrics, and the kubelet's probes on the status port, where the operator puts
+# them (pkg/specs/pods.go). The instances of every cluster of the namespace, as above.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: reportportal-db-instances
+spec:
+  endpointSelector:
+    matchExpressions:
+      - key: cnpg.io/cluster
+        operator: Exists
+    matchLabels:
+      cnpg.io/podRole: instance
+  # The namespace's default deny alone denies; this policy only allows.
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            component: reportportal-api
+        - matchLabels:
+            component: reportportal-jobs
+        - matchLabels:
+            component: reportportal-migrations
+        - matchLabels:
+            app.kubernetes.io/name: pgdump
+            app.kubernetes.io/instance: reportportal-db
+      toPorts:
+        - ports:
+            - port: "5432"
+              protocol: TCP
+    - fromEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": monitoring
+            app.kubernetes.io/name: prometheus
+      toPorts:
+        - ports:
+            - port: "9187"
+              protocol: TCP
+    - fromEntities:
+        - host
+      toPorts:
+        - ports:
+            - port: "8000"
+              protocol: TCP
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
+# The instances' one call outside the cluster: the Barman Cloud plugin's sidecar, which the operator
+# puts in every instance's pod, archives the WAL and writes the base backups to the object storage,
+# and reads them back, at the endpoint cluster-config holds as a URL. That cannot be named by a DNS
+# name here, so the policy allows the world on 443, the port https reaches it on (docs/kubernetes.md,
+# Network policy). The sidecar talks to the instance manager over a socket in the pod, which policy
+# does not see, and a policy selects pods, not containers, so PostgreSQL's container shares the
+# rule. The instances of every cluster of the namespace, as above. The jobs that create an instance
+# by initdb and join one hold no sidecar and are not selected; a recovery job holds one, below.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: reportportal-db-instances-world
+  annotations:
+    k8s-gitops/network-policy-reason: >-
+      the Barman Cloud plugin's sidecar in each instance's pod writes the WAL archive and the base
+      backups to the object storage outside the cluster, and reads them back, whose endpoint
+      cluster-config holds as a URL and so cannot name a DNS name here; it reaches it on 443 only
+spec:
+  endpointSelector:
+    matchExpressions:
+      - key: cnpg.io/cluster
+        operator: Exists
+    matchLabels:
+      cnpg.io/podRole: instance
+  # The namespace's default deny alone denies; this policy only allows.
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  egress:
+    - toEntities:
+        - world
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
+# A recovery job's one call outside the cluster. A restore from the archive makes the first instance
+# of its new cluster in a job whose pod carries cnpg.io/jobRole full-recovery (pkg/specs/jobs.go of
+# the pinned operator), and the Barman Cloud plugin puts its sidecar in that pod, which reads the
+# base backup and the WAL from the object storage (internal/cnpgi/operator/lifecycle.go, reconcileJob,
+# and internal/cnpgi/restore/restore.go of the plugin's release). It reaches it on 443, as the
+# instances do; its resolver and the API server are reportportal-db's, as for every pod of a cluster.
+# The policy stands, so that a restore's pull request adds none.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: reportportal-db-full-recovery-world
+  annotations:
+    k8s-gitops/network-policy-reason: >-
+      the Barman Cloud plugin's sidecar in a restore's recovery job reads the base backup and the
+      WAL from the object storage outside the cluster, whose endpoint cluster-config holds as a URL
+      and so cannot name a DNS name here; it reaches it on 443 only
+spec:
+  endpointSelector:
+    matchExpressions:
+      - key: cnpg.io/cluster
+        operator: Exists
+    matchLabels:
+      cnpg.io/jobRole: full-recovery
+  # The namespace's default deny alone denies; this policy only allows.
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  egress:
+    - toEntities:
+        - world
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
+# What the database's daily dump job lets through, on top of the namespace's default deny: it
+# resolves the names of the replicas' and the primary's Services and reaches the instances on
+# PostgreSQL's port, the replicas first and the primary when none answers, the instances of every
+# cluster of the namespace, as above; it takes no connection. The job's pods carry the labels
+# app.kubernetes.io/name pgdump and app.kubernetes.io/instance reportportal-db, which
+# kustomization.yaml gives the component's CronJob. Two policies: the object storage's rule carries a
+# reason of its own.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: reportportal-db-pgdump
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: pgdump
+      app.kubernetes.io/instance: reportportal-db
+  # The namespace's default deny alone denies; this policy only allows.
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": kube-system
+            "k8s:k8s-app": kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+    - toEndpoints:
+        - matchExpressions:
+            - key: cnpg.io/cluster
+              operator: Exists
+          matchLabels:
+            cnpg.io/podRole: instance
+      toPorts:
+        - ports:
+            - port: "5432"
+              protocol: TCP
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
+# The dump job's two calls outside the cluster: its first step downloads the pinned age release from
+# GitHub, whose URL redirects to a second host that serves the file, and its last uploads the
+# encrypted dump to the object storage, whose endpoint cluster-config holds as a URL. Neither can be
+# named by a DNS name here, so the policy allows the world on 443, the port https reaches both on
+# (docs/kubernetes.md, Network policy).
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: reportportal-db-pgdump-world
+  annotations:
+    k8s-gitops/network-policy-reason: >-
+      the dump job downloads the pinned age release from GitHub, whose URL redirects to another
+      host, and uploads the encrypted dump to the object storage outside the cluster, whose endpoint
+      cluster-config holds as a URL and so cannot name a DNS name here; it reaches them on 443 only
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: pgdump
+      app.kubernetes.io/instance: reportportal-db
+  # The namespace's default deny alone denies; this policy only allows.
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  egress:
+    - toEntities:
+        - world
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
+# RabbitMQ, the pod of its chart's StatefulSet by the chart's selector labels: it takes the api and
+# the jobs service on AMQP, 5672, where the api's reporting queues and the jobs service's consumers
+# are, and on the management API, 15672, where both look the analyzers' exchanges up, the jobs
+# service as it starts (AnalyzerRabbitMqConfiguration in each). Its
+# probes run rabbitmq-diagnostics inside the container, and its node's own name is in the pod's hosts
+# file, so it looks nothing up and sends nothing.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: reportportal-rabbitmq
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: rabbitmq
+      app.kubernetes.io/instance: reportportal
+  # The namespace's default deny alone denies; this policy only allows.
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            component: reportportal-api
+        - matchLabels:
+            component: reportportal-jobs
+      toPorts:
+        - ports:
+            - port: "5672"
+              protocol: TCP
+            - port: "15672"
+              protocol: TCP
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
+# The migrations Job, by the chart's component label: it resolves the database's name and reaches
+# the instances on PostgreSQL's port, the one the Service reportportal-db-rw selects being the
+# primary, and takes nothing.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: reportportal-migrations
+spec:
+  endpointSelector:
+    matchLabels:
+      component: reportportal-migrations
+  # The namespace's default deny alone denies; this policy only allows.
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": kube-system
+            "k8s:k8s-app": kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+    - toEndpoints:
+        - matchExpressions:
+            - key: cnpg.io/cluster
+              operator: Exists
+          matchLabels:
+            cnpg.io/podRole: instance
+      toPorts:
+        - ports:
+            - port: "5432"
+              protocol: TCP
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
+# The pre-upgrade hook's Job: kubectl deletes the migrations Job through the API server, which it
+# reaches by the address in its environment, and nothing else.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: reportportal-pre-upgrade-cleanup
+spec:
+  endpointSelector:
+    matchLabels:
+      component: reportportal-pre-upgrade-cleanup
+  # The namespace's default deny alone denies; this policy only allows.
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  egress:
+    - toEntities:
+        - kube-apiserver
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+            - port: "6443"
+              protocol: TCP
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
+# The ui, nginx serving the interface's files: it takes the public Gateway's proxies on 8080, the port
+# the route sends to, and the kubelet's probes there. It proxies nothing and calls nothing.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: reportportal-ui
+spec:
+  endpointSelector:
+    matchLabels:
+      component: reportportal-ui
+  # The namespace's default deny alone denies; this policy only allows.
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  ingress:
+    # Only the pods Envoy Gateway runs for the public Gateway, selected by their labels and not by
+    # their namespace, whose controller and certificate job are no proxies.
+    - fromEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": envoy-gateway-system
+            app.kubernetes.io/name: envoy
+            app.kubernetes.io/component: proxy
+            app.kubernetes.io/managed-by: envoy-gateway
+            gateway.envoyproxy.io/owning-gateway-name: public
+            gateway.envoyproxy.io/owning-gateway-namespace: envoy-gateway-system
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
+    # The kubelet's startup, liveness and readiness probes, which arrive from the node the pod runs on.
+    - fromEntities:
+        - host
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
+# The jobs service, which cleans launches, logs, attachments and events by its schedules: it takes the
+# api and the kubelet's probes on 8686, and reaches the resolver, the database, RabbitMQ and the API
+# server, for its init container, k8s-wait-for, which waits for the migrations Job. Nothing outside
+# the cluster: the usage statistics it would post to Google once a day are turned off (values.yaml,
+# docs/kubernetes.md, ReportPortal).
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: reportportal-jobs
+spec:
+  endpointSelector:
+    matchLabels:
+      component: reportportal-jobs
+  # The namespace's default deny alone denies; this policy only allows.
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  egress:
+    # The cluster's resolver, for the database's and RabbitMQ's names.
+    - toEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": kube-system
+            "k8s:k8s-app": kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+    # The database: every instance, as a failover moves the primary that reportportal-db-rw selects.
+    - toEndpoints:
+        - matchExpressions:
+            - key: cnpg.io/cluster
+              operator: Exists
+          matchLabels:
+            cnpg.io/podRole: instance
+      toPorts:
+        - ports:
+            - port: "5432"
+              protocol: TCP
+    # RabbitMQ's AMQP and management API.
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: rabbitmq
+            app.kubernetes.io/instance: reportportal
+      toPorts:
+        - ports:
+            - port: "5672"
+              protocol: TCP
+            - port: "15672"
+              protocol: TCP
+    # The API server, for k8s-wait-for. A Service's address is translated to the control plane's
+    # before policy applies, so 6443 is the port that counts.
+    - toEntities:
+        - kube-apiserver
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+            - port: "6443"
+              protocol: TCP
+  ingress:
+    # The api, which asks the jobs service for its health and its information.
+    - fromEndpoints:
+        - matchLabels:
+            component: reportportal-api
+      toPorts:
+        - ports:
+            - port: "8686"
+              protocol: TCP
+    # The kubelet's startup, liveness and readiness probes.
+    - fromEntities:
+        - host
+      toPorts:
+        - ports:
+            - port: "8686"
+              protocol: TCP
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
+# The api: it reaches the resolver, the database, RabbitMQ, the jobs service and the API server, for
+# its init container, k8s-wait-for, and takes the public Gateway's proxies and the kubelet's probes on
+# 8585. Nothing outside the cluster: the plugin fetch it would make at start is turned off
+# (values.yaml), and no integration that calls out is set up (docs/kubernetes.md, ReportPortal).
+# While the cluster audits network policy, these rules report rather than stop what they leave out.
+# This policy is the file's last, and its ingress the policy's last key: a client inside the cluster
+# that reports launches to the API is admitted by one rule appended below, naming its namespace and
+# its pods' labels, on 8585.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: reportportal-api
+spec:
+  endpointSelector:
+    matchLabels:
+      component: reportportal-api
+  # The namespace's default deny alone denies; this policy only allows.
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  egress:
+    # The cluster's resolver, for the database's, RabbitMQ's and the jobs service's names.
+    - toEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": kube-system
+            "k8s:k8s-app": kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+    # The database: every instance, as a failover moves the primary that reportportal-db-rw selects.
+    - toEndpoints:
+        - matchExpressions:
+            - key: cnpg.io/cluster
+              operator: Exists
+          matchLabels:
+            cnpg.io/podRole: instance
+      toPorts:
+        - ports:
+            - port: "5432"
+              protocol: TCP
+    # RabbitMQ's AMQP, for the reporting queues, and its management API, which the api reads its
+    # queues and the analyzers' exchanges from.
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: rabbitmq
+            app.kubernetes.io/instance: reportportal
+      toPorts:
+        - ports:
+            - port: "5672"
+              protocol: TCP
+            - port: "15672"
+              protocol: TCP
+    # The jobs service, whose health is part of the api's, and its information.
+    - toEndpoints:
+        - matchLabels:
+            component: reportportal-jobs
+      toPorts:
+        - ports:
+            - port: "8686"
+              protocol: TCP
+    # The API server, for k8s-wait-for. A Service's address is translated to the control plane's
+    # before policy applies, so 6443 is the port that counts.
+    - toEntities:
+        - kube-apiserver
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+            - port: "6443"
+              protocol: TCP
+  ingress:
+    # The routed backend for /api: only the pods Envoy Gateway runs for the public Gateway.
+    - fromEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": envoy-gateway-system
+            app.kubernetes.io/name: envoy
+            app.kubernetes.io/component: proxy
+            app.kubernetes.io/managed-by: envoy-gateway
+            gateway.envoyproxy.io/owning-gateway-name: public
+            gateway.envoyproxy.io/owning-gateway-namespace: envoy-gateway-system
+      toPorts:
+        - ports:
+            - port: "8585"
+              protocol: TCP
+    # The kubelet's startup, liveness and readiness probes.
+    - fromEntities:
+        - host
+      toPorts:
+        - ports:
+            - port: "8585"
+              protocol: TCP

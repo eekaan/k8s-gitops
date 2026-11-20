@@ -123,5 +123,16 @@
       matchPackageNames: ["ghcr.io/nvidia/openshell/**"],
       groupName: "OpenShell",
     },
+    {
+      // tests/reportportal.bats fails unless the four images are of one version, the one the chart's
+      // own values name: ReportPortal releases the chart for the services of one release, and an
+      // update runs that release's migrations on the database.
+      description: "ReportPortal: its chart and the ui, api, jobs and migrations images it runs",
+      matchPackageNames: ["reportportal", "docker.io/reportportal/service-ui", "docker.io/reportportal/service-api", "docker.io/reportportal/service-jobs", "docker.io/reportportal/migrations"],
+      groupName: "ReportPortal",
+      // The chart's version and the services' differ, so each takes its own step: one pull request
+      // whatever the step of either.
+      separateMajorMinor: false,
+    },
   ],
 }

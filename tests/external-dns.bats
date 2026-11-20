@@ -506,9 +506,9 @@ edge_copy() {
   # Without the Gateway, the applications whose routes name it and CrowdSec, whose agent reads its
   # proxies, nothing but external-dns needs the Gateway, so it is the one refused, naming it.
   # Robot Framework's suite of Ascender's sign-in page, robot-ascender, names ascender and goes with
-  # it.
+  # it; Locust's and ReportPortal's routes go, and Locust and ReportPortal stay.
   tree_without gateway-public hello-route n8n kromgo open-webui hello-sso dex oauth2-proxy backstage crowdsec crowdsec-gateway-logs victoria-logs-route ascender robot-ascender \
-    locust-route
+    locust-route reportportal-route
   run "$REPO/scripts/kubernetes-check" "$TREE"
   echo "$output"
   [ "$status" -ne 0 ]
@@ -545,7 +545,7 @@ edge_copy() {
 @test "The names the routes publish are listed offline from the tree's builds, without a wildcard" {
   local names
   # The names of the tree's routes on the Gateway, sorted byte by byte, as the listing sorts them.
-  names="$(printf '%s.example.net\n' ascender auth backstage dex hello-sso hello kromgo locust logs n8n open-webui)"
+  names="$(printf '%s.example.net\n' ascender auth backstage dex hello-sso hello kromgo locust logs n8n open-webui reportportal)"
   # The tree as it is, with no cluster to reach: KUBECONFIG names no file.
   [ ! -e "$KUBECONFIG" ]
   published "$REPO"
@@ -568,7 +568,7 @@ edge_copy() {
   add_route own '{parentRefs: [{name: public, sectionName: https}], hostnames: ["own.${CLUSTER_DOMAIN}"]}' envoy-gateway-system/gateway-public
   published "$TREE"
   [ "$status" -eq 0 ]
-  [ "$output" = "$(printf '%s\n' "$names" own.example.net)" ]
+  [ "$output" = "$(printf '%s\n' "$names" own.example.net | LC_ALL=C sort)" ]
 
   # A route without hostnames on the https listener, alone or beside the http one, and one with a
   # wildcard, would publish the listener's wildcard: each fails the listing, naming the route.

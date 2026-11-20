@@ -1,0 +1,201 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/helmrelease-helm-v2.json
+# ReportPortal from its publisher's chart: the ui, the api, the jobs service, RabbitMQ, the migrations
+# Job and the hook that deletes that Job before an upgrade (docs/kubernetes.md, ReportPortal). The
+# values are in values.yaml; what the chart has no value for is in the post-renderer, which
+# helm-controller hands the hooks too, its default strategy being Helm's combined one.
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: reportportal
+spec:
+  interval: 30m
+  # An upgrade runs the hook, then the migrations, then the api and the jobs service, the api's
+  # start-up window being up to 230 seconds: the ten minutes the install has, where helm-controller
+  # gives an upgrade five.
+  timeout: 10m
+  chart:
+    spec:
+      chart: reportportal
+      # The version is pinned: a new chart arrives by a change to this file, which Flux applies at
+      # once. Renovate moves it with the four ReportPortal images (.renovate/groups.json5), and an
+      # update runs the migrations on the database, so none merges itself (.renovate/automerge.json5).
+      version: 26.11.18
+      interval: 12h
+      sourceRef:
+        kind: HelmRepository
+        name: reportportal
+  valuesFrom:
+    - kind: ConfigMap
+      name: reportportal-values
+  postRenderers:
+    - kustomize:
+        patches:
+          # The auto-analyzer has no switch: the chart renders its StatefulSet and Service whatever
+          # the values. It needs OpenSearch, which is not run, so both go.
+          - patch: |
+              $patch: delete
+              apiVersion: apps/v1
+              kind: StatefulSet
+              metadata:
+                name: reportportal-analyzer
+          - patch: |
+              $patch: delete
+              apiVersion: v1
+              kind: Service
+              metadata:
+                name: reportportal-analyzer
+          # The chart's claim of the files, which the volsync component's claim of the same name
+          # replaces, made from the latest backup and backed up on a schedule.
+          - patch: |
+              $patch: delete
+              apiVersion: v1
+              kind: PersistentVolumeClaim
+              metadata:
+                name: reportportal-shared-volume-claim
+          # The chart writes only the pod's security context; each container of ReportPortal's pods
+          # gets no privilege escalation, no capability and a read-only root here, the init
+          # containers that wait for the migrations included.
+          - patch: |
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: reportportal-api
+              spec:
+                template:
+                  spec:
+                    initContainers:
+                      - name: migrations-waiting-init
+                        securityContext:
+                          allowPrivilegeEscalation: false
+                          capabilities:
+                            drop:
+                              - ALL
+                          readOnlyRootFilesystem: true
+                    containers:
+                      - name: api
+                        securityContext:
+                          allowPrivilegeEscalation: false
+                          capabilities:
+                            drop:
+                              - ALL
+                          readOnlyRootFilesystem: true
+          # The jobs container also mounts its /tmp here, as the chart's own value for it breaks the
+          # chart's output in filesystem mode (values.yaml).
+          - patch: |
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: reportportal-jobs
+              spec:
+                template:
+                  spec:
+                    initContainers:
+                      - name: migrations-waiting-init
+                        securityContext:
+                          allowPrivilegeEscalation: false
+                          capabilities:
+                            drop:
+                              - ALL
+                          readOnlyRootFilesystem: true
+                    containers:
+                      - name: jobs
+                        securityContext:
+                          allowPrivilegeEscalation: false
+                          capabilities:
+                            drop:
+                              - ALL
+                          readOnlyRootFilesystem: true
+                        volumeMounts:
+                          - name: tmp
+                            mountPath: /tmp
+          # The ui and the migrations call no API, so their pods mount no token.
+          - patch: |
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: reportportal-ui
+              spec:
+                template:
+                  spec:
+                    automountServiceAccountToken: false
+                    containers:
+                      - name: ui
+                        securityContext:
+                          allowPrivilegeEscalation: false
+                          capabilities:
+                            drop:
+                              - ALL
+                          readOnlyRootFilesystem: true
+          - patch: |
+              apiVersion: batch/v1
+              kind: Job
+              metadata:
+                name: reportportal-migrations
+              spec:
+                template:
+                  spec:
+                    automountServiceAccountToken: false
+                    containers:
+                      - name: migrations
+                        securityContext:
+                          allowPrivilegeEscalation: false
+                          capabilities:
+                            drop:
+                              - ALL
+                          readOnlyRootFilesystem: true
+          # The pre-upgrade hook has no security context at all: its pod runs as kubectl's user of the
+          # image, 1000, by number, which the restricted level needs to see non-root. Helm deletes
+          # its Job before making it again as well as once it succeeds: with the chart's
+          # hook-succeeded alone, a run that failed or ran over leaves its Job, and the next
+          # upgrade's hook fails on it as one that exists already.
+          - patch: |
+              apiVersion: batch/v1
+              kind: Job
+              metadata:
+                name: reportportal-pre-upgrade-cleanup
+                annotations:
+                  helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+              spec:
+                template:
+                  spec:
+                    securityContext:
+                      runAsNonRoot: true
+                      runAsUser: 1000
+                      runAsGroup: 1000
+                      seccompProfile:
+                        type: RuntimeDefault
+                    containers:
+                      - name: delete-job
+                        securityContext:
+                          allowPrivilegeEscalation: false
+                          capabilities:
+                            drop:
+                              - ALL
+                          readOnlyRootFilesystem: true
+          # The chart names no namespace on its own Deployments, Services and Jobs, which Helm then
+          # installs into the release's; RabbitMQ's chart names one on its objects. Written here,
+          # after the patches above, which find the objects as the chart renders them, so that what
+          # the tree's checks render holds every object in reportportal, as the cluster does: its
+          # Services for the routes and its pods for the network policies.
+          - target:
+              kind: Deployment
+              labelSelector: app.kubernetes.io/instance=reportportal
+            patch: |
+              - op: add
+                path: /metadata/namespace
+                value: reportportal
+          - target:
+              kind: Service
+              labelSelector: app.kubernetes.io/instance=reportportal
+            patch: |
+              - op: add
+                path: /metadata/namespace
+                value: reportportal
+          - target:
+              kind: Job
+              labelSelector: app.kubernetes.io/instance=reportportal
+            patch: |
+              - op: add
+                path: /metadata/namespace
+                value: reportportal

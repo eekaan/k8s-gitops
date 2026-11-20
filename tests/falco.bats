@@ -413,6 +413,13 @@ executable() {
     # v0.16.0, which the plugin runs with the argument instance in an instance's pod and restore in
     # a restore's Job (internal/cnpgi/operator/lifecycle.go).
     barman-cloud-sidecar) echo /manager ;;
+    # The init container migrations-waiting-init of ReportPortal's api and jobs pods runs the image's
+    # entrypoint, wait_for.sh, which asks for the Job with kubectl, /usr/local/bin/kubectl of
+    # docker.io/reportportal/k8s-wait-for 2.1.7.
+    k8s-wait-for) echo /usr/local/bin/kubectl ;;
+    # The pre-upgrade hook's container delete-job runs the image's entrypoint, /bin/kubectl, of
+    # docker.io/rancher/kubectl v1.35.6, with the chart's arguments.
+    rancher-kubectl) echo /bin/kubectl ;;
     # PostgreSQL's server, which the instance manager starts by that name
     # (GetPostgresExecutableName in pkg/management/postgres/instance.go of cloudnative-pg v1.30.1),
     # and whose archiver is a fork of it, under the same name.
@@ -739,6 +746,33 @@ archiver_exception() {
   read -ra namespaces <<<"$PG_NAMESPACES"
   printf '(%s and %s and %s and %s and proc.cmdline startswith "%s")' "$(term k8s.ns.name "${namespaces[@]}")" "$(term container.name "$PG_CONTAINER")" \
     "$(term container.image.repository "$PG_REPOSITORY")" "$(term proc.pname "$(comm "$(executable postgres)")")" "$ARCHIVE_PREFIX"
+}
+# rp_container TREE NAME: the containers and init containers named NAME of ReportPortal's chart,
+# rendered as Flux installs it on lab-sto2 from TREE. Sets RC_NAMESPACE, the namespace the release
+# installs into, which its Kustomization targets, RC_CONTAINER, NAME, and RC_REPOSITORY, their one
+# image as the runtime reports it. Fails, saying what the chart renders now, when no container has
+# the name, when two of that name run different images, and when the image is not written as the
+# runtime reports it.
+rp_container() {
+  local images repository
+  render reportportal "$1" || return 1
+  RC_NAMESPACE="$(yq -N 'select(.kind == "HelmRelease") | .spec.targetNamespace // .metadata.namespace' "$BUILT")"
+  [ "$RC_NAMESPACE" = "$(yq '.spec.targetNamespace' "$BUILD_KS")" ] ||
+    { echo "reportportal's release installs into $RC_NAMESPACE, and its Kustomization targets $(yq '.spec.targetNamespace' "$BUILD_KS")"; return 1; }
+  images="$(NAME="$2" yq -N '(.spec.template.spec // .spec) | (.initContainers // []) + (.containers // []) | .[] | select(.name == strenv(NAME)) | .image' "$RENDERED" | LC_ALL=C sort -u)"
+  [ -n "$images" ] || { echo "no container of ReportPortal's render is named $2"; return 1; }
+  [ "$(grep -c . <<<"$images")" -eq 1 ] || { echo "the containers $2 of ReportPortal's render run more than one image: $(paste -sd' ' <<<"$images")"; return 1; }
+  RC_CONTAINER="$2"
+  repository="$(registry_first "$images" "ReportPortal's container $2")" || { echo "$repository"; return 1; }
+  RC_REPOSITORY="$repository"
+}
+wait_for_exception() {
+  rp_container "$1" migrations-waiting-init || return 1
+  conjunction "$RC_NAMESPACE" "$RC_CONTAINER" "$RC_REPOSITORY" "$(comm "$(executable k8s-wait-for)")"
+}
+hook_exception() {
+  rp_container "$1" delete-job || return 1
+  conjunction "$RC_NAMESPACE" "$RC_CONTAINER" "$RC_REPOSITORY" "$(comm "$(executable rancher-kubectl)")"
 }
 # Truncation under containerd's snapshots by what Falco places in no container.
 clear_log_exception() {
@@ -1101,17 +1135,18 @@ of_security_system() {
   # One key of the values, customRules, a map of rule files by name: it holds one file.
   [ "$(yq '.customRules | type' "$VALUES")" = '!!map' ]
   [ "$(yq '.customRules | keys | join(" ")' "$VALUES")" = exceptions.yaml ]
-  # The file is fourteen items, in this order, each of which overrides the condition of one
+  # The file is sixteen items, in this order, each of which overrides the condition of one
   # placeholder macro of the image's rules: the first item for a placeholder replaces it with one
   # conjunction in parentheses, and each further one appends or and one conjunction to it. The
   # placeholders are the redirect rule's, the drop-and-execute rule's, the redirect rule's three
-  # times more, the API server rule's seven times, the shell rule's and the log-clearing rule's: no
-  # rule of the tree's own, no list, nothing appended to a rule and no rule turned off.
+  # times more, the API server rule's seven times, the shell rule's, the log-clearing rule's and the
+  # API server rule's twice more: no rule of the tree's own, no list, nothing appended to a rule and
+  # no rule turned off.
   local_rules
   [ "$(yq 'type' "$EXCEPTIONS")" = '!!seq' ]
-  [ "$(yq 'length' "$EXCEPTIONS")" -eq 14 ]
-  [ "$(yq '.[].macro' "$EXCEPTIONS" | paste -sd' ' -)" = "user_known_stand_streams_redirect_activities known_drop_and_execute_activities$(printf ' user_known_stand_streams_redirect_activities%.0s' 1 2 3)$(printf ' user_known_contact_k8s_api_server_activities%.0s' 1 2 3 4 5 6 7) user_shell_container_exclusions allowed_clear_log_files" ]
-  [ "$(yq '.[].override.condition' "$EXCEPTIONS" | paste -sd' ' -)" = "replace replace append append append replace append append append append append append replace replace" ]
+  [ "$(yq 'length' "$EXCEPTIONS")" -eq 16 ]
+  [ "$(yq '.[].macro' "$EXCEPTIONS" | paste -sd' ' -)" = "user_known_stand_streams_redirect_activities known_drop_and_execute_activities$(printf ' user_known_stand_streams_redirect_activities%.0s' 1 2 3)$(printf ' user_known_contact_k8s_api_server_activities%.0s' 1 2 3 4 5 6 7) user_shell_container_exclusions allowed_clear_log_files$(printf ' user_known_contact_k8s_api_server_activities%.0s' 1 2)" ]
+  [ "$(yq '.[].override.condition' "$EXCEPTIONS" | paste -sd' ' -)" = "replace replace append append append replace append append append append append append replace replace append append" ]
   seen=" "
   while read -r item; do
     [ "$(jq -r 'keys | join(" ")' <<<"$item")" = "condition macro override" ]
@@ -1132,12 +1167,12 @@ of_security_system() {
   # excepts whatever that container runs at that one path, as it names a path and not a file, and
   # that any binary the container runs from an upper layer at any other path, cilium-sysctlfix
   # included, still matches.
-  [ "$(grep -c '^# Reason: ' "$EXCEPTIONS")" -eq 14 ]
+  [ "$(grep -c '^# Reason: ' "$EXCEPTIONS")" -eq 16 ]
   [ "$(sed '/^- /,$d' "$EXCEPTIONS" | grep -vc '^#' || true)" -eq 0 ]
   mapfile -t reasons < <(awk '/^#/ { sub(/^# */, ""); block = block (block == "" ? "" : " ") $0; next }
     /^- / { print block; block = ""; next } { block = "" }' "$EXCEPTIONS")
   printf 'reason: %s\n' "${reasons[@]}"
-  [ "${#reasons[@]}" -eq 14 ]
+  [ "${#reasons[@]}" -eq 16 ]
   for reason in "${reasons[@]}"; do
     [[ $reason == "Reason: "* && ${reason#Reason: } != *"Reason: "* ]]
   done
@@ -1145,7 +1180,7 @@ of_security_system() {
   [[ ${reasons[1]} == *cilium-sysctlfix*nsenter*Talos*overlay* ]]
   [[ ${reasons[1]} == *"names a path and not a file, so it excepts whatever that container"*"runs at that one path"* ]]
   [[ ${reasons[1]} == *"any binary that container runs from an upper layer at any other path, cilium-sysctlfix included, still matches"* ]]
-  # Each of the twelve after them ends saying what still matches, held whole so that a reason that
+  # Each of the fourteen after them ends saying what still matches, held whole so that a reason that
   # leaves part of it out fails; and each that excepts in the namespace ascender then says the price
   # of a pod made to look like its container there, which whoever holds Ascender's admin login can
   # start (docs/kubernetes.md, Ascender).
@@ -1181,6 +1216,12 @@ of_security_system() {
   # process not established, and what still matches.
   [[ ${reasons[13]} == *O_TRUNC*containerd_activities*"not established"* ]]
   [[ ${reasons[13]} == *": the same truncation by any process in a container, and of any file outside that path, still matches." ]]
+  # ReportPortal's two callers of the API server: wait_for.sh's kubectl in the init container that
+  # waits for the migrations Job, and the pre-upgrade hook's kubectl, each with what still matches.
+  [[ ${reasons[14]} == *migrations-waiting-init*wait_for.sh*/usr/local/bin/kubectl*job-wr* ]]
+  [[ ${reasons[14]} == *": the script's shell, the api, the jobs service and every other workload still match." ]]
+  [[ ${reasons[15]} == *reportportal-pre-upgrade-cleanup*/bin/kubectl*delete-job* ]]
+  [[ ${reasons[15]} == *": any other process in that container and every other workload still match." ]]
   # The items whose namespaces include ascender, the redirect rule's for the instance manager, the
   # API server rule's for the task container, the operator, the instance manager and the sidecar,
   # and the shell rule's: each reason ends with that price.
@@ -1572,6 +1613,7 @@ of_security_system() {
   local awx=kubernetes/apps/base/ascender/ascender/app/awx.yaml operator=kubernetes/apps/base/ascender/ascender-operator/app/helmrelease.yaml
   local vector=kubernetes/apps/base/monitoring/vector/app/values.yaml kyverno=kubernetes/apps/base/kyverno/kyverno/app/values.yaml
   local robot=kubernetes/apps/base/robot/robot/ks.yaml index job repository terms bullet sentence
+  local reportportal=kubernetes/apps/base/reportportal/reportportal/app/values.yaml
   render
   local_rules
   # The sixth item replaces the placeholder of the rule Contact K8S API Server From Container, which
@@ -1595,6 +1637,16 @@ of_security_system() {
   excepts_item 9 "Kyverno's reports controller" reports_controller_exception "$REPO"
   excepts_item 10 "CloudNativePG's instance manager" instance_manager_exception "$REPO"
   excepts_item 11 "the Barman Cloud plugin's sidecar" sidecar_exception "$REPO"
+  # ReportPortal's two callers, appended to the same placeholder after the log-clearing item: the
+  # kubectl of the init container that waits for the migrations Job in the api's and the jobs
+  # service's pods, and the pre-upgrade hook's.
+  for index in 14 15; do
+    item "$index"
+    [ "$MACRO" = user_known_contact_k8s_api_server_activities ] && [ "$OVERRIDE" = append ] ||
+      { echo "the local rules' item $((index + 1)) is a $OVERRIDE of $MACRO"; return 1; }
+  done
+  excepts_item 14 "ReportPortal's wait for the migrations" wait_for_exception "$REPO"
+  excepts_item 15 "ReportPortal's pre-upgrade hook" hook_exception "$REPO"
   # No item names the container of Ascender's job pods, nor the image they and the task pod's
   # ascender-ee run, in any term: those pods, as Ascender starts them, stay watched whole.
   job="$(job_container)"
@@ -1610,7 +1662,7 @@ of_security_system() {
   done <<<"$AT_JOB_REPOSITORIES"
   # The log collector, Kyverno or the operator on another image, and an AWX of another name, whose
   # task container the operator names after it, are no longer what the items name; nor is a set of
-  # databases that a fourth application joins, whose namespace the items then leave out. Each fails,
+  # databases that a fifth application joins, whose namespace the items then leave out. Each fails,
   # saying what the workload is now.
   tree_without
   yq -i '.image.repository = "registry.example.com/timberio/vector"' "$TREE/$vector"
@@ -1645,11 +1697,22 @@ of_security_system() {
   run excepts_item 10 "CloudNativePG's instance manager" instance_manager_exception "$TREE"
   echo "$output"
   [ "$status" -ne 0 ]
-  [[ $output == *"and CloudNativePG's instance manager is or "*'k8s.ns.name in ("ai-system", "ascender", "backstage", "robot")'* ]]
+  [[ $output == *"and CloudNativePG's instance manager is or "*'k8s.ns.name in ("ai-system", "ascender", "backstage", "reportportal", "robot")'* ]]
   run excepts_item 11 "the Barman Cloud plugin's sidecar" sidecar_exception "$TREE"
   echo "$output"
   [ "$status" -ne 0 ]
-  [[ $output == *"and the Barman Cloud plugin's sidecar is or "*'k8s.ns.name in ("ai-system", "ascender", "backstage", "robot")'* ]]
+  [[ $output == *"and the Barman Cloud plugin's sidecar is or "*'k8s.ns.name in ("ai-system", "ascender", "backstage", "reportportal", "robot")'* ]]
+  # ReportPortal's wait and hook on another registry are no longer what their items name.
+  tree_without
+  yq -i '.global.imageRegistry = "registry.example.com"' "$TREE/$reportportal"
+  run excepts_item 14 "ReportPortal's wait for the migrations" wait_for_exception "$TREE"
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"and ReportPortal's wait for the migrations is or "*'container.image.repository = "registry.example.com/reportportal/k8s-wait-for"'* ]]
+  run excepts_item 15 "ReportPortal's pre-upgrade hook" hook_exception "$TREE"
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"and ReportPortal's pre-upgrade hook is or "*'container.image.repository = "registry.example.com/rancher/kubectl"'* ]]
   # Tuning lists each with why it calls the API server and what still matches, each line held whole:
   # the restore's Jobs among it, whose own containers still match and into two of which the Barman
   # Cloud plugin puts its sidecar as well.
@@ -1660,7 +1723,9 @@ of_security_system() {
     "The log collector (\`monitoring\`, \`vector\`, \`docker.io/timberio/vector\`, \`vector\`), which watches pods, namespaces and nodes for the metadata of its \`kubernetes_logs\` source; any other process in that container still matches." \
     "Kyverno's admission controller (\`kyverno\`, \`kyverno\`, \`reg.kyverno.io/kyverno/kyverno\`, \`kyverno\`) and reports controller (\`kyverno\`, \`controller\`, \`reg.kyverno.io/kyverno/reports-controller\`, \`reports-control\`), which watch the policies and what runs and write their reports; the init container \`kyverno-pre\` and the chart's Jobs still match." \
     "CloudNativePG's instance manager (the databases' namespaces, \`initdb\`, \`join\` and \`postgres\`, the component's image, \`manager\`), which reads and writes its \`Cluster\`; the one container of each Job of a restore, named after its role, \`full-recovery\`, \`import\`, \`pgbasebackup\` or \`snapshot-recovery\`, still matches, and so does PostgreSQL itself in the three." \
-    "The Barman Cloud plugin's sidecar (the databases' namespaces, \`plugin-barman-cloud\`, \`ghcr.io/cloudnative-pg/plugin-barman-cloud-sidecar\`, \`manager\`), which reads its \`ObjectStore\` and the credentials it names, as \`/manager instance\` in each instance's pod and as \`/manager restore\` in the \`full-recovery\` or \`snapshot-recovery\` Job of a restore from the plugin's archive, where the plugin puts it as well (\`reconcileJob\` in \`internal/cnpgi/operator/lifecycle.go\`); it is excepted in both, and any other process in it, and the restore Job's own container, still match."; do
+    "The Barman Cloud plugin's sidecar (the databases' namespaces, \`plugin-barman-cloud\`, \`ghcr.io/cloudnative-pg/plugin-barman-cloud-sidecar\`, \`manager\`), which reads its \`ObjectStore\` and the credentials it names, as \`/manager instance\` in each instance's pod and as \`/manager restore\` in the \`full-recovery\` or \`snapshot-recovery\` Job of a restore from the plugin's archive, where the plugin puts it as well (\`reconcileJob\` in \`internal/cnpgi/operator/lifecycle.go\`); it is excepted in both, and any other process in it, and the restore Job's own container, still match." \
+    "ReportPortal's wait for its migrations (\`reportportal\`, \`migrations-waiting-init\`, \`docker.io/reportportal/k8s-wait-for\`, \`kubectl\`), which asks for the migrations Job until it has completed, in the api's and the jobs service's pods; the script's shell, the api and the jobs service still match." \
+    "ReportPortal's pre-upgrade hook (\`reportportal\`, \`delete-job\`, \`docker.io/rancher/kubectl\`, \`kubectl\`), which deletes the migrations Job before an upgrade; any other process in that container still matches."; do
     [[ $DOCS == *"- $bullet "* ]] || { echo "Tuning does not list: $bullet"; return 1; }
   done
   # Tuning says what stays reported of the job pods, as Ascender starts them, and the price of every
@@ -1700,7 +1765,7 @@ of_security_system() {
   [[ $DOCS == *"- \`Run shell untrusted\`, Notice, \`user_shell_container_exclusions\` replaced: PostgreSQL's archiver in every database of the component (the databases' namespaces, \`postgres\`, the component's image, the parent \`postgres\` and a command line that starts with the archive command up to \`pg_wal/\`); any other command PostgreSQL runs through a shell still matches. "* ]]
   [[ $DOCS == *"so \`ascender-db\` is expected to archive a segment about every five minutes, and a database nothing writes to, none; that is reasoning, which only the cluster shows (What no proof shows, below)."* ]]
   # A component on another image, or on an image of another Debian release, whose glibc is to be
-  # read again, and a set of databases that a fourth application joins, fail, saying what the
+  # read again, and a set of databases that a fifth application joins, fail, saying what the
   # databases are now.
   tree_without
   yq -i '.spec.imageName = "registry.example.com/cloudnative-pg/postgresql:18.6-standard-trixie"' "$TREE/$cluster"
@@ -1719,11 +1784,11 @@ of_security_system() {
   run excepts_item 12 "PostgreSQL's archiver" archiver_exception "$TREE"
   echo "$output"
   [ "$status" -ne 0 ]
-  [[ $output == *"and PostgreSQL's archiver is ("*'k8s.ns.name in ("ai-system", "ascender", "backstage", "robot")'* ]]
+  [[ $output == *"and PostgreSQL's archiver is ("*'k8s.ns.name in ("ai-system", "ascender", "backstage", "reportportal", "robot")'* ]]
   run excepts_item 4 "CloudNativePG's instance manager" instance_manager_redirect_exception "$TREE"
   echo "$output"
   [ "$status" -ne 0 ]
-  [[ $output == *"and CloudNativePG's instance manager is or "*'k8s.ns.name in ("ai-system", "ascender", "backstage", "robot")'* ]]
+  [[ $output == *"and CloudNativePG's instance manager is or "*'k8s.ns.name in ("ai-system", "ascender", "backstage", "reportportal", "robot")'* ]]
 }
 
 @test "The log-clearing rule excepts the truncation of log files inside containerd's image snapshots on the node, and nothing in a container" {
@@ -1821,7 +1886,7 @@ printed() {
   local_rules
   runtime_detection_docs
   # The exceptions as the tree makes them, each read from what runs, as the proofs above read them.
-  for name in task operator vector kyverno reports_controller instance_manager sidecar archiver clear_log; do
+  for name in task operator vector kyverno reports_controller instance_manager sidecar archiver clear_log wait_for hook; do
     expected="$("${name}_exception" "$REPO")" || { echo "$expected"; return 1; }
     conditions+=("$expected")
   done
@@ -1839,7 +1904,7 @@ printed() {
   # in parentheses, joined by or: nothing else of the rule changes.
   for rule in "Contact K8S API Server From Container" "Run shell untrusted" "Clear Log Activities"; do
     case "$rule" in
-      Contact*) priority=Notice expected="$(printed "$macro" "${conditions[@]:0:7}")" ;;
+      Contact*) priority=Notice expected="$(printed "$macro" "${conditions[@]:0:7}" "${conditions[@]:9:2}")" ;;
       Run*) priority=Notice expected="$(printed "$macro" "${conditions[7]}")" ;;
       Clear*) priority=Warning expected="$(printed "$macro" "${conditions[8]}")" ;;
     esac

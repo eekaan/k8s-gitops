@@ -1,0 +1,273 @@
+---
+# The values of the reportportal release, a ConfigMap of the Kustomization (kustomization.yaml). They
+# are not passed through Flux's substitution. Keys not set here keep the chart's defaults; what the
+# chart has no value for is in the HelmRelease's post-renderer (docs/kubernetes.md, ReportPortal).
+
+global:
+  # Put before every image's repository, the chart's own and RabbitMQ's, so that each reference names
+  # its registry.
+  imageRegistry: docker.io
+  # One replica of each service, so no disruption budget: the chart's, one pod unavailable at a
+  # time, would let a drain evict each one all the same.
+  pdb:
+    create: false
+
+# The images: each tag names its digest, and the chart's repository follows the registry above. The
+# four of ReportPortal are of one release, which Renovate moves with the chart (.renovate/groups.json5).
+serviceui:
+  image:
+    # renovate: datasource=docker depName=docker.io/reportportal/service-ui
+    tag: 6.0.0@sha256:85dd589c23addffbd4cae0d1fbcfe66af511c41023fb0c6e7ec0375e474b97f3
+  pullPolicy: IfNotPresent
+  # nginx's user of the image, which its entrypoint otherwise runs as root.
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 101
+    runAsGroup: 101
+    fsGroup: 101
+    fsGroupChangePolicy: OnRootMismatch
+    seccompProfile:
+      type: RuntimeDefault
+  # The entrypoint writes config.json into the html directory, which the image owns as root, so the
+  # directory is an emptyDir that this container fills first with the image's own files, as the ui's
+  # user. cp -R, as a user that is not root cannot keep the files' root owner, which cp -a tries and
+  # complains of for each file.
+  extraInitContainers:
+    - name: copy-html
+      image: docker.io/reportportal/service-ui:6.0.0@sha256:85dd589c23addffbd4cae0d1fbcfe66af511c41023fb0c6e7ec0375e474b97f3
+      imagePullPolicy: IfNotPresent
+      command:
+        - cp
+        - -R
+        - /usr/share/nginx/html/.
+        - /html-copy/
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop:
+            - ALL
+        readOnlyRootFilesystem: true
+      resources:
+        requests:
+          cpu: 50m
+          memory: 100Mi
+        limits:
+          cpu: 50m
+          memory: 100Mi
+      volumeMounts:
+        - name: html
+          mountPath: /html-copy
+  # What the ui writes, with a read-only root: the generated nginx.conf and nginx's pid in /tmp, its
+  # temporary files in /var/cache/nginx, and config.json in the html directory.
+  extraVolumes:
+    - name: tmp
+      emptyDir: {}
+    - name: nginx-cache
+      emptyDir: {}
+    - name: html
+      emptyDir: {}
+  extraVolumeMounts:
+    - name: tmp
+      mountPath: /tmp
+    - name: nginx-cache
+      mountPath: /var/cache/nginx
+    - name: html
+      mountPath: /usr/share/nginx/html
+
+serviceapi:
+  image:
+    # renovate: datasource=docker depName=docker.io/reportportal/service-api
+    tag: 6.0.0@sha256:54da4235d5cf3565481029b52dc3f4013fd7d8001c4e372f7d4117d929852752
+  pullPolicy: IfNotPresent
+  # The files' claim is ReadWriteOnce: the old pod goes before the new one starts, and the api prefers
+  # the node of the jobs pod, which requires the api's, so a new api pod goes where the volume is
+  # when that node has room for it; on another node it waits for the volume until the jobs pod is
+  # restarted, and the new jobs pod follows it there.
+  strategy:
+    type: Recreate
+  affinity:
+    podAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            labelSelector:
+              matchLabels:
+                component: reportportal-jobs
+            topologyKey: kubernetes.io/hostname
+  # User and group 1000: the image runs as root by default, and writes only /tmp, its audit log's
+  # directory and the files' volume.
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    fsGroupChangePolicy: OnRootMismatch
+    seccompProfile:
+      type: RuntimeDefault
+  # /tmp holds the plugins (rp.plugins.rootDir) and Tomcat's work files; logback opens
+  # /var/log/reportportal/audit.log at start, empty while AUDIT_LOGGER is unset, and stops the api
+  # when it cannot.
+  extraVolumes:
+    - name: tmp
+      emptyDir: {}
+    - name: audit-log
+      emptyDir: {}
+  extraVolumeMounts:
+    - name: tmp
+      mountPath: /tmp
+    - name: audit-log
+      mountPath: /var/log/reportportal
+  auth:
+    # The first password of the superadmin, generated in the cluster (secrets.yaml).
+    superadminInitPasswd:
+      secretName: reportportal-superadmin
+      passwordKeyName: password
+  extraEnvs:
+    # rp.plugins.default.load: when true, at every start the api reads the JUnit import plugin's
+    # index from the develop branch of the plugin's GitHub repository, downloads the newest jar it
+    # lists and loads it (PluginStartUpService). Off, so the api fetches and runs no code from outside
+    # the tree's pins.
+    - name: RP_PLUGINS_DEFAULT_LOAD
+      value: "false"
+
+servicejobs:
+  image:
+    # renovate: datasource=docker depName=docker.io/reportportal/service-jobs
+    tag: 6.0.0@sha256:004a855f1ef0bcda221111f541ecd4417410209a03018755badc762cd583f674
+  pullPolicy: IfNotPresent
+  # Beside the api, on the node that holds the files' volume (above).
+  strategy:
+    type: Recreate
+  affinity:
+    podAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchLabels:
+              component: reportportal-api
+          topologyKey: kubernetes.io/hostname
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    fsGroupChangePolicy: OnRootMismatch
+    seccompProfile:
+      type: RuntimeDefault
+  # /tmp for Tomcat's work files. The container's mount is the post-renderer's: the chart writes
+  # extraVolumeMounts at another indentation than the files' mount in filesystem mode, and its output
+  # does not parse.
+  extraVolumes:
+    - name: tmp
+      emptyDir: {}
+  extraEnvs:
+    # rp.environment.variable.ga.mId and .id: with both set, as the image's own configuration sets
+    # them, the job defectUpdateStatisticsJob posts once a day the counts of defect types set by
+    # users and the analyzer that the api has recorded to Google Analytics' Measurement Protocol
+    # (DefectUpdateStatisticsJob). Empty, so the job returns before it sends anything.
+    - name: RP_ENVIRONMENT_VARIABLE_GA_MID
+      value: ""
+    - name: RP_ENVIRONMENT_VARIABLE_GA_ID
+      value: ""
+
+migrations:
+  image:
+    # renovate: datasource=docker depName=docker.io/reportportal/migrations
+    tag: 6.0.0@sha256:d11c2ef131080dc0ecf8c637b6eb8141ca45565f05305adbf1522f047df793a7
+  pullPolicy: IfNotPresent
+  # The image's own user, nonroot, by its number, which the restricted level needs to see non-root.
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+
+# The init container of the api and the jobs pods, which waits for the migrations Job to complete,
+# and the hook's kubectl, which deletes that Job before an upgrade.
+k8sWaitFor:
+  image:
+    # renovate: datasource=docker depName=docker.io/reportportal/k8s-wait-for
+    tag: 2.1.7@sha256:21394b3462857f17b6cbfa12bd89d70feace9c663507866fde0428cceadf3d1e
+kubectl:
+  image:
+    # renovate: datasource=docker depName=docker.io/rancher/kubectl
+    tag: v1.35.6@sha256:4f097593e791b1b5e4a67f74cef838034975384789ac87defa3aff50c1c8061f
+
+# The database of components/cnpg-cluster, through the Secret its operator makes, over TLS.
+database:
+  secretName: reportportal-db-app
+  passwordKeyName: password
+  endpoint: reportportal-db-rw.reportportal.svc.cluster.local
+  user: app
+  dbName: app
+  ssl: require
+
+# RabbitMQ's credentials, generated in the cluster (secrets.yaml): the api and the jobs service read
+# the key rabbitmq-password of this Secret.
+msgbroker:
+  secretName: reportportal-rabbitmq
+
+# Files on the component's volume, which the api and the jobs service mount at this path.
+storage:
+  type: filesystem
+  volume:
+    defaultPath: /data/storage
+
+# The chart's own route and Ingress are off: reportportal-route serves it behind the cluster's sign-in.
+ingress:
+  enable: false
+gatewayAPI:
+  enable: false
+
+# Off, with what each would bring: the MCP server and the paid tier.
+mcp:
+  enabled: false
+premium:
+  testExecutions:
+    enabled: false
+  scim:
+    enabled: false
+
+# The pre-upgrade hook deletes the migrations Job, whose template cannot change, before an upgrade;
+# the test hook would run curl from an image the chart names by latest.
+hooks:
+  preUpgrade:
+    enabled: true
+  test:
+    enabled: false
+rbac:
+  create: true
+
+# The database is the component's, the files are on the volume, and the analyzer, the one reader of
+# OpenSearch, is deleted by the post-renderer.
+postgresql:
+  install: false
+opensearch:
+  install: false
+seaweedfs:
+  install: false
+
+rabbitmq:
+  install: true
+  # The parent chart names RabbitMQ's tag without the digest its own chart carries: the digest of that
+  # tag, pinned here.
+  image:
+    # renovate: datasource=docker depName=docker.io/rabbitmq
+    tag: 4.4.0-management@sha256:753099a19b577c322117f793f864b3129cbba96d40317221a69d73976e3c843c
+    imagePullPolicy: IfNotPresent
+  # The credentials of its default user and its Erlang cookie, generated in the cluster
+  # (secrets.yaml), so the chart makes no Secret of its own.
+  auth:
+    existingSecret: reportportal-rabbitmq
+    existingPasswordKey: password
+    existingErlangCookieKey: erlang-cookie
+  # The chart sets none; these are not measured.
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 512Mi
+  # Reports in flight only, not backed up; on the default class.
+  persistence:
+    size: 1Gi

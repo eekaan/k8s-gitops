@@ -1,0 +1,53 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/kustomization-kustomize-v1.json
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: reportportal
+  namespace: flux-system
+  labels:
+    # The database's three instances start one after another, the files' volume is made from a
+    # restore of its repository, and the migrations run before the api and the jobs service start,
+    # so the first rollout takes longer than the default.
+    k8s-gitops/timeout: long
+spec:
+  path: ./apps/base/reportportal/reportportal/app
+  targetNamespace: reportportal
+  # The database, from the cnpg-cluster component, and the files' volume and its backup, from the
+  # volsync component: ReportPortal's state is those two (docs/kubernetes.md, ReportPortal).
+  components:
+    - ../../../../../components/cnpg-cluster
+    - ../../../../../components/volsync
+  postBuild:
+    substitute:
+      CNPG_CLUSTER_NAME: reportportal-db
+      CNPG_NAMESPACE: reportportal
+      # Launches, their test items and their logs, which each project keeps 90 days by default.
+      # The volume holds the WAL of an archive outage as well (docs/kubernetes.md, PostgreSQL).
+      CNPG_STORAGE_SIZE: 5Gi
+      APP: reportportal
+      # The claim the chart's api and jobs Deployments mount by this name, which the release's
+      # post-renderer deletes from the chart's render so that the component's takes its place.
+      VOLSYNC_CLAIM: reportportal-shared-volume-claim
+      VOLSYNC_CAPACITY: 5Gi
+      VOLSYNC_SCHEDULE: "53 3 * * *"
+  # The Cluster and its PodMonitor are of the operator's and Prometheus Operator's kinds, and its
+  # ObjectStore the Barman Cloud plugin's, which archives its WAL; the ExternalSecrets and the
+  # Password generators are External Secrets', and the backups' keys are read from the store, which
+  # openbao-store makes; the volume and its snapshots come from LINSTOR's default classes and the
+  # backups from VolSync; the network policies are a kind Cilium's operator defines.
+  dependsOn:
+    - name: cloudnative-pg
+    - name: plugin-barman-cloud
+    - name: prometheus-operator-crds
+    - name: external-secrets
+    - name: openbao-store
+    - name: volsync
+    - name: linstor-cluster
+    - name: cilium
+  # Ready once the release is, which is once the api answers its health endpoint with RabbitMQ up
+  # and the jobs service's Deployment is ready, after the migrations have run on the database.
+  wait: true
+  sourceRef:
+    kind: ExternalArtifact
+    name: reportportal
