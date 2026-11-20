@@ -58,6 +58,7 @@ configMapGenerator:
       - catalogue/domain.yaml
       - catalogue/envoy-gateway-crds.yaml
       - catalogue/envoy-gateway.yaml
+      - catalogue/escape-canary.yaml
       - catalogue/etcd-snapshots.yaml
       - catalogue/external-dns-dashboard.yaml
       - catalogue/external-dns.yaml

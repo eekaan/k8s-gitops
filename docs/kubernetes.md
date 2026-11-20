@@ -665,6 +665,7 @@ once it is not, and the agents' rendered configuration agrees.
 | `open-feature-operator` | default deny | the OpenFeature Operator takes the kubelet's probes on 8081, Prometheus' scrape on 8080 and the API server's calls to its webhooks on 9443, and reaches the API server alone. |
 | `locust` | default deny | Locust's master takes its workers on 5557, and the proxies and the kubelet's probe on 8089, and sends nothing; the workers take nothing and reach the resolver, the master on 5557 and `hello`'s pods in `demo` on 8080. |
 | `robot` | default deny | Robot Framework's runner takes nothing and reaches the resolver, `hello`'s pods in `demo` on 8080 and Ascender's web pods in `ascender` on 8052; the report server takes the kubelet's probe on 8080 and sends nothing. |
+| `escape-canary` | default deny | the escape canary's pods take nothing and reach the resolver, and the rights check's pods the API server on 443 and 6443; everything else its network check attempts is what the default deny forbids. |
 | `ai-system` | listed | applications whose allows are not written, not a namespace that cannot have the posture. n8n takes the proxies on 5678 and reaches its database, the resolver and whatever its workflows call outside; the PostgreSQL instances take n8n, each other and the operator, and reach the API server, and their Barman Cloud sidecars reach the object storage on 443 and the API server; the dump job reaches the database, the hosts age's release is downloaded from and the object storage; Open WebUI takes the proxies on 8080 and reaches nothing until an administrator turns on a connection that calls out; the backup movers reach the object storage on 443. The proxies reach n8n's 5678 and Open WebUI's 8080 alone there and forward only to their Services, PostgreSQL authenticates every client, Pod Security, node firewall. |
 | `etcd-snapshots` | listed | an application whose allows are not written, not a namespace that cannot have the posture. The snapshot job takes nothing and reaches the Talos API through `talos.default`, the object storage, the hosts age's release is downloaded from (its URL redirects to a second host, which serves the file) and the resolver. Talos' own authorisation of its one role, Pod Security, node firewall. |
 | `external-dns` | listed | an application whose allows are not written, not a namespace that cannot have the posture. external-dns takes Prometheus' scrape and the kubelet's probes on 7979 and nothing else, and reaches the API server, the DNS provider's API on 443 and the resolver; the Jobs of `just cluster-dns-remove` reach only the provider's API and the resolver. Its token, scoped to zone read and DNS edit on the cluster's one zone, its name filter, a ClusterRole that only reads, Pod Security, node firewall ([DNS records](#dns-records)). |
@@ -867,6 +868,15 @@ once it is not, and the agents' rendered configuration agrees.
   well, so they read the reports too, and sends nothing; `just robot` reaches it through a port
   forward, which the container runtime connects inside the pod on its loopback, where no policy
   applies ([Robot Framework](#robot-framework)).
+- **`escape-canary`.** Every pod of the escape canary, by the label `k8s-gitops/escape-canary: "true"`
+  that both CronJobs give their pods, takes nothing, as the checks listen on nothing, and reaches the
+  resolver on 53, UDP and TCP, by `escape-canary-resolver`; the rights check's pods, by their labels
+  (`app.kubernetes.io/name: escape-canary`, `app.kubernetes.io/component: rights`), also reach the
+  API server on 443 and 6443, by `escape-canary-rights-api-server`, so that their requests reach its
+  authorisation in either mode. Nothing else: the metadata address, the nodes, the API server for the
+  network check's pods, `hello` and the secret store are what the network check attempts, and their
+  denial once the cluster enforces is its table's enforcement column; while it audits, each is a flow
+  that a policy would drop, reported and passed ([The escape canary](#the-escape-canary)).
 - **The object storage's port.** cluster-config holds the object storage's endpoint as a URL, which
   a DNS name rule cannot take, so the movers' rule is the world on 443: the port https uses for an
   endpoint that names none, as cluster-config's example does and `tests/network-policy.bats` holds
@@ -979,10 +989,11 @@ namespace and the policy, when
   the nodes. A reason excuses none of these.
 
 The check reads only what the render holds. Besides the policies of `ascender`, `backstage`,
-`crowdsec`, `demo`, `envoy-gateway-system`, `kromgo`, `locust`, `open-feature-operator`,
-`security-system` and `sso-system`, that is one policy of a listed namespace: `flux-operator-web`,
-the `NetworkPolicy` the Flux Operator's chart renders in `flux-system`, which lets every pod of
-every namespace (an empty `namespaceSelector`) reach the operator's web interface on 9080. It passes
+`crowdsec`, `demo`, `envoy-gateway-system`, `escape-canary`, `kromgo`, `locust`,
+`open-feature-operator`, `security-system` and `sso-system`, that is one policy of a listed
+namespace: `flux-operator-web`, the `NetworkPolicy` the Flux Operator's chart renders in
+`flux-system`, which lets every pod of every namespace (an empty `namespaceSelector`) reach the
+operator's web interface on 9080. It passes
 because `flux-system` is listed; the day `flux-system` takes the default deny, the check refuses it,
 as a `NetworkPolicy` other than the default deny and as an allow of every pod of every namespace.
 The `NetworkPolicy` objects the operator makes for the Flux instance, which its
@@ -1318,15 +1329,20 @@ does not matter.
 2. **The policies merge.** The root applies the default denies, the applications apply their allows,
    and the agents evaluate both and drop nothing they deny; what a policy would drop is reported as
    `AUDIT`. As the allows land after the denies, `AUDIT` flows of `ascender`, `backstage`,
-   `crowdsec`, `demo`, `envoy-gateway-system`, `kromgo`, `locust`, `open-feature-operator`,
-   `robot`, `security-system` and `sso-system` from before they landed are expected, such as the proxies to
-   `hello` on 8080 and to the controller on 18000, and the controller to the API server, and an
-   agent's recent flows can hold them for a while.
+   `crowdsec`, `demo`, `envoy-gateway-system`, `escape-canary`, `kromgo`, `locust`,
+   `open-feature-operator`, `robot`, `security-system` and `sso-system` from before they landed are
+   expected, such as the proxies to `hello` on 8080 and to the controller on 18000, and the
+   controller to the API server, and an agent's recent flows can hold them for a while. The escape
+   canary's `AUDIT` lines are expected at any time while the cluster audits: they are its network
+   check's attempts at what the policies forbid, every hour
+   ([The escape canary](#the-escape-canary)).
 3. **Watch a day of the record**, from the moment the Kustomizations that hold the allows, `hello`,
    `demo-volsync-movers`, `envoy-gateway`, `kromgo`, `dex`, `oauth2-proxy`, `backstage`, `falco`,
    `crowdsec`, `open-feature-operator`, `network-audit`, `ascender-operator`, `ascender`, `locust`,
-   `robot` and `robot-ascender`, are Ready at the merge's revision (`flux get kustomizations`). The
-   flow recorder writes every flow a policy would drop to the log store
+   `robot`, `robot-ascender` and `escape-canary`, are Ready at the revision the merge gives them
+   (`flux get kustomizations`, where each one's revision is the digest of its artifact, its
+   application's `app/`, which holds its allows, and the components). The flow recorder writes every
+   flow a policy would drop to the log store
    ([The record of what policy drops](#the-record-of-what-policy-drops)), so each path needs to be
    taken only once: `just gateway-check`; `just cluster-check`; the secret demo
    (`just secret-rotate demo/hello greeting`); a badge asked of kromgo by its name, which has kromgo
@@ -1349,13 +1365,22 @@ does not matter.
    the base backup of `backstage-db` at 02:47 UTC, the same two of `ascender-db`, the nightly
    backup of `volsync-demo` at 03:17, and its restore drill's restore at 04:17 and check at 05:17
    ([The restore drill](#the-restore-drill)), and the nightly run of `robot-suites` at 05:45
-   ([Robot Framework](#robot-framework)).
+   ([Robot Framework](#robot-framework)). The escape canary's two checks need nothing to start them
+   either and run in any window: `escape-canary-network` at :23 every hour and
+   `escape-canary-rights` at :10 every hour ([The escape canary](#the-escape-canary)).
    Once the allows have been Ready for 24 hours, and within 24 hours of taking the paths above, so
    that the window holds them and one nightly backup, one dump, one base backup, one drill and one
    run of the suites, `just network-audit 24h` must exit 0 and print no `AUDIT` line whose
    `NAMESPACE` is a namespace that holds the default deny: `ascender`, `backstage`, `crowdsec`,
-   `demo`, `envoy-gateway-system`, `kromgo`, `locust`, `open-feature-operator`, `robot`,
-   `security-system` or `sso-system`. Exit 0 says that
+   `demo`, `envoy-gateway-system`, `escape-canary`, `kromgo`, `locust`, `open-feature-operator`,
+   `robot`, `security-system` or `sso-system`. The escape canary's `AUDIT` lines are the one
+   exception, and are expected: those whose `SOURCE` starts with `escape-canary/`, which is
+   `escape-canary/CronJob/escape-canary-network` on the node that reported the line,
+   `escape-canary/<pod>` when another node did, and `escape-canary/Job/<name>` for a run made by
+   hand, of `NAMESPACE` `escape-canary`, egress, for each of the network check's attempts but the
+   resolver's, and of `NAMESPACE` `demo`, `hello`'s ingress, the lines of `demo` that another node
+   reported one for each pod, with `COUNT`s summing to about 21 for each run of the network check,
+   one an hour ([The escape canary](#the-escape-canary)). Exit 0 says that
    the recorder's container ran through those 24 hours and that the table is not cut, and what the
    record can miss even then is in
    [The record of what policy drops](#the-record-of-what-policy-drops); a run that exits 1 says what
@@ -1363,8 +1388,9 @@ does not matter.
    the run counts, are read with the query it prints: events Hubble lost, which its `lost_events`
    records count whatever their verdict, and a node Relay could not read are where the record may
    lack flows.
-   An `AUDIT` line of one of those namespaces is a missing allow, added beside its application in a
-   pull request while the cluster still audits, or a pod doing what it should not; a flow from
+   Any other `AUDIT` line of one of those namespaces is a missing allow, added beside its
+   application in a pull request while the cluster still audits, or a pod doing what it should not;
+   a flow from
    `@remote-node` to the proxies' listener ports or to a webhook's 9443, Envoy Gateway's or the
    OpenFeature Operator's, would be such a line.
    `AUDIT` lines whose `NAMESPACE` is `flux-system` are expected: Flux's own policies and the Flux
@@ -1404,6 +1430,10 @@ does not matter.
      and its checks of `enable-policy` and the checksum stay as they are, the comment above the
      former becoming "Enforcement stays in its default mode, so the agents enforce the policies:
      never would enforce none."
+   - `kubernetes/apps/base/escape-canary/escape-canary/ks.yaml`: `ESCAPE_CANARY_MODE: audit` becomes
+     `ESCAPE_CANARY_MODE: enforce`, so the escape canary holds its results to its table's
+     enforcement column; `tests/escape-canary.bats` fails while the mode and the rendered
+     `cilium-config` disagree, saying which to set.
    - `docs/roadmap.md`, M8's row: "the namespaces' default deny with their allows in `backstage`,
      `crowdsec`, `demo`, `envoy-gateway-system`, `kromgo`, `security-system` and `sso-system`" gains ", which
      Cilium enforces", and the clause "; and network policy that drops anything, as Cilium audits
@@ -1418,13 +1448,31 @@ does not matter.
    paths of step 3 again; `just network-audit` then prints, where a policy denied, `DROPPED` lines
    with the reason `POLICY_DENIED`: each whose `NAMESPACE` is an application namespace is an
    intended denial, and those of `flux-system` are what Flux's own policies dropped before the
-   cluster audited.
+   cluster audited. The escape canary's attempts are such lines of `NAMESPACE` `escape-canary`
+   alone, as its egress drops each before it reaches `hello`, two for each packet: the SYN and its
+   retransmissions within `nc`'s 3 seconds, two or three, so four to six for each of the six
+   attempts of each pod, `COUNT`s summing to 72 to 108 a run; its runs pass, holding the
+   enforcement column. A run of the canary while its mode and the agents disagree, as the agents
+   restart and until Flux has applied both the release and the canary's mode, holds its results to a
+   column some agents do not follow and fails, raising `EscapeCanaryUnexpectedResult` and the
+   chart's `KubeJobFailed`. A Kustomization's revision in `flux get kustomizations` is the digest of
+   its artifact, its application's `app/` and the components, which the edit of Cilium's values
+   changes and the edit of the canary's `ks.yaml` does not. So once the Kustomization `cilium` is
+   Ready at the revision the merge gives it, which it is only once its release has rolled every
+   agent, as in step 1, and both of the canary's CronJobs give the mode `enforce`, which
+   `kubectl --namespace escape-canary get cronjob --output jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.jobTemplate.spec.template.spec.containers[0].env[?(@.name=="CANARY_MODE")].value}{"\n"}{end}'`
+   prints for each, run each check by hand
+   (`kubectl --namespace escape-canary create job --from=cronjob/<cronjob> <name>`): its success
+   clears the first, and deleting a failed Job of the canary, once its lines are read, the second
+   ([The escape canary](#the-escape-canary)).
 5. **Back.** For the whole cluster: one pull request that reverses each edit of step 4, putting
    back the value and its comment, the audit paragraph, the scenario and its test under their audit
-   title, and the roadmap's clause; the agents restart into audit mode and drop nothing a policy
-   denies at layers 3 and 4. For one namespace: one pull request that deletes the
-   `networkpolicy-default-deny.yaml` line from the namespace directory's `kustomization.yaml` and
-   lists the namespace in `network-policy-exceptions.yaml` with its reason. Flux prunes the default
+   title, the escape canary's mode `audit`, and the roadmap's clause; the agents restart into audit
+   mode and drop nothing a policy denies at layers 3 and 4. A run of the canary while its mode and
+   the agents disagree fails as in step 4, and the same runs by hand clear it. For one namespace:
+   one pull request that
+   deletes the `networkpolicy-default-deny.yaml` line from the namespace directory's
+   `kustomization.yaml` and lists the namespace in `network-policy-exceptions.yaml` with its reason. Flux prunes the default
    deny; the namespace's allows stay and change nothing, as none asks for the default deny, so the
    namespace takes and sends everything, as before it had a policy; `tests/network-policy.bats`
    proves it on the objects.
@@ -1444,6 +1492,231 @@ whose peer only the live cluster shows, such as the callers of a webhook, is wat
 as the first namespaces were: the cluster audits again (step 5) while its policies land, and
 enforces again by step 4. While the cluster audits, a namespace takes the posture in one change,
 its default deny and its allows together.
+
+### The escape canary
+
+Network policy, the node firewall and RBAC are each checked offline against the render, and each can
+stop holding on the cluster without a manifest changing: an agent restarted into another mode, a
+binding a chart adds to every account, a node's rule rendered wrong. The escape canary keeps
+attempting what they forbid, every hour from three workers, and fails when a result is not the one
+the tree records for it, which an alert reads. It runs in the namespace `escape-canary`
+(`apps/base/escape-canary/`), which enforces the restricted Pod Security level and denies traffic by
+default, by plain manifests with kustomize; a cluster selects it with two entries of its overlay, the
+namespace directory and `escape-canary/ks.yaml`. The application names `cilium` and
+`prometheus-operator-crds` in `dependsOn`, the definitions of its policies' and its rule's kinds,
+and `hello` and `openbao`, which serve the Services its network check attempts, so that a run never
+meets a target that is not there yet; it sets `wait`. `tests/escape-canary.bats` holds what follows
+on the application built as Flux applies it, on the render and on the checks' scripts
+(`features/escape-canary.feature`); what it says of busybox 1.38.0, of the Flux CLI image's
+`kubectl`, v1.36.1, and of the pinned Cilium, Talos, Kubernetes, kube-state-metrics and Falco is read
+from their sources at those versions and, for the two images, seen in local runs of them with a
+read-only root, user 65534, no capability and no network but, for `kubectl`, an internal one to a
+stand-in API server.
+
+- **What runs.** Two CronJobs, each a check, each with a script from the ConfigMap
+  `escape-canary-scripts`:
+  - `escape-canary-network`, at 23 minutes past every hour, runs `network.sh` in busybox. It asks the
+    pod's resolver for `kubernetes.default.svc.cluster.local` (`resolver`), and opens a TCP
+    connection to the cloud's link-local metadata address on 80 (`metadata`), to the kubelet on 10250
+    (`kubelet`) and the Talos API on 50000 (`talos-api`) of the node it runs on, by the node's
+    address the downward API gives it, to the API server's Service by its name on 443
+    (`api-server`), to `hello.demo.svc.cluster.local` on 80 (`hello`) and to
+    `openbao.openbao.svc.cluster.local` on 8200, OpenBao's Service (`secret-store`). A TCP attempt
+    is `nc -z -v -v -w 3`, which completes the handshake, sends nothing and gives up on the
+    connection after 3 seconds: the 3 seconds bound the connect alone (`connect_w_timeout` in
+    `networking/nc_bloaty.c`), and the lookup of a name before it is bounded by the resolver's own
+    timeouts and, in the end, by the run's deadline. The lookup is `nslookup` under `timeout 5`.
+  - `escape-canary-rights`, at 10 minutes past every hour, runs `rights.sh` with the Flux CLI
+    image's `kubectl`, which asks the API server, with the pod's own token, for the Secret
+    `cluster-secrets` of `flux-system` (`read-secret`) and for the pods of every namespace
+    (`list-pods`), by name only, each under `timeout -s KILL 10`. It runs through the pod's in-cluster
+    configuration, which verifies the API server's certificate against the CA mounted with the
+    token. client-go takes that configuration only while no flag or kubeconfig file changes its
+    client configuration (`tools/clientcmd/merged_client_builder.go`), and `--request-timeout` is
+    such a flag: with it, `kubectl` turns to `http://localhost:8080`, as a local run showed, so the
+    call carries none and `timeout` bounds it, as OpenBao's guard does
+    ([How it initialises](#how-it-initialises)).
+
+  Each check makes every attempt of its rows of the table, in order, prints one line for each and a
+  summary, and exits 0 when every result is the table's for the mode, 1 when one is not, and 2, with
+  the reason, for a mode it does not know, a table it cannot read or a row it cannot attempt. A line
+  names the attempt by its role and never by address, and the tools' own messages, which name
+  addresses, are read and never printed:
+  `escape-canary network mode=audit node=<node> attempt=hello result=open expected=open ok`, or
+  `UNEXPECTED` at its end, then
+  `escape-canary network mode=audit node=<node> attempts=7 unexpected=0 ok`. The results are read
+  from the tools' status and messages: `nc`'s "open", "Connection refused", "Connection timed out",
+  which it writes when its 3 seconds end first, and "bad address" (`networking/nc_bloaty.c`);
+  `nslookup`'s answer with an address, its "server can't find" and its ";; connection timed out"
+  (`networking/nslookup.c`); `kubectl`'s success and its "Error from server (Forbidden)"; and a
+  call that `timeout` ends. Any other message is the result `other`, which no row expects.
+- **The table** is `app/expected.tsv`, which the ConfigMap `escape-canary-expected` carries to the
+  checks under a fixed name, read afresh at every run, and the tests read from the tree. Each row is
+  one attempt, its fields separated by tabs, as the file's header says: the attempt's role; its
+  check; its target, the name asked, `node` for the pod's own node, the metadata address, or `-` for
+  a request to the API server; its port and protocol; its reach, the peer and port the policies decide
+  it by once a Service's address is translated to a backend's, as `scripts/network-policy-check
+  --reach` names them; its result while Cilium audits; its result once Cilium enforces; and the
+  reason for both, a fact of the tree or of the pinned sources. The results are `open`, the
+  handshake completed or the resolver answered with an address; `refused`; `blocked`, no answer
+  within the attempt's bound; `unresolved`; `forbidden`, the API server answered 403; and `allowed`.
+
+  | Attempt | Reach | Audit | Enforce |
+  | --- | --- | --- | --- |
+  | `resolver` | `kube-system:k8s-app=kube-dns 53/udp` | open | open |
+  | `metadata` | `@world 80/tcp` | open | blocked |
+  | `kubelet` | `@host 10250/tcp` | open | blocked |
+  | `talos-api` | `@host 50000/tcp` | blocked | blocked |
+  | `api-server` | `@kube-apiserver 6443/tcp` | open | blocked |
+  | `hello` | `demo/Deployment/hello 8080/tcp` | open | blocked |
+  | `secret-store` | `openbao/StatefulSet/openbao 8200/tcp` | open | blocked |
+  | `read-secret` | `@kube-apiserver 6443/tcp` | forbidden | forbidden |
+  | `list-pods` | `@kube-apiserver 6443/tcp` | forbidden | forbidden |
+
+  Once the cluster enforces, each attempt's result is what the policies allow: the test asks
+  `scripts/network-policy-check --reach` for every row's reach from its check's CronJob over the
+  render, and fails unless it is denied exactly where the enforcement column says `blocked`. A denied
+  attempt is `blocked`, and not `refused`, as the agents answer nothing to a pod's packet that its
+  egress policy denies, where each of the canary's attempts is denied: `policy-deny-response: none`
+  in the rendered `cilium-config`, the chart's default, which the test holds. While the cluster
+  audits, the agents drop nothing a policy denies at layers 3 and 4 (`policy_can_egress` and
+  `policy_can_ingress` in `bpf/lib/policy.h` of Cilium v1.20.4), so only the node firewall blocks: a
+  pod reaches its own node by its pod address
+  ([ADR 0017](adr/0017-nodes-firewall-themselves-with-talos-ingress-firewall.md)), the kubelet's
+  listener of `talos/firewall.yaml` admits `pods` and Talos' API's does not, and a node's ingress
+  action `block` drops what no rule admits without an answer
+  (`buildIngressChain` in `internal/app/machined/pkg/controllers/network/nftables_chain_config.go`
+  of Talos v1.14.6, which sets the chain's policy to drop; the traffic Talos admits by itself, its
+  loopback, replies, rate-limited ICMP and the pod and service ranges among themselves, does not
+  cover a pod's address to its node's). The test reads the listener of each `node` row's port and
+  fails unless its audit result follows it, and unless no other row is `blocked` while Cilium audits.
+  The metadata row's `open` rests on the node masquerading the pod's connection to its own address,
+  as Cilium's iptables masquerading, which the rendered `cilium-config` runs (`enable-ipv4-masquerade`
+  on, no BPF masquerading or ip-masq-agent), excepts no link-local destination
+  (`Documentation/network/concepts/masquerading.rst` of v1.20.4), and on OpenStack's metadata
+  service answering an instance at that address, its documentation's; only the cluster shows it. The
+  address is one `scripts/check-address-literals` publishes as safe, so `.address-allowlist` holds
+  nothing for it. A change to what isolation allows, a deny of the metadata address or Cilium's
+  enforcement among them, changes the table in the same pull request, with its reason, and the
+  table never changes to match a result the cluster gave.
+- **The mode** is `ESCAPE_CANARY_MODE` of `ks.yaml`, `audit` today, which both CronJobs take as
+  `CANARY_MODE` and which says the column the checks hold their results to. The test fails unless it
+  is `audit` exactly while the rendered `cilium-config` holds `policy-audit-mode: "true"` and
+  `enforce` exactly while it does not, saying which to set; the change that makes the cluster enforce
+  sets it, and the way back puts it back ([Turning it on, and back](#turning-it-on-and-back)).
+- **Three workers.** Each run is an Indexed Job of three completions, all three at once, whose pods
+  require a node without the control planes' label `node-role.kubernetes.io/control-plane` and no
+  pod of the same Job on the same node: a required anti-affinity on `kubernetes.io/hostname` by the
+  pods' own labels, with `batch.kubernetes.io/controller-uid` as a match label key, which the API
+  server joins to the selector with the pod's own value (`MatchLabelKeys` in
+  `staging/src/k8s.io/api/core/v1/types.go` of Kubernetes v1.37.1), so another Job's pods do not
+  count, nor do pods that have ended, which the scheduler does not watch (`newPodInformer` in
+  `pkg/scheduler/scheduler.go`). A run makes no second attempt at a failed pod (`backoffLimit: 0`)
+  and is stopped after 300 seconds (`activeDeadlineSeconds`), its controller deleting the pods still
+  running; a second run does not start while one runs (`concurrencyPolicy: Forbid`), one that
+  cannot start within 600 seconds of its time is skipped, and each CronJob keeps its newest
+  successful Job and its three newest failed ones. With a worker cordoned or full, a run's third pod
+  stays pending, the two others make their attempts and print their lines, and the Job fails at its
+  deadline with `DeadlineExceeded`; three such runs in a row raise `EscapeCanaryStale`, never
+  `EscapeCanaryUnexpectedResult`. A worker lost between runs, powered off, hung or cut off from the
+  others, leaves the next run's third pod pending as well, and does more: OpenBao runs its three
+  members one to a worker, and its Service `openbao` publishes members that are not ready, so the
+  lost worker's member stays one of the Service's three backends until its pod object is removed,
+  which does not happen while its node does not answer (`staging/src/k8s.io/endpointslice/utils.go`
+  of Kubernetes v1.37.1 and `pkg/k8s/endpoints.go` of Cilium v1.20.4). The agents pick a backend at
+  random, so each surviving pod's `secret-store` attempt reaches that member one time in three and
+  gets no answer: `blocked` where the table says `open`, the pod exits 1 and the Job fails at once
+  with `BackoffLimitExceeded`. While a worker is lost, `EscapeCanaryUnexpectedResult` fires in more
+  than half the runs, though isolation holds, and `EscapeCanaryStale` after three runs that failed
+  either way. A worker lost while a pod of a scheduled run is on it, placed, starting or running,
+  stops its CronJob. Once the Job controller finds the run failed, at its deadline or on another
+  pod's result, it deletes that pod, which stays `Terminating` on the `NotReady` worker, as PodGC
+  removes a terminating pod from a node that still exists only once the node is not Ready and
+  carries the taint `node.kubernetes.io/out-of-service` (`pkg/controller/podgc/gc_controller.go`);
+  it adds no `Failed` condition to a Job while a pod of it terminates (`enactJobFinished` in
+  `pkg/controller/job/job_controller.go`); and the CronJob holds a Job with neither a `Complete` nor
+  a `Failed` condition among its active ones and, by `Forbid`, starts no run while it does, each
+  schedule skipped with the event `JobAlreadyActive` (`pkg/controller/cronjob/cronjob_controllerv2.go`,
+  all of Kubernetes v1.37.1). Without that condition, kube-state-metrics gives the Job no failed
+  state and its failures no reason (`internal/store/job.go` of v2.20.0), so neither
+  `EscapeCanaryUnexpectedResult` nor the chart's `KubeJobFailed` fires, and `EscapeCanaryStale`
+  does, 3 hours after the last success; the stuck pod's lines cannot be read while its node does not
+  answer. Runs start again once the worker answers and its kubelet ends the pod, or once the pod is
+  removed, by `kubectl --namespace escape-canary delete pod <pod> --force --grace-period=0`. Taking
+  a lost worker out for good removes it as well, through PodGC: the taint
+  `node.kubernetes.io/out-of-service` or the deletion of its Node, which act on every pod of the
+  worker, the taint on its volumes as well, and belong to that, not to the canary. The Job then
+  gets its `Failed` condition, with the reason it failed for, and the alerts read it as any failed
+  Job of the canary. A run made by hand is never among the CronJob's active Jobs, which records
+  only the event `UnexpectedJob` for it (the same file), so one stuck the same way stops no
+  schedule, while its Job stays active until its pod is removed.
+- **The token.** Only the rights check's pods hold one: they run as the ServiceAccount
+  `escape-canary-rights` and ask for its token, which the account mounts for no pod that does not,
+  and the network check's pods mount none. No Role or binding of the tree names the account: the test
+  reads every RoleBinding and ClusterRoleBinding of the render, every application's build and every
+  chart's objects, and fails on one that names it, its user name, the group of its namespace's
+  accounts, every account or every authenticated caller. That is the tree; Kubernetes' own default
+  bindings give every authenticated caller discovery, its own reviews and public information, and
+  every account the issuer's discovery documents and cluster trust bundles, and neither secrets nor
+  pods (`ClusterRoleBindings` in `plugin/pkg/auth/authorizer/rbac/bootstrappolicy/policy.go` of
+  Kubernetes v1.37.1). The rights check's pods reach the API server in either mode, by
+  `escape-canary-rights-api-server`, so that its answer is the authorisation's.
+- **The images**, each by its tag and the digest of its index, which Renovate's kubernetes manager
+  reads from the CronJobs: busybox 1.38.0, the drill's check's and Robot Framework's report server's,
+  for the network check, whose `sh`, `nc`, `nslookup` and `timeout` are its applets; and the Flux CLI
+  image OpenBao's guard runs, `ghcr.io/fluxcd/flux-cli`, of the `flux2` pin of `mise.toml`, which the
+  test holds it to and Renovate's group Flux moves with the pin, for the rights check, as its
+  `kubectl` verifies the API server's certificate: busybox's `wget` validates no certificate
+  (`networking/wget.c`: "TLS certificate validation not implemented" without `openssl`, which the
+  image does not carry) and would hand the token to whatever answered at the API server's address.
+  Both run as user and group 65534, which the pods set, busybox's image naming no user and the Flux
+  CLI image that one, with a read-only root; `kubectl` keeps its caches under
+  `HOME`, a memory-backed `emptyDir` of 16Mi, 20 KiB in the local run. Both pods pass the
+  restricted level with no entry, and the tree's admission rules, in both engines. The network
+  container requests 1m of CPU and 8Mi of memory and is limited to 32Mi, the drill's check's figures
+  for the same image; the rights container requests 10m and 64Mi and is limited to 128Mi, where the
+  local run of both requests peaked at 24 MiB against a stand-in API server whose discovery is far
+  smaller than the cluster's. None is measured on the cluster.
+- **The alerts**, each a warning with its section in [the runbook](runbooks/alerts.md), read
+  kube-state-metrics' CronJob and Job metrics for the namespace `escape-canary`:
+  `EscapeCanaryStale` once a CronJob's last success is more than 3 hours old, or it was created more
+  than 3 hours ago and has never succeeded, for 5 minutes: three runs in a row that did not
+  succeed, whatever stopped them; and `EscapeCanaryUnexpectedResult` once a CronJob owns a Job that
+  failed with `BackoffLimitExceeded`, which with a `backoffLimit` of 0 is a pod that exited non-zero,
+  a result not the table's or the check's own error, and that started after the CronJob's last
+  success, or it has none, for 5 minutes, until a later run succeeds. A Job that failed with
+  `DeadlineExceeded` raises the second never. Every failed Job of the canary, scheduled or made by
+  hand, also raises the monitoring chart's `KubeJobFailed`, a warning, 15 minutes after it failed and
+  for as long as the Job exists, which a later success does not end: the CronJob keeps its three
+  newest failed Jobs, and deleting one once its pods' lines are read ends it.
+- **Falco** records the canary's attempts at the API server, on purpose, with no exception
+  ([Tuning](#tuning)).
+- **In the record.** While the cluster audits, each attempt a policy would drop is an `AUDIT` line of
+  `just network-audit` ([The record of what policy drops](#the-record-of-what-policy-drops)): for
+  each pod of the network check, six of `NAMESPACE` `escape-canary`, egress, one for each attempt but
+  the resolver's, reported by the pod's node, so their `SOURCE` is
+  `escape-canary/CronJob/escape-canary-network`, and one of `NAMESPACE` `demo`, `hello`'s ingress,
+  reported by `hello`'s node, whose `SOURCE` is that when the pod runs there and
+  `escape-canary/<pod>` when it runs on another; a run made by hand names its Job,
+  `escape-canary/Job/<name>`. The recorder writes an `AUDIT` line once for a connection, and the
+  recipe prints one line a group with its `COUNT`, so a run of the network check shows as six lines
+  of `escape-canary`, one for each attempt, each of `COUNT` 3, one for each pod, and one to three
+  lines of `demo`, as the flows another node reports are split by the pod's name: `COUNT`s summing
+  to about 21 a run. A window of an hour holds one or two of the hourly runs, and any made by hand.
+  The rights check's flows are allowed and make none. Once the cluster enforces, the same attempts
+  are `DROPPED` lines with `POLICY_DENIED` of `NAMESPACE` `escape-canary` alone, as the canary's
+  egress drops each before it reaches `hello`, two for each packet, the SYN and its one or two
+  retransmissions within `nc`'s 3 seconds, so four to six an attempt and `COUNT`s summing to 72 to
+  108 a run. `just network-drops` shows the same flows among each agent's recent ones.
+- **What only the cluster shows**: that the metadata address answers a pod's connection while the
+  cluster audits; that Flux applies the policies after `cilium` and the rule after
+  `prometheus-operator-crds`, as `dependsOn` orders them; that the API server takes the
+  anti-affinity term, which the pinned schemas accept; what busybox and the Flux CLI image do at
+  start in a pod under user 65534 and a read-only root, which the local runs showed off the cluster;
+  the `AUDIT` lines Hubble writes at `demo`'s ingress; what Falco records; and whether the kubelet,
+  the API server and OpenBao log a TLS handshake error for each of the network check's connections
+  to them, which close once the TCP handshake completes, before any TLS, three of each a run. A live
+  result that differs from the table is a finding, never a reason to change the table.
 
 ## Variables
 
@@ -2148,6 +2421,8 @@ The own alerts, each with its runbook section in [docs/runbooks/alerts.md](runbo
 | `PublicCertificateExpiring` | The certificate the Gateway serves for a public hostname expires within 14 days, and not within 3, for 10 minutes. | warning | [PublicCertificateExpiring](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#publiccertificateexpiring) |
 | `PublicCertificateExpiryImminent` | The certificate the Gateway serves for a public hostname expires within 3 days, for 5 minutes. | critical | [PublicCertificateExpiryImminent](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#publiccertificateexpiryimminent) |
 | `ProbeNotRunning` | A declared probe of a public hostname has not been scraped through the exporter for 10 minutes. | warning | [ProbeNotRunning](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#probenotrunning) |
+| `EscapeCanaryStale` | A CronJob of the escape canary has not succeeded for 3 hours, or was created more than 3 hours ago and never has, for 5 minutes. | warning | [EscapeCanaryStale](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#escapecanarystale) |
+| `EscapeCanaryUnexpectedResult` | A CronJob of the escape canary owns a Job that failed because a pod exited non-zero, started after its last success, for 5 minutes. | warning | [EscapeCanaryUnexpectedResult](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#escapecanaryunexpectedresult) |
 
 The alerts read only what Prometheus scrapes: kube-state-metrics' pod readiness for OpenBao's
 members, its Deployment availability for the Flux Operator, its nodes' roles, which tell the
@@ -2170,6 +2445,12 @@ or whose monitor selects nothing of the Service or pod that serves it.
 
 The two policy engines' alerts read kube-state-metrics' Deployment availability for each engine's
 admission controller ([Admission policy](#admission-policy)).
+
+The escape canary's alerts read kube-state-metrics' CronJob and Job metrics for its two CronJobs,
+selected by their namespace, `escape-canary`, which holds the canary alone: their last success and
+creation, and each Job's start, owner and the reason of its failure
+([The escape canary](#the-escape-canary)). They are written in the `escape-canary` application's
+`app/`, whose tests are `tests/rules/escape-canary.yaml`.
 
 The restore drill's alerts read kube-state-metrics' CronJob metrics for the check job of every
 application that takes the drill ([The restore drill](#the-restore-drill)). They are written once,
@@ -10366,6 +10647,41 @@ namespace, pod, container, image and process in its `output_fields`; then, in a 
    four tries before the release is Stalled with the reason `RetriesExceeded`
    ([What the root sets](#what-the-root-sets)). `FluxApplierNotReady` raises the release after
    15 minutes.
+
+**The escape canary's attempts stay in the record.** No item names `escape-canary`, and every item
+but the one for what Falco places in no container is held to namespaces it names, so none excepts
+the canary; `tests/escape-canary.bats` fails on one that would. By the conditions of the image's
+rules, the network check's `api-server` attempt, made by `nc`, and each `kubectl` of the rights check
+trip `Contact K8S API Server From Container`, at priority Notice, so `FalcoCriticalRuleMatched` stays
+quiet: the rule takes a container's `connect` to an address that
+`kubernetes.default.svc.cluster.local` resolves to, the macro `k8s_api_server`'s
+`fd.sip.name="kubernetes.default.svc.cluster.local"`, outside the macro `k8s_containers`, which
+names neither image and no namespace but `kube-system`; and a pod's connection keeps the Service's
+address as its server's, as the agents translate a pod's Service address at its interface, after the
+connect (`socketLB.hostNamespaceOnly: true`, [Runtime classes](#runtime-classes)). No other attempt
+trips a rule of the image's:
+`Netcat Remote Code Execution in Container` needs ` -e` or ` -c` in `nc`'s command line, which the
+check never gives it; `Redirect STDOUT/STDIN to Network Connection in Container` needs a `dup` that
+returns 0, 1 or 2 for a socket, and `nc` moves its socket to descriptor 3 (`netfd` in
+`networking/nc_bloaty.c` of busybox 1.38.0) while the shell joins the tools' standard streams to
+pipes; `Run shell untrusted` needs a shell below a protected spawner, a web, database or mail server
+among them, and the checks' shells descend from the container's entrypoint alone; and none of the
+other rules asks for what an attempt does: a terminal or a login, a sensitive or a log file, a
+binary its image does not hold, a packet socket, a kernel module, ptrace or `ssh`. They stay in the
+record on purpose, as an hourly proof that Falco sees an unexpected contact with the API server on
+every worker. What that costs while the cluster audits: an event for each pod's `nc` to the API
+server, three a run of the network check, and one for each `kubectl`, which makes its requests over
+one connection, as a local run of the image's against a stand-in API server showed, six a run of the
+rights check: 9 events an hour, 9 JSON lines in the log store, and, on a worker where nothing else
+has tripped the rule since Falco started there, a series of `falcosecurity_falco_rules_matches_total`
+for it, which Falco's dashboard shows. Once the cluster enforces, the network check's connect to the
+API server fails, and libs 0.26.1, which Falco 0.45.2 builds on, leaves a socket whose connect failed
+without its server's address, as Falco does not ask it to track connections' status
+(`parse_connect_exit` in `userspace/libsinsp/parsers.cpp`), so that attempt trips nothing and the
+rights check's 6 an hour remain. Every event of the canary has, in `output_fields."k8s.ns.name"`,
+the namespace `escape-canary`:
+`just logs 'kubernetes.pod_namespace:security-system kubernetes.container_name:falco | unpack_json | filter output_fields.k8s.ns.name:escape-canary' --since 1h`
+prints them ([The escape canary](#the-escape-canary)).
 
 The Falco documentation says what else an override can do
 ([overriding](https://falco.org/docs/concepts/rules/overriding/),

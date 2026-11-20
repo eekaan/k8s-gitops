@@ -1,0 +1,64 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
+# What every pod of the canary lets through, on top of the namespace's default deny: nothing in, as
+# its checks listen on nothing, and out the cluster's resolver alone. Everything else the network
+# check attempts is what the default deny forbids, so once the cluster enforces the policies its
+# results are expected.tsv's enforcement column; while it audits them, a flow they would drop is
+# reported and passes (docs/kubernetes.md, The escape canary).
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: escape-canary-resolver
+spec:
+  endpointSelector:
+    matchLabels:
+      k8s-gitops/escape-canary: "true"
+  # The namespace's default deny alone denies; this policy only allows.
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  egress:
+    # The cluster's resolver, for the names the network check attempts. The rights check's pods
+    # carry the label too and look nothing up: their in-cluster configuration gives the API
+    # server's Service by its address.
+    - toEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": kube-system
+            "k8s:k8s-app": kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
+# The rights check's one flow beyond the resolver: the API server, so that its requests reach the
+# API server's authorisation in either mode and are refused there, which is what the check proves of
+# the account. The network check's pods are not selected, so their attempt at the API server is
+# dropped once the cluster enforces the policies.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: escape-canary-rights-api-server
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: escape-canary
+      app.kubernetes.io/component: rights
+  # The namespace's default deny alone denies; this policy only allows.
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  egress:
+    # The API server, through the Service kubernetes, whose address the pod's in-cluster
+    # configuration names. A Service's address is translated to the control plane's before policy
+    # applies, so 6443 is the port that counts.
+    - toEntities:
+        - kube-apiserver
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+            - port: "6443"
+              protocol: TCP

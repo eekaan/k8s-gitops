@@ -1,0 +1,24 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/catalog-info.json
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: escape-canary
+  description: Two hourly CronJobs that attempt what network policy, the node firewall and RBAC forbid, from three workers each, and fail, raising an alert, when a result is not their table's for the cluster's mode.
+  links:
+    - url: https://github.com/eekaan/k8s-gitops/blob/main/docs/kubernetes.md#the-escape-canary
+      title: Documentation
+    - url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#escapecanaryunexpectedresult
+      title: Runbook
+    - url: https://github.com/eekaan/k8s-gitops/tree/main/kubernetes/apps/base/escape-canary/escape-canary
+      title: Manifests
+spec:
+  type: job
+  lifecycle: production
+  owner: group:default/operators
+  system: observability
+  dependsOn:
+    - component:default/cilium
+    - component:default/hello
+    - component:default/openbao
+    - resource:default/prometheus-operator-crds

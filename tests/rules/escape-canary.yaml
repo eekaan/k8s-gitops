@@ -1,0 +1,371 @@
+---
+# Unit tests of the escape canary's own alerts, run by just rules-check with promtool. The times are
+# Unix times in seconds, so a series that tracks the clock (0+60x...) is a moment that is now. Each
+# group's name is the title of its scenario in features/alerts.feature.
+#
+# The series are shaped as kube-state-metrics writes them (v2.20, the version the pinned
+# kube-prometheus-stack chart runs; internal/store/cronjob.go and job.go), from the one replica, with
+# the job, instance, pod, service and endpoint of the chart's ServiceMonitor's scrape:
+# kube_cronjob_created and kube_cronjob_status_last_successful_time, labelled cronjob and namespace,
+# the latter absent while a CronJob has never succeeded; kube_job_status_start_time; kube_job_owner,
+# labelled owner_kind, owner_name and owner_is_controller; and kube_job_status_failed, which, once a
+# Job holds a Failed condition, is one series for each of the reasons BackoffLimitExceeded,
+# DeadlineExceeded and Evicted, 1 for the condition's and 0 for the others; each labelled job_name
+# and namespace. A Job of the canary fails BackoffLimitExceeded when a pod exits non-zero, as its
+# backoffLimit is 0, and DeadlineExceeded when its 300 seconds end first.
+rule_files:
+  - escape-canary.rules.yaml
+evaluation_interval: 1m
+tests:
+  - name: The alert EscapeCanaryStale fires after its time in the failing case and stays quiet in the healthy one
+    interval: 1m
+    input_series:
+      # "escape-canary-network" last succeeded at 600 s and never since: more than 3 hours old once
+      # the clock passes 11400 s, minute 190, so the alert is pending from minute 191.
+      - series: >-
+          kube_cronjob_created{cronjob="escape-canary-network", namespace="escape-canary", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '0x200'
+      - series: >-
+          kube_cronjob_status_last_successful_time{cronjob="escape-canary-network", namespace="escape-canary", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '600x200'
+      # "escape-canary-rights" was created at the start and has never succeeded: stale 3 hours after
+      # it was created, minute 180, pending from minute 181.
+      - series: >-
+          kube_cronjob_created{cronjob="escape-canary-rights", namespace="escape-canary", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '0x200'
+      # "escape-canary-healthy" succeeded a minute ago at every moment.
+      - series: >-
+          kube_cronjob_created{cronjob="escape-canary-healthy", namespace="escape-canary", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '0x200'
+      - series: >-
+          kube_cronjob_status_last_successful_time{cronjob="escape-canary-healthy", namespace="escape-canary", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '0+60x200'
+      # "escape-canary-young" was created at minute 100 (6000 s), has had no success yet, and at the
+      # end of the test is not yet 3 hours old: it is quiet throughout.
+      - series: >-
+          kube_cronjob_created{cronjob="escape-canary-young", namespace="escape-canary", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '6000x200'
+      # A CronJob of another namespace, as old as the first and never successful, is none of its
+      # concern.
+      - series: >-
+          kube_cronjob_created{cronjob="robot-suites", namespace="robot", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '0x200'
+      - series: >-
+          kube_cronjob_status_last_successful_time{cronjob="robot-suites", namespace="robot", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '600x200'
+    alert_rule_test:
+      # Nothing is more than 3 hours old yet.
+      - eval_time: 5m
+        alertname: EscapeCanaryStale
+        exp_alerts: []
+      - eval_time: 180m
+        alertname: EscapeCanaryStale
+        exp_alerts: []
+      # "escape-canary-rights" is pending from minute 181 and fires 5 minutes later.
+      - eval_time: 185m
+        alertname: EscapeCanaryStale
+        exp_alerts: []
+      - eval_time: 186m
+        alertname: EscapeCanaryStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: escape-canary
+              cronjob: escape-canary-rights
+            exp_annotations:
+              summary: A check of the escape canary has not succeeded for 3 hours
+              description: The CronJob escape-canary-rights in escape-canary has had no successful run for 3 hours, so for that long nothing shows that what it attempts gives what its table expects.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#escapecanarystale
+      # "escape-canary-network" is pending from minute 191, 3 hours after its last success, so a
+      # minute before it fires only the never successful one does: no threshold shorter than 3 hours
+      # on the last-success comparison passes this.
+      - eval_time: 195m
+        alertname: EscapeCanaryStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: escape-canary
+              cronjob: escape-canary-rights
+            exp_annotations:
+              summary: A check of the escape canary has not succeeded for 3 hours
+              description: The CronJob escape-canary-rights in escape-canary has had no successful run for 3 hours, so for that long nothing shows that what it attempts gives what its table expects.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#escapecanarystale
+      - eval_time: 196m
+        alertname: EscapeCanaryStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: escape-canary
+              cronjob: escape-canary-network
+            exp_annotations:
+              summary: A check of the escape canary has not succeeded for 3 hours
+              description: The CronJob escape-canary-network in escape-canary has had no successful run for 3 hours, so for that long nothing shows that what it attempts gives what its table expects.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#escapecanarystale
+          - exp_labels:
+              severity: warning
+              namespace: escape-canary
+              cronjob: escape-canary-rights
+            exp_annotations:
+              summary: A check of the escape canary has not succeeded for 3 hours
+              description: The CronJob escape-canary-rights in escape-canary has had no successful run for 3 hours, so for that long nothing shows that what it attempts gives what its table expects.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#escapecanarystale
+  - name: The alert EscapeCanaryUnexpectedResult fires after its time in the failing case and stays quiet in the healthy one
+    interval: 1m
+    input_series:
+      # "escape-canary-network" last succeeded at 600 s; its Job of 3600 s failed because a pod exited
+      # non-zero, which kube-state-metrics shows from minute 61: pending from minute 61.
+      - series: >-
+          kube_cronjob_created{cronjob="escape-canary-network", namespace="escape-canary", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '0x120'
+      - series: >-
+          kube_cronjob_status_last_successful_time{cronjob="escape-canary-network", namespace="escape-canary", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '600x120'
+      - series: >-
+          kube_job_status_start_time{job_name="escape-canary-network-29000060", namespace="escape-canary", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '3600x120'
+      - series: >-
+          kube_job_owner{job_name="escape-canary-network-29000060", namespace="escape-canary", owner_kind="CronJob",
+          owner_name="escape-canary-network", owner_is_controller="true", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '1x120'
+      - series: >-
+          kube_job_status_failed{job_name="escape-canary-network-29000060", namespace="escape-canary", reason="BackoffLimitExceeded",
+          job="kube-state-metrics", instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '0x60 1x60'
+      - series: >-
+          kube_job_status_failed{job_name="escape-canary-network-29000060", namespace="escape-canary", reason="DeadlineExceeded",
+          job="kube-state-metrics", instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '0x120'
+      # "escape-canary-rights" has never succeeded; its Job of 1800 s failed the same way from minute
+      # 31: pending from minute 31.
+      - series: >-
+          kube_cronjob_created{cronjob="escape-canary-rights", namespace="escape-canary", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '0x120'
+      - series: >-
+          kube_job_status_start_time{job_name="escape-canary-rights-29000030", namespace="escape-canary", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '1800x120'
+      - series: >-
+          kube_job_owner{job_name="escape-canary-rights-29000030", namespace="escape-canary", owner_kind="CronJob",
+          owner_name="escape-canary-rights", owner_is_controller="true", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '1x120'
+      - series: >-
+          kube_job_status_failed{job_name="escape-canary-rights-29000030", namespace="escape-canary", reason="BackoffLimitExceeded",
+          job="kube-state-metrics", instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '0x30 1x90'
+      # "escape-canary-recovered" owns such a Job of 600 s, and succeeded at 4200 s, after it: the
+      # failure is older than the last success, and it is quiet throughout.
+      - series: >-
+          kube_cronjob_created{cronjob="escape-canary-recovered", namespace="escape-canary", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '0x120'
+      - series: >-
+          kube_cronjob_status_last_successful_time{cronjob="escape-canary-recovered", namespace="escape-canary", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '4200x120'
+      - series: >-
+          kube_job_status_start_time{job_name="escape-canary-recovered-29000010", namespace="escape-canary", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '600x120'
+      - series: >-
+          kube_job_owner{job_name="escape-canary-recovered-29000010", namespace="escape-canary", owner_kind="CronJob",
+          owner_name="escape-canary-recovered", owner_is_controller="true", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '1x120'
+      - series: >-
+          kube_job_status_failed{job_name="escape-canary-recovered-29000010", namespace="escape-canary", reason="BackoffLimitExceeded",
+          job="kube-state-metrics", instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '1x120'
+      # A Job of another namespace failed the same way, owned by a CronJob that has never succeeded,
+      # is none of its concern.
+      - series: >-
+          kube_cronjob_created{cronjob="robot-suites", namespace="robot", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '0x120'
+      - series: >-
+          kube_job_status_start_time{job_name="robot-suites-29000010", namespace="robot", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '600x120'
+      - series: >-
+          kube_job_owner{job_name="robot-suites-29000010", namespace="robot", owner_kind="CronJob",
+          owner_name="robot-suites", owner_is_controller="true", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '1x120'
+      - series: >-
+          kube_job_status_failed{job_name="robot-suites-29000010", namespace="robot", reason="BackoffLimitExceeded",
+          job="kube-state-metrics", instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '1x120'
+    alert_rule_test:
+      # Nothing of the canary has failed yet.
+      - eval_time: 5m
+        alertname: EscapeCanaryUnexpectedResult
+        exp_alerts: []
+      # "escape-canary-rights" is pending from minute 31 and fires 5 minutes later.
+      - eval_time: 35m
+        alertname: EscapeCanaryUnexpectedResult
+        exp_alerts: []
+      - eval_time: 36m
+        alertname: EscapeCanaryUnexpectedResult
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: escape-canary
+              cronjob: escape-canary-rights
+            exp_annotations:
+              summary: A check of the escape canary gave a result the table does not expect
+              description: A Job of the CronJob escape-canary-rights in escape-canary, started after its last success, failed as a pod exited non-zero, on a result its table does not give or the check's own error.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#escapecanaryunexpectedresult
+      # "escape-canary-network" is pending from minute 61 and fires 5 minutes later, beside it.
+      - eval_time: 65m
+        alertname: EscapeCanaryUnexpectedResult
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: escape-canary
+              cronjob: escape-canary-rights
+            exp_annotations:
+              summary: A check of the escape canary gave a result the table does not expect
+              description: A Job of the CronJob escape-canary-rights in escape-canary, started after its last success, failed as a pod exited non-zero, on a result its table does not give or the check's own error.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#escapecanaryunexpectedresult
+      - eval_time: 66m
+        alertname: EscapeCanaryUnexpectedResult
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: escape-canary
+              cronjob: escape-canary-network
+            exp_annotations:
+              summary: A check of the escape canary gave a result the table does not expect
+              description: A Job of the CronJob escape-canary-network in escape-canary, started after its last success, failed as a pod exited non-zero, on a result its table does not give or the check's own error.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#escapecanaryunexpectedresult
+          - exp_labels:
+              severity: warning
+              namespace: escape-canary
+              cronjob: escape-canary-rights
+            exp_annotations:
+              summary: A check of the escape canary gave a result the table does not expect
+              description: A Job of the CronJob escape-canary-rights in escape-canary, started after its last success, failed as a pod exited non-zero, on a result its table does not give or the check's own error.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#escapecanaryunexpectedresult
+  - name: The alert EscapeCanaryUnexpectedResult stays quiet while a run fails at its deadline, and clears once a run succeeds
+    interval: 1m
+    input_series:
+      # "escape-canary-network" last succeeded at 600 s; its Job of 3600 s failed at its deadline
+      # from minute 66, a pod that no third worker took: never this alert's.
+      - series: >-
+          kube_cronjob_created{cronjob="escape-canary-network", namespace="escape-canary", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '0x150'
+      - series: >-
+          kube_cronjob_status_last_successful_time{cronjob="escape-canary-network", namespace="escape-canary", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '600x150'
+      - series: >-
+          kube_job_status_start_time{job_name="escape-canary-network-29000060", namespace="escape-canary", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '3600x150'
+      - series: >-
+          kube_job_owner{job_name="escape-canary-network-29000060", namespace="escape-canary", owner_kind="CronJob",
+          owner_name="escape-canary-network", owner_is_controller="true", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '1x150'
+      - series: >-
+          kube_job_status_failed{job_name="escape-canary-network-29000060", namespace="escape-canary", reason="DeadlineExceeded",
+          job="kube-state-metrics", instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '0x65 1x85'
+      - series: >-
+          kube_job_status_failed{job_name="escape-canary-network-29000060", namespace="escape-canary", reason="BackoffLimitExceeded",
+          job="kube-state-metrics", instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '0x150'
+      # "escape-canary-young" has never succeeded, and its Job of 1800 s failed at its deadline too:
+      # quiet as well.
+      - series: >-
+          kube_cronjob_created{cronjob="escape-canary-young", namespace="escape-canary", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '0x150'
+      - series: >-
+          kube_job_status_start_time{job_name="escape-canary-young-29000030", namespace="escape-canary", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '1800x150'
+      - series: >-
+          kube_job_owner{job_name="escape-canary-young-29000030", namespace="escape-canary", owner_kind="CronJob",
+          owner_name="escape-canary-young", owner_is_controller="true", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '1x150'
+      - series: >-
+          kube_job_status_failed{job_name="escape-canary-young-29000030", namespace="escape-canary", reason="DeadlineExceeded",
+          job="kube-state-metrics", instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '0x35 1x115'
+      # "escape-canary-rights" last succeeded at 600 s; its Job of 3600 s failed because a pod exited
+      # non-zero from minute 61, and a later run succeeded at 7800 s, which kube-state-metrics shows
+      # from minute 130: firing from minute 66 until then.
+      - series: >-
+          kube_cronjob_created{cronjob="escape-canary-rights", namespace="escape-canary", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '0x150'
+      - series: >-
+          kube_cronjob_status_last_successful_time{cronjob="escape-canary-rights", namespace="escape-canary", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '600x129 7800x20'
+      - series: >-
+          kube_job_status_start_time{job_name="escape-canary-rights-29000060", namespace="escape-canary", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '3600x150'
+      - series: >-
+          kube_job_owner{job_name="escape-canary-rights-29000060", namespace="escape-canary", owner_kind="CronJob",
+          owner_name="escape-canary-rights", owner_is_controller="true", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '1x150'
+      - series: >-
+          kube_job_status_failed{job_name="escape-canary-rights-29000060", namespace="escape-canary", reason="BackoffLimitExceeded",
+          job="kube-state-metrics", instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '0x60 1x90'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: EscapeCanaryUnexpectedResult
+        exp_alerts: []
+      - eval_time: 65m
+        alertname: EscapeCanaryUnexpectedResult
+        exp_alerts: []
+      - eval_time: 66m
+        alertname: EscapeCanaryUnexpectedResult
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: escape-canary
+              cronjob: escape-canary-rights
+            exp_annotations:
+              summary: A check of the escape canary gave a result the table does not expect
+              description: A Job of the CronJob escape-canary-rights in escape-canary, started after its last success, failed as a pod exited non-zero, on a result its table does not give or the check's own error.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#escapecanaryunexpectedresult
+      # The deadline's failures still raise nothing, and the failed run still fires, until the later
+      # success.
+      - eval_time: 129m
+        alertname: EscapeCanaryUnexpectedResult
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: escape-canary
+              cronjob: escape-canary-rights
+            exp_annotations:
+              summary: A check of the escape canary gave a result the table does not expect
+              description: A Job of the CronJob escape-canary-rights in escape-canary, started after its last success, failed as a pod exited non-zero, on a result its table does not give or the check's own error.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#escapecanaryunexpectedresult
+      - eval_time: 130m
+        alertname: EscapeCanaryUnexpectedResult
+        exp_alerts: []
+      - eval_time: 150m
+        alertname: EscapeCanaryUnexpectedResult
+        exp_alerts: []

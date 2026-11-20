@@ -1409,8 +1409,10 @@ EOF
   # shellcheck disable=SC2016
   [[ $step == *'`AUDIT` lines whose `NAMESPACE` is `flux-system` are expected'* ]]
   # The window holds every job the render schedules in a namespace that holds the default deny: the
-  # step names the time each starts, and the dump and the volume backup are two of them. A database
-  # there that archives its WAL, which it does as each segment fills, has the step force a segment.
+  # step names the time each starts, and the dump and the volume backup are two of them; a CronJob
+  # that runs every hour, at one minute, runs in any window, and the step names it with that minute.
+  # A database there that archives its WAL, which it does as each segment fills, has the step force a
+  # segment.
   real_render
   denying="$(find "$REAL" -name 'NetworkPolicy.networking.k8s.io_*_default-deny.yaml' -exec yq -N '.metadata.namespace' {} + | LC_ALL=C sort -u)"
   nightly=0
@@ -1419,6 +1421,14 @@ EOF
     name="$(yq '.kind + " " + .metadata.namespace + "/" + .metadata.name' "$job")"
     schedule="$(yq '.spec.schedule // .spec.trigger.schedule // ""' "$job")"
     read -ra fields <<<"$schedule"
+    if [ "$(yq '.kind' "$job")" = CronJob ] && ((${#fields[@]} == 5)) && [[ ${fields[0]} =~ ^[0-9]{1,2}$ && ${fields[*]:1} == '* * * *' ]]; then
+      at="$(printf ':%02d' "$((10#${fields[0]}))")"
+      echo "$name starts at $at every hour"
+      # shellcheck disable=SC2016 # The backticks are the docs' own.
+      [[ $step == *"\`$(yq '.metadata.name' "$job")\` at $at every hour"* ]] ||
+        { echo "step 3 does not name $(yq '.metadata.name' "$job") at $at every hour, when $name starts"; return 1; }
+      continue
+    fi
     ((${#fields[@]} != 6)) || fields=("${fields[@]:1}")
     if ((${#fields[@]} != 5)) || [[ ! ${fields[0]} =~ ^[0-9]{1,2}$ || ! ${fields[1]} =~ ^[0-9]{1,2}$ || ${fields[*]:2} != '* * *' ]]; then
       echo "$name runs on '$schedule', not once a day at a time step 3 can name"

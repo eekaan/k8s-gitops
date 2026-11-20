@@ -1,0 +1,15 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/yannh/kubernetes-json-schema/master/master-standalone-strict/namespace-v1.json
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: escape-canary
+  annotations:
+    # Removing the namespace from the tree must not delete everything in it.
+    kustomize.toolkit.fluxcd.io/prune: disabled
+  labels:
+    # The canary's checks run as 65534, non-root with the runtime's default seccomp profile, a
+    # read-only root filesystem, no capabilities and no privilege escalation, which the restricted
+    # level requires: what they attempt asks for nothing more. No Gateway label: nothing routes here
+    # (docs/kubernetes.md, The escape canary).
+    pod-security.kubernetes.io/enforce: restricted
