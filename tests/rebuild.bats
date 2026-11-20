@@ -161,11 +161,14 @@ key_restored() {
 }
 
 # real_render: the render of this repository's tree, charts pulled, in $BATS_FILE_TMPDIR/render.
+# The tests of one file run side by side, so each that finds no render yet makes one in a directory
+# of its own, and the first to finish gives the file its render.
 real_render() {
   REAL="$BATS_FILE_TMPDIR/render"
   if [ ! -d "$REAL" ]; then
-    "$REPO/scripts/render" "$REAL.partial" >/dev/null
-    mv "$REAL.partial" "$REAL"
+    local partial="$REAL.partial.$BATS_TEST_NUMBER"
+    "$REPO/scripts/render" "$partial" >/dev/null
+    mv -T "$partial" "$REAL" 2>/dev/null || [ -d "$REAL" ]
   fi
 }
 
