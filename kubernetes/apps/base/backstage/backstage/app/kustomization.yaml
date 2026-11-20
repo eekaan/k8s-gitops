@@ -86,6 +86,7 @@ configMapGenerator:
       - catalogue/linstor-cluster.yaml
       - catalogue/linstor-monitoring-dashboard.yaml
       - catalogue/linstor-monitoring.yaml
+      - catalogue/locust-route.yaml
       - catalogue/locust.yaml
       - catalogue/metrics-server.yaml
       - catalogue/n8n.yaml

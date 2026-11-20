@@ -107,6 +107,10 @@ network-drops cluster='lab-sto2':
 network-audit since='24h' cluster='lab-sto2':
     scripts/network-audit {{ quote(since) }} {{ quote(cluster) }}
 
+# Say, check by check, whether a pod under a runtime class, kata, gvisor or none (the default runtime), could host an OpenShell sandbox: kernel, OpenShell's own capability probe from openshell_sandbox_image under the security context OpenShell gives a sandbox's workload; name, a lookup of the resolver's Service name; service, a TCP connection to its address; mtu, the default route's MTU against an ordinary pod's on the same node; these three from cilium_agent_image; pass or FAIL per check with the reason, no address, and a non-zero exit when one fails; it judges no class. Makes the namespace runtime-check, deleting an earlier run's first and refusing one it did not make, and deletes it however the run ends; holds the cluster's lock; each wait bounded by RUNTIME_CHECK_TIMEOUT (300 seconds); see docs/kubernetes.md, Runtime classes
+runtime-check class cluster='lab-sto2':
+    scripts/runtime-check '{{ openshell_sandbox_image }}' '{{ cilium_agent_image }}' {{ quote(class) }} {{ quote(cluster) }}
+
 # Forward a local port, GRAFANA_PORT or 3000, on 127.0.0.1 only, to Grafana on a cluster through its kubeconfig until Ctrl-C; prints the local URL and where the admin password is kept, never the password
 grafana cluster='lab-sto2':
     scripts/grafana {{ quote(cluster) }}

@@ -93,7 +93,9 @@ extensions:
   ([Kata Containers](https://github.com/kata-containers/kata-containers/blob/main/docs/install/README.md)).
   On a node without it, a pod that selects `kata` does not start.
 
-No workload selects either runtime class. `infra-check` refuses the QEMU guest agent extension
+No workload of the tree selects either runtime class; `just runtime-check` runs pods under the one
+it is given while it checks whether a pod under it could host a sandbox
+([kubernetes.md](kubernetes.md#runtime-classes)). `infra-check` refuses the QEMU guest agent extension
 ([runbooks/image-replacement.md](runbooks/image-replacement.md)).
 
 ## Upgrades
@@ -486,7 +488,7 @@ BGP sessions to it, and ICMP at up to five packets a second.
 | `hubble` | TCP 4244 | all | `members`, `pods` | The Hubble server in each node's Cilium agent, from which Hubble Relay reads the node's flows. |
 | `node-exporter` | TCP 9100 | all | `members`, `pods` | node-exporter, on the host network, which Prometheus scrapes. |
 | `cilium-agent-metrics` | TCP 9962 | all | `members`, `pods` | The Cilium agent's metrics, on the host network, which Prometheus scrapes: the workers' BGP sessions among them ([kubernetes.md](kubernetes.md#monitoring)). |
-| `linstor-satellite` | TCP 3366-3367 | all | `members`, `pods` | LINSTOR's satellites, on the host network of the workers: the LINSTOR controller, a pod, connects to each on the port the operator registers it with, 3366 or 3367 ([Piraeus](https://github.com/piraeusdatastore/piraeus-operator/blob/v2.12.1/internal/controller/linstorsatellite_controller.go#L460-L465)). |
+| `linstor-satellite` | TCP 3366-3367 | all | `members`, `pods` | LINSTOR's satellites, on the host network of the workers: the LINSTOR controller, a pod, connects to each over TLS on 3367, the port the operator registers it with ([Piraeus](https://github.com/piraeusdatastore/piraeus-operator/blob/v2.12.1/internal/controller/linstorsatellite_controller.go#L460-L465), [kubernetes.md](kubernetes.md#who-may-call-linstor)). |
 | `drbd` | TCP 7000-7999 | all | `members` | DRBD's replication, between the workers' kernels: a volume's resource listens at the node's own address on a port of LINSTOR's range, 7000-7999 by default ([LINSTOR](https://github.com/LINBIT/linstor-server/blob/v1.35.3/server/src/main/java/com/linbit/linstor/core/objects/Node.java#L89-L90)), on each node that holds it, and its peers connect from theirs. |
 | `drbd-reactor` | TCP 9942 | all | `members`, `pods` | The DRBD reactor beside each satellite, on the host network, whose metrics Prometheus scrapes ([kubernetes.md](kubernetes.md#storage-monitoring)). |
 
@@ -705,7 +707,7 @@ makes it do. Until each has been, watch:
 5. One control plane, rebooted with `just cluster-reboot`: once it is back, `etcd status` from every
    control plane shows the same leader and no error, as its peers have opened their streams again.
 6. A worker's satellite pod, replaced: once its new pod is ready, `linstor node list` shows the node
-   Online, which the controller reaches on a new connection to TCP 3366. A volume made afterwards:
+   Online, which the controller reaches on a new connection to TCP 3367. A volume made afterwards:
    `linstor resource list` shows its resource Connected between the nodes that hold it, whose
    kernels connect to each other afresh on its port of 7000-7999
    ([kubernetes.md](kubernetes.md#storage)).

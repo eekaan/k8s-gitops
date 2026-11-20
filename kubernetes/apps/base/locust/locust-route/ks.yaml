@@ -1,0 +1,31 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/kustomization-kustomize-v1.json
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: locust-route
+  namespace: flux-system
+spec:
+  path: ./apps/base/locust/locust-route/app
+  targetNamespace: locust
+  # The component adds the policy that asks oauth2-proxy and the route for the sign-in paths.
+  components:
+    - ../../../../../components/sso
+  postBuild:
+    substitute:
+      SSO_ROUTE: locust
+      SSO_HOSTNAME: locust
+  # The route names the public Gateway and Locust's master's Service, and the policy names
+  # oauth2-proxy's Service, which the grant in its namespace lets this one reach. A cluster without
+  # any of them cannot enable it, and the route is applied only once oauth2-proxy is Ready, so no
+  # request reaches the master before the sign-in can answer for it. Its Probe is answered by the
+  # blackbox exporter.
+  dependsOn:
+    - name: gateway-public
+    - name: locust
+    - name: oauth2-proxy
+    - name: blackbox-exporter
+  wait: true
+  sourceRef:
+    kind: ExternalArtifact
+    name: locust-route

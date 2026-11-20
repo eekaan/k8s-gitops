@@ -141,5 +141,16 @@
       matchPackageNames: ["docker.io/marketsquare/robotframework-browser"],
       allowedVersions: "/^[0-9]+\\.[0-9]+\\.[0-9]+$/",
     },
+    {
+      // OpenShell's registry lists, beside its stable releases, nightly pre-releases such as
+      // 0.1.10-pre.2, the build of each commit under the commit's 40 hexadecimal digits, and latest.
+      // Renovate's docker versioning sets a pre-release and a hash aside only by their form, and
+      // reads a hash of decimal digits alone as a number greater than any release, so this rule
+      // names what may be proposed: the stable releases, which OpenShell's support matrix names for
+      // production use.
+      description: "OpenShell's images: stable releases, not pre-releases or the builds of commits",
+      matchPackageNames: ["ghcr.io/nvidia/openshell/**"],
+      allowedVersions: "/^[0-9]+\\.[0-9]+\\.[0-9]+$/",
+    },
   ],
 }

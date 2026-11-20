@@ -366,3 +366,15 @@ spec:
         - ports:
             - port: "9428"
               protocol: TCP
+    # Locust's master's 8089 in locust, for the route locust to its interface: the master's pods
+    # alone, on the web port, not the port the workers connect to, and no worker.
+    - toEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": locust
+            "k8s:io.cilium.k8s.namespace.labels.k8s-gitops/gateway": public
+            app.kubernetes.io/name: locust
+            app.kubernetes.io/component: master
+      toPorts:
+        - ports:
+            - port: "8089"
+              protocol: TCP

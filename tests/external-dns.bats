@@ -507,7 +507,8 @@ edge_copy() {
   # proxies, nothing but external-dns needs the Gateway, so it is the one refused, naming it.
   # Robot Framework's suite of Ascender's sign-in page, robot-ascender, names ascender and goes with
   # it.
-  tree_without gateway-public hello-route n8n kromgo open-webui hello-sso dex oauth2-proxy backstage crowdsec crowdsec-gateway-logs victoria-logs-route ascender robot-ascender
+  tree_without gateway-public hello-route n8n kromgo open-webui hello-sso dex oauth2-proxy backstage crowdsec crowdsec-gateway-logs victoria-logs-route ascender robot-ascender \
+    locust-route
   run "$REPO/scripts/kubernetes-check" "$TREE"
   echo "$output"
   [ "$status" -ne 0 ]
@@ -542,14 +543,14 @@ edge_copy() {
 }
 
 @test "The names the routes publish are listed offline from the tree's builds, without a wildcard" {
-  local ten
+  local names
   # The names of the tree's routes on the Gateway, sorted byte by byte, as the listing sorts them.
-  ten="$(printf '%s.example.net\n' ascender auth backstage dex hello-sso hello kromgo logs n8n open-webui)"
+  names="$(printf '%s.example.net\n' ascender auth backstage dex hello-sso hello kromgo locust logs n8n open-webui)"
   # The tree as it is, with no cluster to reach: KUBECONFIG names no file.
   [ ! -e "$KUBECONFIG" ]
   published "$REPO"
   [ "$status" -eq 0 ]
-  [ "$output" = "$ten" ]
+  [ "$output" = "$names" ]
 
   # Routes that make no record of the cluster's: on another Gateway, wildcard included; on a Gateway
   # named public in the route's own namespace, as a parent without a namespace is; under another
@@ -567,7 +568,7 @@ edge_copy() {
   add_route own '{parentRefs: [{name: public, sectionName: https}], hostnames: ["own.${CLUSTER_DOMAIN}"]}' envoy-gateway-system/gateway-public
   published "$TREE"
   [ "$status" -eq 0 ]
-  [ "$output" = "$(printf '%s\n' "$ten" own.example.net)" ]
+  [ "$output" = "$(printf '%s\n' "$names" own.example.net)" ]
 
   # A route without hostnames on the https listener, alone or beside the http one, and one with a
   # wildcard, would publish the listener's wildcard: each fails the listing, naming the route.

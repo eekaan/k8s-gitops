@@ -1,10 +1,11 @@
 ---
 # yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
 # What Locust's master lets through, on top of the namespace's default deny: the workers on the port
-# it binds for them, and the kubelet's readiness probe on its web port. It sends nothing: it runs no
-# users, the workers connect to it, and the one name it looks up, its own, is in the pod's hosts
-# file. just locust reaches the interface through a port forward, which the container runtime
-# connects inside the pod on its loopback, where no policy applies (docs/kubernetes.md, Locust).
+# it binds for them, and the public Gateway's proxies and the kubelet's readiness probe on its web
+# port. It sends nothing: it runs no users, the workers connect to it, and the one name it looks up,
+# its own, is in the pod's hosts file. just locust reaches the interface through a port forward,
+# which the container runtime connects inside the pod on its loopback, where no policy applies
+# (docs/kubernetes.md, Locust).
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
 metadata:
@@ -30,6 +31,22 @@ spec:
       toPorts:
         - ports:
             - port: "5557"
+              protocol: TCP
+    # The route locust, behind the cluster's sign-in: only the pods Envoy Gateway runs for the public
+    # Gateway, selected by their labels and not by their namespace, whose controller and certificate
+    # job are no proxies. The route sends to the Service's web port, which targets the container's
+    # 8089, and the proxies reach the master on no other port.
+    - fromEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": envoy-gateway-system
+            app.kubernetes.io/name: envoy
+            app.kubernetes.io/component: proxy
+            app.kubernetes.io/managed-by: envoy-gateway
+            gateway.envoyproxy.io/owning-gateway-name: public
+            gateway.envoyproxy.io/owning-gateway-namespace: envoy-gateway-system
+      toPorts:
+        - ports:
+            - port: "8089"
               protocol: TCP
     # The kubelet's readiness probe, which arrives from the node the pod runs on: host is every
     # process in that node's network namespace, the pods of the host's network among them, so they

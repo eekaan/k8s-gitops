@@ -29,6 +29,18 @@ spec:
       group: cert-manager.io
       kind: Issuer
       name: linstor-api-ca
+  # The controller commands each satellite over TLS on 3367, and each side presents a certificate of
+  # the internal authority (tls.yaml) and takes only one that authority signed: the operator asks the
+  # issuer below for a client certificate for the controller, in the Secret
+  # linstor-controller-internal-tls, and, through the configuration internal-tls, for a server
+  # certificate for each satellite, in the Secret <node>-tls, each with the issuer's ca.crt beside it
+  # as the authority it trusts. A satellite takes a connection only from a holder of the internal
+  # authority's certificate.
+  internalTLS:
+    certManager:
+      group: cert-manager.io
+      kind: Issuer
+      name: linstor-internal-ca
   # The controllers' pods run as the restricted Pod Security level requires: a non-root user, the
   # runtime's seccomp profile, and no privilege escalation and no capabilities in each container.
   # The operator applies each podTemplate as a patch to its own template, which drops every

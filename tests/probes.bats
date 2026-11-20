@@ -520,17 +520,18 @@ render_chart() {
   # on: the demo's page, n8n's health and Open WebUI's readiness endpoints, a badge of kromgo's,
   # dex's discovery document, oauth2-proxy's readiness endpoint, Backstage's and Ascender's ping
   # endpoint; and the pages behind
-  # sign-in, which answer with the redirect: the demo's, and the log store's interface, not its root,
-  # which its route redirects itself. A second target, or one that is not the Service, shows whole.
+  # sign-in, which answer with the redirect: the demo's, the log store's interface, not its root,
+  # which its route redirects itself, and Locust's interface, whose page Locust answers to anyone. A
+  # second target, or one that is not the Service, shows whole.
   # shellcheck disable=SC2016 # $service is a jq variable.
   [ "$(jq -r --arg service "$service" '[.[] | select(.kind == "Probe" and (.spec.module | startswith("public_https")))
       | "\(.metadata.namespace)/\(.metadata.name) \(.spec.module) \(.spec.targets.staticConfig.static | map(ltrimstr("https://" + $service)) | join(" "))"] | sort | join(",")' "$objects")" = \
-    "ai-system/n8n public_https /healthz,ai-system/open-webui public_https /health/db,ascender/ascender public_https /api/v2/ping/,backstage/backstage public_https /.backstage/health/v1/readiness,demo/hello public_https /,demo/hello-sso public_https_signin /,kromgo/kromgo public_https /badges/cluster_node_count,monitoring/logs public_https_signin /select/vmui/,sso-system/auth public_https /ready,sso-system/dex public_https /.well-known/openid-configuration" ]
+    "ai-system/n8n public_https /healthz,ai-system/open-webui public_https /health/db,ascender/ascender public_https /api/v2/ping/,backstage/backstage public_https /.backstage/health/v1/readiness,demo/hello public_https /,demo/hello-sso public_https_signin /,kromgo/kromgo public_https /badges/cluster_node_count,locust/locust public_https_signin /,monitoring/logs public_https_signin /select/vmui/,sso-system/auth public_https /ready,sso-system/dex public_https /.well-known/openid-configuration" ]
   # The Probes are in the namespaces of their routes, and the rules read the job they name: of the
   # five alerts the cluster applies, read from the render, every reference to a series of a probe or
   # of its scrape, two in each of the first three and one in each of the last two, selects that job,
   # so a probe of another job raises none of them.
-  [ "$(jq -r '[.[] | select(.kind == "Probe") | .metadata.namespace] | sort | join(",")' "$objects")" = "ai-system,ai-system,ascender,backstage,demo,demo,envoy-gateway-system,kromgo,monitoring,sso-system,sso-system" ]
+  [ "$(jq -r '[.[] | select(.kind == "Probe") | .metadata.namespace] | sort | join(",")' "$objects")" = "ai-system,ai-system,ascender,backstage,demo,demo,envoy-gateway-system,kromgo,locust,monitoring,sso-system,sso-system" ]
   [ "$(yq -o json -I0 '.spec.groups' "$RENDER"/lab-sto2/blackbox-exporter/PrometheusRule.monitoring.coreos.com_monitoring_blackbox-exporter-alerts.yaml |
     jq -c '[.[].rules[] | [.alert, (.expr | [scan("\\b(?:probe_[a-z_]+|up)\\b")] | length),
       (.expr | [scan("\\b(?:probe_[a-z_]+|up)\\{job=\"public-endpoints\"\\}")] | length)]]')" = \
@@ -730,12 +731,12 @@ render_chart() {
   tree_render
   collect "$RENDER" "$objects"
   # Every route of the tree is probed: the demo's, kromgo's, n8n's, Open WebUI's, dex's, the sign-in
-  # host's, Backstage's, Ascender's, and the demo's and the log store's interface's behind sign-in with their
-  # sign-in paths by their hostnames, and the redirect. They are the routes of the render, which
-  # holds those a chart makes as well.
+  # host's, Backstage's, Ascender's, and the demo's, the log store's interface's and Locust's
+  # interface's behind sign-in with their sign-in paths by their hostnames, and the redirect. They
+  # are the routes of the render, which holds those a chart makes as well.
   routes="$(jq -r '[.[] | select(.kind == "HTTPRoute") | .metadata.name] | sort | join(",")' "$objects")"
   echo "routes: $routes"
-  [ "$routes" = "ascender,auth,backstage,dex,hello,hello-sso,hello-sso-oauth2,https-redirect,kromgo,logs,logs-oauth2,n8n,open-webui" ]
+  [ "$routes" = "ascender,auth,backstage,dex,hello,hello-sso,hello-sso-oauth2,https-redirect,kromgo,locust,locust-oauth2,logs,logs-oauth2,n8n,open-webui" ]
   run unprobed "$objects"
   echo "$output"
   [ "$status" -eq 0 ]
@@ -927,7 +928,7 @@ EOF
   echo "$output"
   [ -z "$output" ]
   # A route that no such policy covers probed for the redirect is refused: hello's Probe expecting it,
-  # and hello-sso's and the log store's once the policies are gone or ask for no external
+  # and hello-sso's, the log store's and Locust's once the policies are gone or ask for no external
   # authorisation, when each host needs a Probe for 200.
   jq '(.[] | select(.kind == "Probe" and .metadata.name == "hello") | .spec.module) = "public_https_signin"' "$objects" >"$fixture"
   run unprobed "$fixture"
@@ -939,38 +940,42 @@ EOF
     jq "$refusal" "$objects" >"$fixture"
     run unprobed "$fixture"
     echo "$refusal: $output"
-    [ "$(wc -l <<<"$output")" -eq 6 ]
+    [ "$(wc -l <<<"$output")" -eq 9 ]
     [[ $output == *"Probe demo/hello-sso probes the hostname hello-sso.$DOMAIN for the sign-in redirect with public_https_signin, and no external-authorisation SecurityPolicy covers it"* ]]
     [[ $output == *"HTTPRoute demo/hello-sso: no Probe over https through "*" names the hostname hello-sso.$DOMAIN"* ]]
     [[ $output == *"HTTPRoute demo/hello-sso-oauth2: no Probe over https through "*" names the hostname hello-sso.$DOMAIN"* ]]
     [[ $output == *"Probe monitoring/logs probes the hostname logs.$DOMAIN for the sign-in redirect with public_https_signin, and no external-authorisation SecurityPolicy covers it"* ]]
     [[ $output == *"HTTPRoute monitoring/logs: no Probe over https through "*" names the hostname logs.$DOMAIN"* ]]
     [[ $output == *"HTTPRoute monitoring/logs-oauth2: no Probe over https through "*" names the hostname logs.$DOMAIN"* ]]
+    [[ $output == *"Probe locust/locust probes the hostname locust.$DOMAIN for the sign-in redirect with public_https_signin, and no external-authorisation SecurityPolicy covers it"* ]]
+    [[ $output == *"HTTPRoute locust/locust: no Probe over https through "*" names the hostname locust.$DOMAIN"* ]]
+    [[ $output == *"HTTPRoute locust/locust-oauth2: no Probe over https through "*" names the hostname locust.$DOMAIN"* ]]
   done
 }
 
 @test "A cluster that selects the probes without the exporter or the Gateway is refused" {
   local app dir problems fixture="$BATS_TEST_TMPDIR/fixture"
   # The tree as it is passes, with the exporter, the issuer, the Gateway and the routes listed, and
-  # the eleven applications that declare a Probe name the exporter.
+  # the twelve applications that declare a Probe name the exporter.
   run "$REPO/scripts/kubernetes-check" "$REPO"
   echo "$output"
   [ "$status" -eq 0 ]
-  for app in blackbox-exporter cluster-ca gateway-public hello-route kromgo n8n open-webui dex oauth2-proxy hello-sso backstage victoria-logs-route ascender; do
+  for app in blackbox-exporter cluster-ca gateway-public hello-route kromgo n8n open-webui dex oauth2-proxy hello-sso backstage victoria-logs-route ascender \
+    locust-route; do
     [ "$(yq '.resources[] | select(test("/'"$app"'/ks.yaml$"))' "$REPO/kubernetes/apps/overlays/lab-sto2/kustomization.yaml")" ] \
       || { echo "the lab-sto2 overlay does not list $app"; return 1; }
   done
   # Every application of the cluster that holds a Probe, in what the cluster applies, names the
   # exporter, which is what makes a cluster that lists it without the exporter refused below. They
-  # are these eleven, read from the render, which holds a Probe a chart makes as well.
+  # are these twelve, read from the render, which holds a Probe a chart makes as well.
   tree_render
   problems="$(probe_apps_without_exporter "$RENDER")"
   echo "$problems"
   [ -z "$problems" ]
   [ "$(for dir in "$RENDER"/lab-sto2/*/; do
       if compgen -G "${dir}Probe.monitoring.coreos.com_*.yaml" >/dev/null; then basename "$dir"; fi
-    done | LC_ALL=C sort | paste -sd' ' -)" = "ascender backstage dex gateway-public hello-route hello-sso kromgo n8n oauth2-proxy open-webui victoria-logs-route" ]
-  for app in gateway-public hello-route kromgo n8n open-webui dex oauth2-proxy hello-sso backstage victoria-logs-route ascender; do
+    done | LC_ALL=C sort | paste -sd' ' -)" = "ascender backstage dex gateway-public hello-route hello-sso kromgo locust-route n8n oauth2-proxy open-webui victoria-logs-route" ]
+  for app in gateway-public hello-route kromgo n8n open-webui dex oauth2-proxy hello-sso backstage victoria-logs-route ascender locust-route; do
     [ "$(yq '.spec.dependsOn[].name | select(. == "blackbox-exporter")' "$REPO"/kubernetes/apps/base/*/"$app"/ks.yaml)" = blackbox-exporter ]
   done
   # A Probe added to another application is refused, however its file spells the kind: hello with a
@@ -999,7 +1004,7 @@ lab-sto2: the application kromgo declares a Probe and its Kustomization does not
   run probe_apps_without_exporter "$fixture-named"
   echo "$output"
   [ "$output" = "lab-sto2: the application hello declares a Probe and its Kustomization does not name blackbox-exporter in dependsOn" ]
-  # Without the exporter all eleven are refused, each naming it and the overlay.
+  # Without the exporter all twelve are refused, each naming it and the overlay.
   tree_without blackbox-exporter
   run "$REPO/scripts/kubernetes-check" "$TREE"
   echo "$output"
@@ -1015,6 +1020,7 @@ lab-sto2: the application kromgo declares a Probe and its Kustomization does not
   [[ $output == *"kubernetes/apps/base/backstage/backstage/ks.yaml: Kustomization backstage names blackbox-exporter"* ]]
   [[ $output == *"kubernetes/apps/base/monitoring/victoria-logs-route/ks.yaml: Kustomization victoria-logs-route names blackbox-exporter"* ]]
   [[ $output == *"kubernetes/apps/base/ascender/ascender/ks.yaml: Kustomization ascender names blackbox-exporter"* ]]
+  [[ $output == *"kubernetes/apps/base/locust/locust-route/ks.yaml: Kustomization locust-route names blackbox-exporter"* ]]
   [[ $output == *"apps/overlays/lab-sto2"* ]]
   [[ $output == *"does not enable"* ]]
   # Without the Gateway, and with the route that declares a Probe, the route is refused.
@@ -1031,7 +1037,7 @@ lab-sto2: the application kromgo declares a Probe and its Kustomization does not
   # scrapes of declared Probes). Robot Framework's suite of Ascender's sign-in page, robot-ascender,
   # names ascender and goes with it.
   tree_without gateway-public hello-route n8n kromgo open-webui external-dns external-dns-dashboard hello-sso dex \
-    oauth2-proxy backstage crowdsec-gateway-logs crowdsec victoria-logs-route ascender robot-ascender
+    oauth2-proxy backstage crowdsec-gateway-logs crowdsec victoria-logs-route ascender robot-ascender locust-route
   run "$REPO/scripts/kubernetes-check" "$TREE"
   echo "$output"
   [ "$status" -eq 0 ]
