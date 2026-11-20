@@ -1054,7 +1054,8 @@ CSI node plugin and satellites, the node exporter) are not selected by a pod pol
 firewall is their layer. The nodes' own listeners are the node firewall's
 ([ADR 0017](adr/0017-nodes-firewall-themselves-with-talos-ingress-firewall.md)). The listed
 namespaces take and send what they did before. Policy is connection-level: no layer 7 rule, no
-mutual authentication, no encryption.
+mutual authentication, no encryption; Cilium's WireGuard encrypts pod traffic between nodes
+whatever the policies say ([Encryption between nodes](#encryption-between-nodes)).
 
 ### The record of what policy drops
 
@@ -1891,7 +1892,8 @@ against exposing a backend through more than one address. A pod under `kata` has
 Kata's networking besides
 ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/Documentation/network/kubernetes/kata.rst#limitations)):
 Kata copies the MTU of the pod's interface into its virtual machine and not the lower MTU that
-Cilium sets on the pod's default route for the tunnel's overhead, so its connections with other
+Cilium sets on the pod's default route for the tunnel's and WireGuard's overhead
+([Encryption between nodes](#encryption-between-nodes)), so its connections with other
 pods can see fragmentation or dropped packets until the pod lowers that route's MTU itself. The
 value is one of the settings in `cilium-config`, so a change of it restarts every agent, at most
 two at a time, and the operator ([Service addresses](#service-addresses)).
@@ -1930,9 +1932,10 @@ address it gave opens on port 53 within 5. Both go to the resolver's Service add
 pod off the host network relies on, so they fail where Service addresses are not translated for
 pods under the class. `mtu`: whether the MTU of `net`'s default route, the route's own or else its
 device's, is `reference`'s. Cilium's CNI gives a pod's device the device MTU and its default route
-that MTU less the tunnel's overhead, 50 for VXLAN over IPv4 (`pkg/mtu/mtu.go`,
-`plugins/cilium-cni/cmd/cmd.go`), and, Cilium's guide says, Kata copies the device's MTU into its
-virtual machine and not the route's
+that MTU less the overhead of the tunnel, 50 for VXLAN over IPv4, and of WireGuard, 95
+(`pkg/mtu/mtu.go`, `plugins/cilium-cni/cmd/cmd.go`,
+[Encryption between nodes](#encryption-between-nodes)), and, Cilium's guide says, Kata copies the
+device's MTU into its virtual machine and not the route's
 ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/Documentation/network/kubernetes/kata.rst#limitations)).
 gVisor's `runsc`, at the release the node image's extension ships, gives its network stack each
 route's MTU as it finds it in the pod's network namespace (`runsc/sandbox/network.go`), but that
@@ -2086,6 +2089,211 @@ loosens Flux's own policies for as long as the mode is on. `rollOutCiliumPods` r
 into a change of their configuration, and `scripts/install-cilium` passes the same values file to
 helm, so a cluster built from nothing comes up in audit mode too. `tests/install-cilium.bats`
 fails when this sentence, the value and the agents' rendered configuration disagree.
+
+## Encryption between nodes
+
+**Traffic between pods on different nodes is encrypted.** Cilium's values set
+`encryption.enabled: true`, `encryption.type: wireguard`, where the chart's own default type is
+`ipsec`, and `encryption.nodeEncryption: false`, which the chart renders into two keys of the
+ConfigMap `cilium-config`, `enable-wireguard: "true"` and `wireguard-persistent-keepalive: "0s"`,
+the chart's default of no keepalive
+([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/install/kubernetes/cilium/templates/cilium-configmap.yaml#L749-L774));
+read it from the cluster with
+`kubectl -n kube-system get configmap cilium-config -o jsonpath='{.data.enable-wireguard}'`,
+which prints `true`. Every Cilium agent then makes a WireGuard device, `cilium_wg0`, in its node's
+kernel, and every packet between pods on different nodes passes through that device and crosses
+the node network encrypted, with nothing for an application to change
+([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/Documentation/security/network/encryption-wireguard.rst)).
+The decision, and why node-to-node encryption and strict mode stay off, is
+[ADR 0022](adr/0022-pod-traffic-between-nodes-is-encrypted-with-wireguard.md).
+`rollOutCiliumPods` and `operator.rollOutPods` restart the agents and the operator into a change of
+the values, and `scripts/install-cilium` passes the same file to helm, so a cluster built from
+nothing encrypts from its first agents. `tests/install-cilium.bats` fails when this sentence, the
+values and the agents' rendered configuration disagree, and when the chart rendered with these
+values differs from its render without encryption in anything but those two keys, the checksum of
+the ConfigMap that restarts the agents and the operator, and the certificates the chart makes anew
+on every render. It also fails when the agents' rendered configuration leaves tunnel mode over
+VXLAN or kube-proxy replacement, names a load-balancing mode such as DSR, turns on XDP
+acceleration or the host firewall, translates a pod's Service addresses at its socket, sets an MTU,
+or changes the monitor aggregation from the chart's `medium`, as what follows rests on each.
+
+- **The keys.** Each agent makes its own key pair and keeps the private key in its state directory,
+  as `/var/run/cilium/state/cilium_wg0.key`, which lies in the agent's run directory, a path of the
+  node itself, so an agent that restarts loads the key it had
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/pkg/wireguard/agent/agent.go#L757-L776),
+  [the run directory](https://github.com/cilium/cilium/blob/v1.20.4/install/kubernetes/cilium/templates/cilium-agent/daemonset.yaml#L886-L889)).
+  It publishes the public key on its node's `CiliumNode`, as the annotation
+  `network.cilium.io/wg-pub-key`, before it publishes the node, and every agent gives its device a
+  peer for each other node that has published a key, whose endpoint is the address that node is
+  registered with, on UDP 51871
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/pkg/wireguard/agent/agent.go#L489-L618)).
+  On Talos 1.14.6, `/var/run` is a link to `/run`
+  ([Talos](https://github.com/siderolabs/talos/blob/v1.14.6/internal/app/machined/pkg/controllers/block/internal/volumes/volumeconfig/system_volumes.go#L510-L526)),
+  a file system in memory
+  ([Talos](https://github.com/siderolabs/talos/blob/v1.14.6/internal/pkg/mount/v3/helpers.go#L302-L319)),
+  so the key lasts as long as the node runs: after a reboot, a Talos upgrade, which reboots the
+  node, or a reset, the agent makes a new pair and publishes the new public key, and the other
+  agents replace the node's peer with one for it
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/pkg/wireguard/agent/agent.go#L517-L529)).
+  An agent writes its key into its `CiliumNode` when it starts and when its own node changes, and
+  leaves the object alone otherwise
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/pkg/nodediscovery/nodediscovery.go#L108-L158),
+  [the write](https://github.com/cilium/cilium/blob/v1.20.4/pkg/nodediscovery/nodediscovery.go#L297-L306),
+  [its own object ignored](https://github.com/cilium/cilium/blob/v1.20.4/pkg/k8s/watchers/cilium_node.go#L121-L128)),
+  so a restore of etcd from a snapshot older than a worker's last reboot gives back that worker's
+  `CiliumNode` with a key the worker no longer holds, which the other agents then encrypt to, and
+  pod traffic to and from the worker stops until its agent restarts or its node next changes. The
+  [restore's runbook](runbooks/etcd-restore.md#afterwards) restarts the agents.
+  Talos builds WireGuard into its kernel
+  ([Talos](https://github.com/siderolabs/pkgs/blob/e6ad19d/kernel/build/config-amd64#L2610)), so
+  the agent, which may load no module, needs none.
+- **The device and its port.** `cilium_wg0` listens on UDP 51871 on the node's addresses, which
+  every node's firewall admits from the nodes' own addresses alone
+  ([cluster.md](cluster.md#what-each-node-admits)). A packet decrypted there is handed to the
+  node's network stack, the overlay's VXLAN packet among them
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/bpf/bpf_wireguard.c#L272-L289)), which
+  the overlay's own rule then admits to UDP 8472, as Talos matches a rule's sources and ports on
+  every interface but its own trusted ones
+  ([Talos](https://github.com/siderolabs/talos/blob/v1.14.6/internal/app/machined/pkg/controllers/network/nftables_chain_config.go#L129-L143),
+  [the rules](https://github.com/siderolabs/talos/blob/v1.14.6/internal/app/machined/pkg/controllers/network/nftables_chain_config.go#L286-L305)).
+- **What is encrypted.** These values route in tunnel mode, over VXLAN, replace kube-proxy and
+  translate a Service's address at each pod's interface ([Runtime classes](#runtime-classes)),
+  without DSR or XDP acceleration (the rendered `cilium-config` holds
+  `bpf-lb-acceleration: "disabled"` and no `bpf-lb-mode`), and leave node-to-node encryption off.
+  In tunnel mode an agent sends every packet its overlay carries to another node into the
+  WireGuard device, whatever the packet holds
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/bpf/lib/wireguard.h#L76-L82)). Cilium's
+  table of what is encrypted gives, for these values, every connection between pods on different
+  nodes, directly or through a `ClusterIP` Service, and the hop on which a worker forwards a
+  connection from outside the cluster to a pod on another node, for kube-proxy replacement over the
+  overlay without DSR or XDP
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/Documentation/security/network/encryption-wireguard.rst#which-traffic-is-encrypted)),
+  as the public Gateway's proxies' Service, with `externalTrafficPolicy: Cluster`, has it do
+  ([The public Gateway](#the-public-gateway)). The table lists a connection between pods through a
+  Service of another type, a `LoadBalancer` one included, only for translation at the socket and
+  for kube-proxy, and these values use neither: that it is encrypted here rests on Cilium's source
+  at this version, not on the table. The agent translates the Service's address to a backend's at
+  the pod's interface
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/bpf/bpf_lxc.c#L90-L96)), so the packet
+  reaches the overlay as one to a pod on another node.
+  A packet to an address in another node's pod range enters the overlay even before the agent knows
+  that pod, as each node's pod range is in the agents' table with that node as its tunnel endpoint
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/pkg/node/manager/manager.go#L776-L792)).
+- **What Hubble shows.** Hubble records a pod's flows at the pod's interface, before the overlay and
+  WireGuard on the way out and after them on the way in, so `hubble observe --unencrypted` lists
+  them and `hubble observe --encrypted` does not. That flag selects flows whose trace carries the
+  reason the agent gives a WireGuard packet at the node's device
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/bpf/bpf_host.c#L1235-L1245),
+  [the way out](https://github.com/cilium/cilium/blob/v1.20.4/bpf/bpf_host.c#L1610-L1618)), and at
+  the chart's default monitor aggregation, `medium`, the agents report no trace of a packet that
+  arrives from the network and none at the device of a packet without connection-tracking state,
+  which a WireGuard packet there has none of
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/bpf/lib/trace.h#L178-L207)). Hubble
+  therefore does not show whether a flow crossed the node network encrypted; the device's
+  counters do, each peer's `transfer-tx` and `transfer-rx` in an agent's
+  `cilium-dbg debuginfo --output json`.
+- **What other layers cover.** Packets between pods on one node never leave it, and are not
+  encrypted. Traffic from and to the nodes' own addresses is what node-to-node encryption would
+  cover, and these values leave it off
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/Documentation/security/network/encryption-wireguard.rst#node-to-node-encryption-beta)).
+  Cilium's table counts a pod on the host network as a node, and gives a node to a pod on another
+  node, a pod to another node and a node to another node to node-to-node encryption alone
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/Documentation/security/network/encryption-wireguard.rst#which-traffic-is-encrypted)):
+  pods on the host network, LINSTOR's satellites among them, DRBD's replication between the
+  workers' kernels, the kubelets, the API servers and etcd, which carry TLS of their own, a node's
+  or a host-network pod's connection to a pod on another node, and a pod's connection to a node's
+  address, which leaves its node through the node's interface ([cluster.md](cluster.md#sources)).
+  Cilium's source at this version sends a node's packets to a pod on another node into the overlay
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/bpf/bpf_host.c#L854-L874)), and so
+  through the device. Such a connection, unless its socket is bound to another address, leaves the
+  node from the address of Cilium's own device there, `cilium_host`, as Cilium routes each other
+  node's pod range through that device from that address
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/pkg/datapath/linux/node.go#L374-L424)),
+  and that address has a tunnel endpoint without node-to-node encryption too
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/pkg/node/manager/manager.go#L577-L584)),
+  so the pod's replies go back through the overlay and the device as well
+  ([the replies](https://github.com/cilium/cilium/blob/v1.20.4/bpf/bpf_lxc.c#L1283-L1333)). That
+  the device carries such a connection rests on Cilium's source at this version, not on the table.
+  Between a client outside the cluster and the worker it reaches, which the edge routers send, a
+  request is not encrypted by Cilium either: over HTTPS the Gateway's TLS covers it, which the
+  `https` listener terminates at a proxy ([The public Gateway](#the-public-gateway)). The handshakes
+  the devices exchange on UDP 51871 are WireGuard's own protocol, not traffic it carries.
+- **Turning it on, and back.** A change of the values is a change of `cilium-config`, so it
+  restarts every agent, at most two at a time by the chart's update strategy, and the operator
+  ([Service addresses](#service-addresses)). While some agents encrypt and others do not yet, an
+  agent that encrypts sends every packet of its overlay into its device, and the device has a peer
+  only for the nodes whose agents have published a key and drops a packet for any other, answering
+  its own node with an ICMP host unreachable
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/bpf/lib/wireguard.h#L76-L82),
+  [the keys](https://github.com/cilium/cilium/blob/v1.20.4/pkg/node/manager/manager.go#L604-L618),
+  [Linux](https://github.com/gregkh/linux/blob/v6.18.63/drivers/net/wireguard/device.c#L137-L232));
+  a node that does not encrypt yet sends its overlay's packets as before, and the other takes them,
+  as no strict mode is on, but answers them into its device. So pod traffic between a node whose
+  agent has restarted and one whose agent has not stops, both ways, until the second restarts:
+  between pods, to a Service's backend across that divide, the resolver among them, and a node's
+  own connections to pods across it, from either side, as a node sends its packets to a pod on
+  another node into the overlay and the pod's replies come back through it, as above. Traffic to
+  the addresses the nodes are registered with, and from them to anything but a pod, is not
+  touched, the storage layer's replication between the workers, a pod's connection to another
+  node, which leaves its node from the node's address, and the workers' BGP sessions with the edge
+  routers among it: without node-to-node encryption such an address has neither a tunnel endpoint
+  nor a key
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/pkg/node/manager/manager.go#L577-L602)),
+  an edge router's is no node's, and a packet outside the overlay goes into the device only when
+  its destination carries a key
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/bpf/lib/wireguard.h#L158-L166)).
+  The drops happen in the kernel's device, after the agent's programs have passed the packet on,
+  so no agent reports one: neither `just network-drops` nor the record of what policy drops shows
+  them, and `cilium-health status` shows the nodes across the divide unreachable through the
+  overlay. The release waits for the roll up to its timeout of 10 minutes and has the root's
+  defaults, from which it does not opt out ([What the root sets](#what-the-root-sets)): an upgrade
+  whose roll is not done by then fails, and its remediation rolls the release back, which rolls
+  the agents again into the values before, with the same divide until the last has restarted, and
+  tries again, three times, so pod traffic across the divide stops on each of four tries before
+  the last is rolled back too and the release is Stalled with the reason `RetriesExceeded`. An
+  operator who wants to stop that suspends the release,
+  `flux suspend helmrelease cilium --namespace kube-system`, and resumes it with
+  `flux resume helmrelease cilium --namespace kube-system`. Turning WireGuard off is the same in
+  reverse: an agent that restarts without it deletes its device
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/pkg/wireguard/agent/agent.go#L148-L154))
+  and sends its overlay's packets as before, and what the nodes that still encrypt send it through
+  their devices is lost until they restart too. The key file stays in the state directory until
+  the node reboots, and an agent that turns WireGuard on again before then loads it. The way back
+  is a change that sets the values back, with the scenario, test and docs that follow them, and
+  leaves `talos/firewall.yaml` and `node-firewall-exceptions.yaml` as they are, so every node keeps
+  admitting UDP 51871, where nothing then listens. A revert of the whole change takes the rule out
+  of the tree too, while the nodes keep it until `just infra-apply sto2/cluster` and
+  `just cluster-talos` roll out a configuration without it ([cluster.md](cluster.md#the-way-back)).
+- **MTU.** The agent derives every MTU, and nothing in the tree sets one. The node network's MTU is
+  the cloud's, read and never set (`infra/openstack/modules/network/outputs.tf`), and an agent
+  takes the lowest MTU of its node's devices as its base
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/pkg/mtu/manager.go#L49-L80)). It gives
+  `cilium_wg0` the base less WireGuard's 95 bytes
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/pkg/wireguard/agent/agent.go#L335-L368)),
+  keeps the base on the pods' interfaces, and gives the pods' default route the base less
+  WireGuard's 95 bytes and VXLAN's 50
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/pkg/mtu/mtu.go#L121-L173)). When it starts,
+  and whenever its base changes, it writes that MTU into the default route in the network
+  namespace of every pod on its node, and the base onto each pod's interface on the node's side
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/pkg/mtu/endpoint_updater.go#L98-L170),
+  [the routes](https://github.com/cilium/cilium/blob/v1.20.4/pkg/mtu/endpoint_updater.go#L215-L339)),
+  and Cilium's CNI plugin gives a new pod the same route MTU
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/Documentation/network/kubernetes/kata.rst#limitations)),
+  so no workload restarts for it. gVisor copies a pod's interfaces, with their MTU, and its routes,
+  with each route's MTU, the default route's included, into its own network stack when the sandbox
+  starts
+  ([gVisor](https://github.com/google/gvisor/blob/release-20260831.0/runsc/sandbox/network.go#L303-L416),
+  [the routes](https://github.com/google/gvisor/blob/release-20260831.0/runsc/sandbox/network.go#L584-L650)),
+  so a pod under `gvisor` takes the route MTU its namespace holds at that moment. A pod under
+  `kata` keeps the MTU of its interface, as [Runtime classes](#runtime-classes) says.
+- **Watching it.** `just cluster-check` asks every agent whether it encrypts with WireGuard and has
+  a peer for each other node ([cluster.md](cluster.md#recipes)). It counts the peers and does not
+  match them to the nodes, which `cilium-health status` does by reaching each node through the
+  overlay. Cilium 1.20.4 exposes no metric of
+  WireGuard
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/Documentation/observability/metrics.rst)),
+  so no alert watches it; a peer that cannot be reached shows in `cilium-health status` as a node
+  unreachable through the overlay.
 
 ## External Secrets
 

@@ -68,6 +68,9 @@ no-pod:
     reason: the kubelet, a service of Talos itself
   - rule: cilium-vxlan
     reason: the kernel's VXLAN device, which Cilium makes for its overlay
+  - rule: cilium-wireguard
+    reason: Cilium's WireGuard device, which the agent creates in the kernel and which listens on the
+      node's addresses without the agent's pod declaring the port
   - rule: cilium-health
     reason: Cilium's health checks between nodes, on a port the agent opens on its node without
       declaring it in its pod

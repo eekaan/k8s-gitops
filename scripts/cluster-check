@@ -23,9 +23,21 @@
 #                         named in scripts/lib/cluster.sh) is down in Prometheus, asked through the
 #                         API server's service proxy; a FAIL names each job and the nodes it is down
 #                         on. Skipped, saying why, while the monitoring stack's Service does not
-#                         exist and when Prometheus does not answer: its silence is not a pass.
-# It runs kubectl get and kubectl logs only. It prints node and object names, never an address, a
-# log line or kubectl's own errors, which can name the API server's or a node's address.
+#                         exist and when Prometheus does not answer: its silence is not a pass;
+#   encryption            while the ConfigMap cilium-config in kube-system turns WireGuard on
+#                         (enable-wireguard "true"), the Running Cilium agent on every node the API
+#                         lists reports, asked with cilium-dbg encrypt status, the mode Wireguard, no
+#                         message, which is where the agent's and the kernel's states of the device
+#                         disagreeing show, the one device cilium_wg0, and as many peers as there
+#                         are other nodes, counted, not matched to them; an answer that is not one
+#                         JSON object is no answer. A FAIL names each node and why. Skipped, saying
+#                         so, while cilium-config does not turn WireGuard on; one that cannot be
+#                         read fails it.
+# It runs kubectl get and kubectl logs, and, while cilium-config turns WireGuard on, one kubectl exec
+# in each Cilium agent's container cilium-agent, of cilium-dbg encrypt status --output json, stopped
+# after 20 seconds, so the kubeconfig then needs exec on the agents' pods in kube-system, more than a
+# reading recipe otherwise needs. It prints node and object names, never an address, a log line, a
+# public key or kubectl's own errors, which can name the API server's or a node's address.
 # Usage: scripts/cluster-check [cluster]
 set -euo pipefail
 
@@ -242,6 +254,91 @@ elif [[ -n $unscraped ]]; then
   result skip "scrape targets" "Prometheus has no active target for $(joined <<< "$unscraped"), so nothing says whether they are up"
 else
   result pass "scrape targets" "none of the $target_count targets of the ${#scrape_jobs[@]} component jobs is down"
+fi
+
+# encryption_verdict PEERS: why the answer of cilium-dbg encrypt status --output json on standard
+# input is not that of an agent that encrypts with WireGuard through cilium_wg0 with PEERS peers, in
+# a word or two, or nothing when it is. An answer that is not exactly one JSON object, an empty
+# answer among them, is no answer, and one that is not JSON at all fails. Of the answer it prints
+# the mode, when that is a word, and the number of peers alone: the answer also holds the device's
+# public key, and its message names keys. The pinned cilium-dbg leaves the peer count out when it
+# is 0.
+encryption_verdict() {
+  jq -rs --argjson peers "$1" 'if length != 1 then "no answer" else .[0] |
+    if type != "object" then "no answer"
+    elif .mode != "Wireguard" then
+      if (.mode | type) == "string" and (.mode | test("^[A-Za-z]{1,20}$")) then "mode \(.mode)" else "no mode" end
+    elif (.msg // "") != "" then "agent and kernel disagree"
+    elif [.wireguard.interfaces[]?.name] != ["cilium_wg0"] then "no single device cilium_wg0"
+    elif (.wireguard.interfaces[0]["peer-count"] // 0 | type) != "number" then "no answer"
+    elif (.wireguard.interfaces[0]["peer-count"] // 0) != $peers then "\(.wireguard.interfaces[0]["peer-count"] // 0) of \($peers) peers"
+    else "" end end'
+}
+
+# stop_encryption_calls STATUS: the agent's call and its timer stopped, when they still run, and the
+# answers removed, however the script ends; it takes the place of report_failed_step's EXIT trap, so
+# a run that ends with STATUS other than 0 still names the step it failed in.
+# shellcheck disable=SC2329 # It runs from the EXIT trap.
+stop_encryption_calls() {
+  local pid
+  for pid in ${call:+"$call"} ${timer:+"$timer"}; do
+    kill "$pid" 2> /dev/null || true
+  done
+  rm -rf -- "$answers"
+  failed_step "$1"
+}
+
+# Each agent is asked by its own cilium-dbg through kubectl exec, as scripts/network-drops asks its
+# hubble, and each call is stopped after encryption_bound seconds: kubectl is the process whose id
+# call holds, and whichever of it and the timer ends first, the other is stopped.
+encryption_bound=20
+if ! config=$(get configmap cilium-config --namespace kube-system); then
+  result FAIL encryption "kubectl could not read the ConfigMap cilium-config in kube-system"
+elif [[ $(jq -r '.data["enable-wireguard"] // ""' <<< "$config") != true ]]; then
+  result skip encryption 'cilium-config does not turn WireGuard on, as its enable-wireguard is not "true", so no agent was asked'
+elif [[ -z ${nodes-} ]]; then
+  result FAIL encryption "kubectl could not read the nodes"
+elif [[ -z ${pods-} ]]; then
+  result FAIL encryption "kubectl could not read the pods"
+elif ! count=$(jq '.items | length' <<< "$nodes") || ((count == 0)); then
+  result FAIL encryption "the API lists no node"
+else
+  peer_count=$((count - 1))
+  failing=()
+  answers=$(mktemp -d)
+  call='' timer=''
+  trap 'stop_encryption_calls $?' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  while IFS= read -r node; do
+    agent=$(jq -r --arg node "$node" 'first(.items[] | select(.metadata.namespace == "kube-system"
+      and .metadata.labels["k8s-app"] == "cilium" and .spec.nodeName == $node and .status.phase == "Running")
+      | .metadata.name) // ""' <<< "$pods")
+    # A name read from the cluster reaches kubectl only once it has the shape of a pod's.
+    if [[ ! $agent =~ ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$ ]]; then
+      failing+=("$node: no agent running")
+      continue
+    fi
+    (exec_tool kubectl exec --namespace kube-system --container cilium-agent "$agent" -- \
+      cilium-dbg encrypt status --output json) > "$answers/answer" 2> /dev/null &
+    call=$!
+    sleep "$encryption_bound" &
+    timer=$!
+    wait -n "$call" "$timer" || true
+    kill "$call" "$timer" 2> /dev/null || true
+    if wait "$call" && verdict=$(encryption_verdict "$peer_count" < "$answers/answer" 2> /dev/null); then
+      [[ -z $verdict ]] || failing+=("$node: $verdict")
+    else
+      failing+=("$node: no answer")
+    fi
+    wait "$timer" 2> /dev/null || true
+    call='' timer=''
+  done < <(jq -r '.items[].metadata.name' <<< "$nodes")
+  if ((${#failing[@]} == 0)); then
+    result pass encryption "the agents of all $count nodes encrypt with WireGuard through cilium_wg0, each with a peer for each of the other $peer_count"
+  else
+    result FAIL encryption "$(printf '%s\n' "${failing[@]}" | paste -sd';' - | sed 's/;/; /g')"
+  fi
 fi
 
 if ((failures > 0)); then

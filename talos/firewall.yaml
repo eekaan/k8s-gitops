@@ -71,6 +71,11 @@ listeners:
     ports: [8472]
     nodes: all
     from: [members]
+  - name: cilium-wireguard
+    protocol: udp
+    ports: [51871]
+    nodes: all
+    from: [members]
   - name: cilium-health
     protocol: tcp
     ports: [4240]
