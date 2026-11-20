@@ -1,0 +1,21 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/kustomization
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - credentials.yaml
+  - deployment.yaml
+  - service.yaml
+  - poddisruptionbudget.yaml
+  - podmonitor.yaml
+
+# The configuration, in a ConfigMap whose name kustomize writes into the Deployment's volume with a
+# hash of its content, so a change to auth.yml rolls the pods. Flux substitutes nothing in it: its
+# placeholders are vmauth's own.
+configMapGenerator:
+  - name: vmauth-config
+    files:
+      - auth.yml
+generatorOptions:
+  annotations:
+    kustomize.toolkit.fluxcd.io/substitute: disabled

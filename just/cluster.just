@@ -63,6 +63,16 @@ cluster-snapshot cluster='lab-sto2':
 cluster-snapshots cluster='lab-sto2':
     scripts/cluster-snapshots {{ quote(cluster) }}
 
+# Before a cluster is taken down, take and check a last copy of everything the rebuild restores from, as just cluster-last-copies <openbao file> <volsync file> <postgres file> [cluster] [--check]: first compare the Talos and Flux age keys and the three custody files with what the cluster holds, reading only, then print the plan (--check: stop there), then take an OpenBao snapshot and check it, a dump of each database, checked, and its WAL archived through a segment switched now, and a backup of each volume by VolSync's manual trigger with its Kustomization suspended meanwhile; prints one line per copy, nothing of a key, password, address or bucket; every wait bounded by LAST_COPIES_TIMEOUT; see docs/runbooks/rebuild.md
+[positional-arguments]
+cluster-last-copies *args:
+    scripts/cluster-last-copies "$@"
+
+# Before a cluster and the edge stack are taken down, take the cluster's DNS records out of the zone, as just cluster-dns-remove [cluster] [--check] [--yes]: refuse an external-dns without the TXT registry, sync or an owner id of its cluster; list, by a dry-run Job of external-dns with no source, every record and TXT entry of its owner it would delete (--check: stop there); then, once the cluster's name is typed back (--yes: without asking), suspend Flux's Kustomization and HelmRelease external-dns, each read back as suspended, scale it to 0, delete them with the same Job without --dry-run, and plan again to prove none is left; external-dns stays stopped, and the run prints how to start it again, after the edge stack's destroy only once the edges are built again, just cluster-config has run and flux reconcile kustomization gateway-public has applied the Gateway again; every wait bounded by DNS_REMOVE_TIMEOUT; prints no domain, address, zone identifier or token; see docs/runbooks/rebuild.md
+[positional-arguments]
+cluster-dns-remove *args:
+    scripts/cluster-dns-remove "$@"
+
 # List a PostgreSQL database's dumps in the postgres backup bucket, newest first, by name and size, reading only; with no database named (just postgres-dumps [cluster]) list the databases that have a dump, as <namespace>/<name>; the namespace and name are those of the database's Cluster
 [positional-arguments]
 postgres-dumps *args:
@@ -77,27 +87,51 @@ postgres-dump-check namespace name dump='latest' cluster='lab-sto2':
 cluster-restore snapshot *args:
     scripts/cluster-restore "$@"
 
-# Check a cluster's health, reading only: /readyz through the kubeconfig, every node Ready and as many as talman.yaml lists, no Ready worker out of BGP, no kube-proxy, every pod in kube-system and flux-system Running or Succeeded, no certificate signing request Pending, a pod's logs fetched, no scrape target of the cluster's own components down in Prometheus; pass, FAIL or skip per check
+# Check a cluster's health, reading only: /readyz through the kubeconfig, every node Ready and as many as talman.yaml lists, no Ready worker out of BGP, no kube-proxy, every pod in kube-system and flux-system Running or Succeeded, no certificate signing request Pending, a pod's logs fetched, no scrape target of the cluster's own components down in Prometheus, and, while cilium-config turns WireGuard on, every node's Cilium agent encrypting with WireGuard with a peer for every other node, asked by its own cilium-dbg through kubectl exec, so the kubeconfig then needs exec on the agents' pods in kube-system; pass, FAIL or skip per check
 cluster-check cluster='lab-sto2':
     scripts/cluster-check {{ quote(cluster) }}
 
-# Check a cluster's public Gateway, reading only: the Gateway Accepted and Programmed at the GATEWAY_ADDRESS of cluster-config, its proxies' labelled LoadBalancer Service holding that address, two proxies Ready on different nodes, its certificate Ready, no route accepted from a namespace without the opt-in label; then through each edge's floating address with curl --resolve, plain HTTP answered with a 301 to https, HTTPS verified against the cluster CA's certificate serving the demo's page and a 404 for a host no route serves; then each routed host's A records at a public resolver, exactly the two edges' addresses, and one request by the name alone; pass, FAIL or skip per line, no address; see docs/kubernetes.md, Checking the public Gateway
+# Check a cluster's public Gateway, reading only: the Gateway Accepted and Programmed at the GATEWAY_ADDRESS of cluster-config, its proxies' labelled LoadBalancer Service holding that address, two proxies Ready on different nodes, its certificate Ready, no route accepted from a namespace without the opt-in label, the demo's rate limit (rate limit) Accepted at N a second; then through each edge's floating address with curl --resolve, plain HTTP answered with a 301 to https, HTTPS verified against the cluster CA's certificate serving the demo's page and a 404 for a host no route serves, a burst of 2N+1 requests over HTTP/2 on one connection answered 200 and 429 (EDGE rate limit), and two seconds later the demo's page again (EDGE after the limit); then each routed host's A records at a public resolver, exactly the two edges' addresses, and one request by the name alone; pass, FAIL or skip per line, no address; see docs/kubernetes.md, Checking the public Gateway
 gateway-check cluster='lab-sto2':
     scripts/gateway-check {{ quote(cluster) }}
+
+# Check each OCIRepository of a cluster against signatures.yaml, reading only: one whose row the cluster verifies has exactly its row's verify block and is Ready and verified for its current generation, every other has no block; pass or FAIL per object, by namespace and name, with the condition's reason; see docs/kubernetes.md, Signatures
+cluster-signatures cluster='lab-sto2':
+    scripts/cluster-signatures {{ quote(cluster) }}
 
 # List, changing nothing, the flows the network policies drop or, in audit mode, would drop: the last DROPPED and AUDIT flows of each Cilium agent, read by its own hubble through kubectl exec, so the kubeconfig needs exec on the agents' pods in kube-system; counted by source, destination and port, pod names and ports only and no address; NETWORK_DROPS_LAST bounds the flows asked of each agent (500) and NETWORK_DROPS_TIMEOUT the seconds each call may take (60); see docs/kubernetes.md, Network policy
 network-drops cluster='lab-sto2':
     scripts/network-drops {{ quote(cluster) }}
 
+# Print, changing nothing, the record of the flows the network policies dropped or, in audit mode, would have dropped over a window that ends now (24h when none is given; a whole number with s, m, h, d or w): the lines the flow recorder in security-system wrote, counted by the log store and read as just logs reads it, through vmauth with the operator's credential, so the kubeconfig must be able to read the Secret vmauth-operator and forward a port in monitoring; one line per COUNT VERDICT NAMESPACE DIRECTION SOURCE DESTINATION PORT/PROTOCOL REASON, the most frequent first, a pod under its workload, names and ports only and no address; then, on standard error, how many of the recorder's lines are not flows and whether the recorder ran through the window; fails when it did not, when its pod cannot be listed, when the answer is cut at 10000 groups, and with just logs' own reason when the API does not answer or the store refuses the query; see docs/kubernetes.md, The record of what policy drops
+network-audit since='24h' cluster='lab-sto2':
+    scripts/network-audit {{ quote(since) }} {{ quote(cluster) }}
+
+# Say, check by check, whether a pod under a runtime class, kata, gvisor or none (the default runtime), could host an OpenShell sandbox: kernel, OpenShell's own capability probe from openshell_sandbox_image under the security context OpenShell gives a sandbox's workload; name, a lookup of the resolver's Service name; service, a TCP connection to its address; mtu, the default route's MTU against an ordinary pod's on the same node; these three from cilium_agent_image; pass or FAIL per check with the reason, no address, and a non-zero exit when one fails; it judges no class. Makes the namespace runtime-check, deleting an earlier run's first and refusing one it did not make, and deletes it however the run ends; holds the cluster's lock; each wait bounded by RUNTIME_CHECK_TIMEOUT (300 seconds); see docs/kubernetes.md, Runtime classes
+runtime-check class cluster='lab-sto2':
+    scripts/runtime-check '{{ openshell_sandbox_image }}' '{{ cilium_agent_image }}' {{ quote(class) }} {{ quote(cluster) }}
+
 # Forward a local port, GRAFANA_PORT or 3000, on 127.0.0.1 only, to Grafana on a cluster through its kubeconfig until Ctrl-C; prints the local URL and where the admin password is kept, never the password
 grafana cluster='lab-sto2':
     scripts/grafana {{ quote(cluster) }}
+
+# Forward a local port, LOCUST_PORT or 8089, on 127.0.0.1 only, to Locust's master on a cluster through its kubeconfig until Ctrl-C; prints the local URL and that the interface has no sign-in, so that anything on this machine can start a test through it while the forward runs
+locust cluster='lab-sto2':
+    scripts/locust {{ quote(cluster) }}
+
+# Forward a local port, ROBOT_PORT or 8090, on 127.0.0.1 only, to Robot Framework's report server on a cluster through its kubeconfig until Ctrl-C; prints the local URL and that the reports hold screenshots and whatever the suites print and are served to anything on this machine while the forward runs
+robot cluster='lab-sto2':
+    scripts/robot {{ quote(cluster) }}
+
+# Run Robot Framework's suites on a cluster now, through its kubeconfig: refuse while a run is going, make one job from the CronJob robot-suites, follow its log, and exit with its result, the number of failed tests; Ctrl-C stops following and leaves the job running, and nothing is deleted; ROBOT_RUN_WAIT bounds the waits for its pod and its result (900 seconds); see docs/kubernetes.md, Robot Framework
+robot-run cluster='lab-sto2':
+    scripts/robot-run {{ quote(cluster) }}
 
 # Forward a local port, KGUARDIAN_PORT or 5173, on 127.0.0.1 only, to kguardian's interface on a cluster through its kubeconfig until Ctrl-C; prints the local URL and that the interface has no sign-in, so whoever reaches the local port reads the record
 kguardian cluster='lab-sto2':
     scripts/kguardian {{ quote(cluster) }}
 
-# Print the logs a LogsQL query matches, one line per record, the oldest first, through the Kubernetes API's service proxy to VictoriaLogs: just logs 'kubernetes.pod_namespace:monitoring error' [--since 15m] [--limit 200] [cluster]; --since is a number with s, m, h, d or w; fails with the reason when the API does not answer or the store refuses the query
+# Print the logs a LogsQL query matches, one line per record, the oldest first, through vmauth to VictoriaLogs as the user operator: just logs 'kubernetes.pod_namespace:monitoring error' [--since 15m] [--limit 200] [cluster]; --since is a number with s, m, h, d or w; reads the credential from the Secret vmauth-operator in monitoring and asks through a port-forward to the Service vmauth, stopped on every exit, so the kubeconfig must be able to read that Secret and forward a port in monitoring; the credential is never printed or an argument; fails with the reason when the API or vmauth does not answer, the Secret cannot be read, vmauth refuses the credential or the store refuses the query
 [positional-arguments]
 logs *args:
     scripts/logs "$@"

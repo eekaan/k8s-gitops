@@ -14,6 +14,10 @@ spec:
     - name: grafana-operator
     # Its ServiceMonitor's kind exists once prometheus-operator-crds is Ready.
     - name: prometheus-operator-crds
+  # Not vmauth: Grafana runs without the log store. The operator applies the datasource
+  # VictoriaLogs at its first attempt after vmauth-grafana exists, which on a new cluster can be up
+  # to about 17 minutes after the Secret (grafanadatasource-victoria-logs.yaml says why), and then
+  # every minute.
   sourceRef:
     kind: ExternalArtifact
     name: grafana

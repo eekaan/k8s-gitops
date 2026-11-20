@@ -2,9 +2,13 @@
 # Hands OpenBao's recovery keys to the operator, once (ADR 0016). OpenBao initialises itself without
 # recovery keys; the first rotation of them returns new shares at once, and every later one needs a
 # threshold of the shares that exist. So this runs only while OpenBao holds none, and writes the
-# shares, with the seal key, to FILE outside the repository, in a place where bao-root and
+# shares, with the seal keys, to FILE outside the repository, in a place where bao-root and
 # bao-seal-restore will read it (bao_custody_place in scripts/lib/openbao.sh), encrypted with age to
-# the Talos age key's recipient in talos/.sops.yaml: a key the cluster does not hold. The rotation
+# the Talos age key's recipient in talos/.sops.yaml: a key the cluster does not hold. The seal keys
+# are what the servers mount: before it asks OpenBao for anything, it checks that the servers run
+# with the seal keys this checkout names (bao_seal_running) and reads the Secret of each, the current
+# key, its seal, and after a rotation the previous one, its previous_seal, each 64 hexadecimal
+# digits, and refuses otherwise. The rotation
 # asks for verification, so OpenBao commits the shares only once the script has written FILE, opened
 # it again with the operator's Talos age key to what it wrote, and given a threshold of them back. A
 # rotation it started and did not complete is cancelled, and its file removed; a rotation left in
@@ -32,7 +36,7 @@ file=$1
 # shellcheck source=scripts/cluster-env
 . "$here/cluster-env" "${2-}"
 complete=1
-require_commands kubectl curl jq base64 age mktemp sha256sum stat || complete=0
+require_commands kubectl curl jq yq base64 age mktemp sha256sum stat || complete=0
 require_kubeconfig || complete=0
 # The operator's Talos age key, which the file must open with before OpenBao commits the shares.
 require_age_key || complete=0
@@ -55,7 +59,28 @@ elif ! bao_custody_place "$file"; then
   # bao-root and bao-seal-restore read the file only from such a place.
   complete=0
 fi
+bao_seal_ids || complete=0
 ((complete))
+
+# The seal keys the servers mount, each as the custody file holds it, the current key first.
+step="reading the seal keys the servers run with"
+bao_seal_running
+seals=()
+for id in "$bao_seal_current" ${bao_seal_previous:+"$bao_seal_previous"}; do
+  step="reading the Secret $id"
+  # kubectl's errors can name the API server, so they are shown without its address (bao_kubectl).
+  if ! secret=$(bao_kubectl get secret "$id" --namespace "$bao_namespace" --output json); then
+    infra_error "the Secret $id cannot be read in $bao_namespace; the servers mount it, and its key goes into $file"
+    exit 1
+  fi
+  if ! seal=$(printf '%s' "$secret" | jq -ce --arg id "$id" '.data.key // "" | @base64d
+    | if test("^[0-9a-f]{64}$") then {secret: $id, key_id: $id, key: .} else false end' 2> /dev/null); then
+    infra_error "the Secret $id holds no key of 64 hexadecimal digits"
+    exit 1
+  fi
+  seals+=("$seal")
+done
+secret="" seal=""
 
 # pending is 1 from the request for shares until OpenBao committed them; partial is the file being
 # written, placed whether it was linked to FILE.
@@ -125,11 +150,12 @@ fi
 step="writing $file"
 custody=$({
   printf '%s\n' "$rotation"
-  kubectl get secret "$bao_seal_secret" --namespace "$bao_namespace" --output json
-} | jq -sc --arg cluster "$cluster" --arg secret "$bao_seal_secret" --arg created "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+  printf '%s\n' "${seals[@]}"
+} | jq -sc --arg cluster "$cluster" --arg created "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
   {cluster: $cluster, created: $created,
    recovery: {shares: .[0].data.n, threshold: .[0].data.t, keys_base64: .[0].data.keys_base64},
-   seal: {secret: $secret, key_id: $secret, key: (.[1].data.key | @base64d)}}')
+   seal: .[1]} + (if length > 2 then {previous_seal: .[2]} else {} end)')
+seals=()
 partial=$(mktemp "$dir/.${file##*/}.XXXXXXXXXX")
 printf '%s' "$custody" | age --encrypt --recipient "$recipient" --output "$partial"
 # The file opens with the operator's age key, to what was written, or nothing is committed: a
@@ -159,5 +185,5 @@ if ! printf '%s' "$verified" | jq -e '.data.complete == true' > /dev/null; then
 fi
 pending=0
 
-echo "bao-recovery: wrote $file: OpenBao's $shares recovery key shares and its seal key, encrypted to the Talos age key's recipient $recipient; any $threshold of the shares restore access"
+echo "bao-recovery: wrote $file: OpenBao's $shares recovery key shares and the seal keys its servers mount, encrypted to the Talos age key's recipient $recipient; any $threshold of the shares restore access"
 echo "bao-recovery: keep it outside the cluster; it holds the only copy of the shares (docs/runbooks/openbao.md)"

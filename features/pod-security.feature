@@ -58,6 +58,21 @@ Feature: Pod Security levels
     When the render of the tree is read with the resource definitions it holds
     Then each sets a non-root user and the runtime's seccomp profile for the pod, and no privilege escalation and no capabilities for every container it names, at paths its resource definition declares
 
+  Scenario: A pod template in a sandbox namespace without its tier's isolation is refused
+    Given a namespace labelled k8s-gitops/sandbox userns, gvisor or kata, whose every workload sets what its tier asks, hostUsers false or that runtime class
+    When the Pod Security check runs, and again with one workload, a CronJob, a StatefulSet and a bare pod among them, left without it, given another tier's isolation or given a runtime class whose name only starts with the tier's, and again with the tier on namespaces whose workloads the exceptions file lists, left without it
+    Then the first run exits zero and reports the namespace's tier, and each other run exits non-zero and names the namespace, its tier and each workload without it, whether the exceptions file lists it or not
+
+  Scenario: A sandbox namespace with an unknown tier is refused
+    Given a namespace labelled k8s-gitops/sandbox firecracker, Gvisor or empty, one whose workloads meet gvisor and one with no workload
+    When the Pod Security check runs
+    Then it exits non-zero and names the namespace and the value
+
+  Scenario: A sandbox namespace that holds a VolSync or CloudNativePG resource is refused
+    Given a namespace of a sandbox tier whose workloads meet it, with VolSync's ReplicationSource and ReplicationDestination and a CloudNativePG Cluster added, a ReplicationSource among them made by a chart with no namespace of its own
+    When the Pod Security check runs, and again with the namespace unlabelled
+    Then the first run exits non-zero and names each resource and the component it comes from, and the second exits zero
+
   Scenario: The tree passes
     Given the tree with its real charts
     When just pod-security-check runs

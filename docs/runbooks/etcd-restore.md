@@ -115,6 +115,19 @@ snapshot, from the workload's own backup where it has one, as they are not in it
 ## Afterwards
 
 - Every node is Ready: the recipe ends there.
+- `kubectl -n kube-system rollout restart daemonset cilium` restarts the Cilium agents. Each agent
+  writes its WireGuard public key into its node's `CiliumNode` when it starts and when its own node
+  changes, never because the stored object differs, so the restored `CiliumNode` of a worker
+  rebooted since the snapshot holds a key the worker no longer has, the other agents encrypt to
+  it, and pod traffic to and from that worker stops until its agent starts again or its node changes
+  ([kubernetes.md](../kubernetes.md#encryption-between-nodes)). `just cluster-check`'s `encryption`
+  line passes all the same, as it counts each agent's peers and does not match their keys. The
+  restart rolls the agents at most two at a time, as a change of Cilium's values does
+  ([kubernetes.md](../kubernetes.md#service-addresses)), and each worker's BGP sessions end while
+  its agent restarts, the edge routers keeping its paths for up to 120 seconds
+  ([edge.md](edge.md#a-worker-that-goes)). Once every agent is Ready again, `cilium-health status`
+  in any agent reports every node reachable through the overlay
+  ([cluster.md](../cluster.md#what-the-checks-prove-and-what-to-watch-afterwards)).
 - Flux's Kustomizations and HelmReleases become Ready, reconciled from the artifact built from
   `main`; what changed in Git after the snapshot comes back through them.
 - The ConfigMap `cluster-config` and the Secrets `cluster-secrets` and `sops-age` are as they were

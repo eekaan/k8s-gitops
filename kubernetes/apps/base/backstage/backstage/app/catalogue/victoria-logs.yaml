@@ -16,5 +16,6 @@ spec:
   owner: group:default/operators
   system: observability
   dependsOn:
+    - component:default/external-secrets
     - component:default/grafana-operator
     - resource:default/prometheus-operator-crds

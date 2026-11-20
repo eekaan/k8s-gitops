@@ -55,7 +55,11 @@ exceptions:
     workload: DaemonSet/linstor-satellite
     created-by: LinstorCluster/linstorcluster
     level: privileged
-    reason: the satellites manage each node's storage devices and the DRBD kernel module, so they run privileged, in the host's IPC namespace and with host paths
+    reason: >-
+      the satellites manage each node's storage devices and the DRBD kernel module, so they run
+      privileged, in the host's IPC namespace and with host paths, and in the host's network
+      namespace, as DRBD's connections belong to the namespace that configured them and the node's
+      outlives every satellite pod
   - namespace: piraeus-datastore
     workload: DaemonSet/linstor-csi-node
     created-by: LinstorCluster/linstorcluster
@@ -95,6 +99,15 @@ exceptions:
     workload: Pod/crowdsec-test-lapi-up
     level: baseline
     reason: the chart's Helm test runs a curl image as root with no security context; the release excludes it by name, and the check evaluates the render's tests all the same
+  - namespace: ascender
+    workload: Pod/automation-job
+    created-by: AWX/ascender
+    level: baseline
+    reason: >-
+      the default pod Ascender starts for each job, automation-job-<id>, sets no security context
+      (get_default_pod_spec in awx/main/utils/execution_environments.py of the image), so it has no
+      non-root user, seccomp profile or dropped capabilities, and the operator does not make it, so
+      its restricted mode does not reach it
   - namespace: kguardian
     workload: DaemonSet/kguardian-controller
     level: privileged

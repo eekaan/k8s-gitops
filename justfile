@@ -72,11 +72,19 @@ lock-check:
 scenarios-check:
     scripts/scenarios-check
 
+# Fail unless every chart source Flux builds, the artifact the cluster syncs and the tools image is one row of signatures.yaml, each row is one of them and of the form its kind takes, and the verify block of every OCIRepository and of the sync source is exactly its row's identity, or there is none; offline (docs/kubernetes.md, Signatures)
+signatures-check:
+    scripts/signatures-check
+
+# After the offline check, ask each registry, anonymously, whether every pin of the tree is signed as its row of signatures.yaml says: cosign verifies a keyless row with its issuer and subject, a key row with its key, and finds no signature for an unsigned one; one line per row, pass, FAIL or skip; needs the network
+signatures-verify:
+    scripts/signatures-check verify
+
 # Write each catalogue entity's dependencies from the dependsOn of the Kustomization it describes, so the entities and the overlay agree (docs/kubernetes.md, Backstage)
 catalogue-dependencies:
     scripts/catalogue-dependencies
 
-# Run the bats tests, except those tagged hermetic, which run just ci and need a container runtime, and those tagged namespace, which need unprivileged user namespaces (just edge-forward-check). A shard such as 2/3 runs the second of three parts of the test files, split by their number of tests
+# Run the bats tests, except those tagged hermetic, which run just ci and need a container runtime, and those tagged namespace, which need unprivileged user namespaces (just edge-forward-check), one bats run per test file, each followed by the line saying how long it took (scripts/test-run). A shard such as 2/8 runs the second of eight parts of the test files, split by the seconds each took as tests/times.tsv records them: the heaviest first, each to the part whose recorded total is lowest so far, so the parts take about as long. Before bats runs, every part fails while a test file has no line in the record, which just test-time writes, a line names a file tests/ no longer has, a second line names a file, or a line is not a test file, a tab and its whole seconds
 [script]
 test shard='1/1':
     set -o pipefail
@@ -86,10 +94,53 @@ test shard='1/1':
       exit 1
     fi
     part=${BASH_REMATCH[1]} parts=${BASH_REMATCH[2]}
-    # The files with the most tests go first, each to the part with the fewest tests so far, so the
-    # parts take about as long; ties go by name, byte by byte, so every part makes the same split.
-    files=$(grep -c '^[[:blank:]]*@test[[:blank:]]' tests/*.bats | LC_ALL=C sort -t: -k2,2nr -k1,1 |
-      awk -F: -v parts="$parts" -v part="$part" '{
+    record=tests/times.tsv
+    if [[ ! -f $record ]]; then
+      echo "test: $record is missing; just test-times-record writes it from a CI run" >&2
+      exit 1
+    fi
+    # Every part checks the whole record, not only its own files, so every group fails alike.
+    line_re=$'^(tests/[^/\t]+\\.bats)\t([0-9]+)$'
+    declare -A recorded=()
+    listed=() failed=0 number=0
+    while IFS= read -r line || [[ -n $line ]]; do
+      number=$((number + 1))
+      if [[ $line == '#'* ]]; then
+        continue
+      elif [[ $line =~ $line_re ]]; then
+        file=${BASH_REMATCH[1]}
+        if [[ -n ${recorded[$file]+set} ]]; then
+          echo "test: $record:$number repeats $file; a test file has one line" >&2
+          failed=1
+        else
+          listed+=("$file")
+        fi
+        recorded[$file]=${BASH_REMATCH[2]}
+      else
+        echo "test: $record:$number is not a test file, a tab and its whole seconds" >&2
+        failed=1
+      fi
+    done < "$record"
+    for file in tests/*.bats; do
+      if [[ -z ${recorded[$file]+set} ]]; then
+        echo "test: $file has no time in $record; record it with just test-time $file" >&2
+        failed=1
+      fi
+    done
+    for file in "${listed[@]}"; do
+      if [[ ! -f $file ]]; then
+        echo "test: $record has a line for $file, which tests/ no longer has; delete the line or run just test-times-record" >&2
+        failed=1
+      fi
+    done
+    if ((failed)); then
+      exit 1
+    fi
+    # The heaviest files go first, each to the part whose recorded total is lowest so far, ties to the
+    # lowest part; ties between files go by name, byte by byte, so every part makes the same split.
+    files=$(for file in "${!recorded[@]}"; do printf '%s\t%s\n' "$file" "${recorded[$file]}"; done |
+      LC_ALL=C sort -t $'\t' -k2,2nr -k1,1 |
+      awk -F'\t' -v parts="$parts" -v part="$part" '{
         least = 0
         for (i = 1; i < parts; i++) if (load[i] < load[least]) least = i
         load[least] += $2
@@ -100,35 +151,94 @@ test shard='1/1':
       exit 0
     fi
     mapfile -t files <<< "$files"
-    # A file's tests run side by side, a file whose tests share state excepted, and the files one
-    # after another: bats runs files side by side only through GNU parallel, which is not pinned.
-    # Side by side within a file, bats takes turns with flock or shlock; without either, one by one.
-    jobs=()
-    cpus=$(getconf _NPROCESSORS_ONLN)
-    if ((cpus > 1)) && { command -v flock || command -v shlock; } > /dev/null; then
-      jobs=(--jobs "$cpus" --no-parallelize-across-files)
-    fi
-    bats "${jobs[@]}" --filter-tags '!hermetic,!namespace' "${files[@]}"
+    scripts/test-run "${files[@]}"
 
 # Run the bats tests that run just ci
 test-hermetic:
     bats --filter-tags hermetic tests
 
+# Run the test files given, such as tests/edge-routers.bats, as just test runs them, and write the seconds each took into tests/times.tsv; a file that fails still gets its time, and the recipe fails: the time of a file that failed before its tests ran, such as when bats did not start, is no measure of the file
+[positional-arguments]
+[script]
+test-time +files:
+    set -o pipefail
+    for file in "$@"; do
+      if [[ ! $file =~ ^tests/[^/]+\.bats$ || ! -f $file ]]; then
+        echo "test-time: $file is not a test file, tests/<name>.bats" >&2
+        exit 1
+      fi
+    done
+    out=$(mktemp)
+    trap 'rm -f "$out"' EXIT
+    # The output shows as the tests run and is kept; the record is written once the run has ended.
+    status=0
+    scripts/test-run "$@" | tee "$out" || status=$?
+    scripts/test-times < "$out"
+    exit "$status"
+
+# Write tests/times.tsv from the seconds each test file took in a run of the ci workflow, the run given or else the latest successful push run of ci on main, read from the log of each of its jobs that ran; needs gh signed in, and only reads
+[script]
+test-times-record run='':
+    set -o pipefail
+    # gh gets its own token and none of the secrets a recipe's environment may hold.
+    . scripts/lib/tools.sh
+    run={{ quote(run) }}
+    if [[ -z $run ]]; then
+      run=$(gh run list --workflow ci --branch main --event push --status success --limit 1 --json databaseId --jq '.[].databaseId')
+      if [[ -z $run ]]; then
+        echo "test-times-record: gh lists no successful push run of ci on main" >&2
+        exit 1
+      fi
+    fi
+    if [[ ! $run =~ ^[1-9][0-9]*$ ]]; then
+      echo "test-times-record: a run is the number of a run of the ci workflow, not '$run'" >&2
+      exit 1
+    fi
+    # A skipped job ran nothing and has no log.
+    jobs=$(gh run view "$run" --json jobs --jq '.jobs[] | select(.conclusion != "skipped") | .databaseId')
+    logs=$(mktemp)
+    trap 'rm -f "$logs"' EXIT
+    # gh api prints a job's log as it is, terminal escapes included, as Dagger's progress has them,
+    # and only when allowed to. Every log is read before the record is written, so a read that fails
+    # leaves it as it was.
+    for job in $jobs; do
+      gh api --allow-escape-sequences "repos/{owner}/{repo}/actions/jobs/$job/logs" >> "$logs"
+    done
+    scripts/test-times < "$logs"
+
 # Run every check that needs no credentials with the tools on this machine, group by group
-checks: static tests-1 tests-2 tests-3
+checks: static signatures tests-1 tests-2 tests-3 tests-4 tests-5 tests-6 tests-7 tests-8
 
 # The groups of checks are the dependencies of checks, and each group's checks its own dependencies: just ci runs every group side by side in containers of its own, and CI runs each as a job of its own. A check, with whatever it depends on, belongs to one group only, or it would run twice.
 # The checks other than the bats tests, the cheapest and most basic first
-static: tools-check check-literals check-commit-literals check-conflict-markers lock-check cluster-secrets-check lint renovate-check renovate-pins edge-policy-check scenarios-check infra-check talos-check kubernetes-check render-check network-policy-check kubernetes-validate vector-check rules-check alerts-route-check secrets-scan
+static: tools-check check-literals check-commit-literals check-conflict-markers lock-check cluster-secrets-check lint renovate-check renovate-pins edge-policy-check scenarios-check infra-check talos-check kubernetes-check signatures-check render-check network-policy-check kubernetes-validate vector-check rules-check alerts-route-check secrets-scan
 
-# The first of three parts of the bats tests
-tests-1: (test '1/3')
+# The verification of the sources' signatures against the registries, a group of its own: a registry out of reach fails it and leaves static's result as it is
+signatures: signatures-verify
 
-# The second of three parts of the bats tests
-tests-2: (test '2/3')
+# The first of eight parts of the bats tests, split by the seconds each test file took (tests/times.tsv)
+tests-1: (test '1/8')
 
-# The third of three parts of the bats tests
-tests-3: (test '3/3')
+# The second of eight parts of the bats tests, split by the seconds each test file took (tests/times.tsv)
+tests-2: (test '2/8')
+
+# The third of eight parts of the bats tests, split by the seconds each test file took (tests/times.tsv)
+tests-3: (test '3/8')
+
+# The fourth of eight parts of the bats tests, split by the seconds each test file took (tests/times.tsv)
+tests-4: (test '4/8')
+
+# The fifth of eight parts of the bats tests, split by the seconds each test file took (tests/times.tsv)
+tests-5: (test '5/8')
+
+# The sixth of eight parts of the bats tests, split by the seconds each test file took (tests/times.tsv)
+tests-6: (test '6/8')
+
+# The seventh of eight parts of the bats tests, split by the seconds each test file took (tests/times.tsv)
+tests-7: (test '7/8')
+
+# The eighth of eight parts of the bats tests, split by the seconds each test file took (tests/times.tsv)
+tests-8: (test '8/8')
 
 # Without a terminal, as in CI, Dagger's default progress is a line every 30 seconds; plain prints every step and each check's output as it happens.
 # Run the checks inside containers built from the pins, as CI does: every group side by side, or only the group named, such as just ci tests-2; renovate-check's validator, vector-check's Vector and edge-policy-check's FRR each in its own image, rules-check's promtool, taken from the image of the Prometheus the chart deploys, and alerts-route-check's amtool and Alertmanager, taken from the image of the Alertmanager it deploys, in the tools container, the other checks in a container with the tools pinned in mise.toml, the tools image versions.yaml records when it was built for these pins. Dagger records in dagger.lock each image it resolves without an entry there, such as the Prometheus image of rules-check, so the run puts the file back as it found it, whether it passes, fails or is stopped by INT, TERM or HUP; lock-check refuses such an entry in the committed file
@@ -214,7 +324,7 @@ renovate-pins:
 # renovate: datasource=docker depName=docker.io/timberio/vector
 vector_image := "docker.io/timberio/vector:0.61.0-distroless-libc@sha256:1a3451978644d5cd4b99a0b28c990791e2f7e1efbea4184122f1c59a56448143"
 
-# Check the log collector's rendered configuration with Vector itself, in the image the collector runs: it loads, and Vector's unit tests of it in tests/vector pass
+# Check the log collector's rendered configuration with Vector itself, in the image the collector runs: it loads, Vector's unit tests of it in tests/vector pass, and without VMAUTH_PASSWORD Vector refuses it, naming the variable, as it does when it fills the sink's placeholder from its environment
 [script]
 vector-check:
     set -o pipefail
@@ -223,8 +333,24 @@ vector-check:
     # docker is run with none of the secrets a recipe's environment may hold.
     . scripts/lib/tools.sh
     scripts/vector-config "$dir"
-    docker run --rm --network none -e VECTOR_SELF_NODE_NAME=node-1 -v "$dir":/check:ro {{ vector_image }} validate --no-environment /check/vector.yaml
-    docker run --rm --network none -e VECTOR_SELF_NODE_NAME=node-1 -v "$dir":/check:ro {{ vector_image }} test /check/vector.yaml /check/tests.yaml
+    # The environment the DaemonSet gives Vector: the node's name, interpolation of ${...} allowed,
+    # which fails the load of a variable that is not set, and a placeholder for the collector's
+    # credential to vmauth.
+    env=(-e VECTOR_SELF_NODE_NAME=node-1 -e VECTOR_DANGEROUSLY_ALLOW_ENV_VAR_INTERPOLATION=true -e VMAUTH_PASSWORD=vector-check)
+    docker run --rm --network none "${env[@]}" -v "$dir":/check:ro {{ vector_image }} validate --no-environment /check/vector.yaml
+    docker run --rm --network none "${env[@]}" -v "$dir":/check:ro {{ vector_image }} test /check/vector.yaml /check/tests.yaml
+    # Without the credential's variable, Vector must refuse the configuration as a configuration
+    # error, 78, naming the variable: that shows it fills ${VMAUTH_PASSWORD} from its environment,
+    # where a Vector that ignored the switch would load the placeholder itself as the password,
+    # which vmauth refuses, and the sink drops what it refuses.
+    unset_env=(-e VECTOR_SELF_NODE_NAME=node-1 -e VECTOR_DANGEROUSLY_ALLOW_ENV_VAR_INTERPOLATION=true)
+    status=0
+    out=$(docker run --rm --network none "${unset_env[@]}" -v "$dir":/check:ro {{ vector_image }} validate --no-environment /check/vector.yaml 2>&1) || status=$?
+    if [[ $status -ne 78 || $out != *VMAUTH_PASSWORD* ]]; then
+      printf '%s\n' "$out"
+      echo "vector-check: Vector exited $status without VMAUTH_PASSWORD set; it must refuse the configuration with 78, naming the variable"
+      exit 1
+    fi
 
 # Check the alert rules the tree renders with promtool, in the image of the Prometheus the rendered chart deploys, which scripts/rules-config finds in the render: every rule of every cluster, the charts' and the applications' own, is valid, every own alert has a severity, a summary, a description, a runbook heading that exists and a test in which it fires and one in which it stays quiet, and the unit tests in tests/rules pass; then promtool's check rules must refuse, naming each, a chart's rule and an own alert it cannot parse and an own alert defined twice, in rule files no unit test loads. The image is the chart's, by the tag Renovate moves with the chart, and nothing else pins it; needs docker, as vector-check does, which just ci's module does not
 [script]
@@ -295,3 +421,11 @@ tools-image-publish:
 # Record the tools image at digest in versions.yaml, with the key of these inputs, once its signature verifies without credentials as the tools image workflow's on main in this repository for that key
 tools-image-pin digest:
     scripts/tools-image pin {{ quote(digest) }}
+
+# The image of OpenShell's sandbox runtime, whose capability probe runtime-check runs, at a stable release, pinned by the digest of its image index. Renovate moves the tag and the digest together, to stable releases only (.renovate/managers.json5), in the OpenShell group's pull request
+# renovate: datasource=docker depName=ghcr.io/nvidia/openshell/sandbox
+openshell_sandbox_image := "ghcr.io/nvidia/openshell/sandbox:0.1.9@sha256:e57d07cd6cc1fc314b80368d6b51ec6fbf825fb62cd8f081312941180846866f"
+
+# The image the Cilium agents run, for runtime-check's net and reference pods: it holds bash, getent, timeout and iproute2's ip, and is on every node. It is the flow recorder's image, tag and digest, which tests/network-audit.bats holds to the one the Cilium chart gives the agents and tests/runtime-check.bats holds this to; Renovate moves all three in the Cilium group's pull request
+# renovate: datasource=docker depName=quay.io/cilium/cilium
+cilium_agent_image := "quay.io/cilium/cilium:v1.20.4@sha256:20fe92e4c86641233a450098c158d2d29085f3419931ab6bf681d2485dedf16e"

@@ -1,0 +1,30 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/kustomization-kustomize-v1.json
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: escape-canary
+  namespace: flux-system
+spec:
+  path: ./apps/base/escape-canary/escape-canary/app
+  targetNamespace: escape-canary
+  # Its CiliumNetworkPolicies are a kind Cilium's operator defines and its PrometheusRule one the
+  # Prometheus Operator's definitions add; hello and openbao serve the Services its network check
+  # attempts, so a run never meets a target that is not there yet, which would give it a result the
+  # table does not hold (docs/kubernetes.md, The escape canary).
+  dependsOn:
+    - name: cilium
+    - name: prometheus-operator-crds
+    - name: hello
+    - name: openbao
+  wait: true
+  postBuild:
+    substitute:
+      # Which column of expected.tsv the checks hold their results to: audit while Cilium audits
+      # network policy, enforce once it enforces. tests/escape-canary.bats fails unless it follows
+      # policy-audit-mode in the rendered cilium-config, and the change that makes Cilium enforce
+      # sets it in the same pull request (docs/kubernetes.md, Turning it on, and back).
+      ESCAPE_CANARY_MODE: audit
+  sourceRef:
+    kind: ExternalArtifact
+    name: escape-canary

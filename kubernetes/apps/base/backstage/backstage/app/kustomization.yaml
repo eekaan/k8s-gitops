@@ -8,6 +8,7 @@ resources:
   - helmrelease.yaml
   - httproute.yaml
   - ocirepository.yaml
+  - probe.yaml
 
 # The component's dump job gets labels for its pods, which its policies in ciliumnetworkpolicy.yaml
 # select it by. The patch targets the CronJob by kind, as Flux substitutes its name after the build
@@ -36,7 +37,10 @@ configMapGenerator:
     files:
       - catalogue/acme-issuers.yaml
       - catalogue/alert-destinations.yaml
+      - catalogue/ascender-operator.yaml
+      - catalogue/ascender.yaml
       - catalogue/backstage.yaml
+      - catalogue/blackbox-exporter.yaml
       - catalogue/cert-manager-dashboard.yaml
       - catalogue/cert-manager.yaml
       - catalogue/cilium-bgp.yaml
@@ -54,6 +58,7 @@ configMapGenerator:
       - catalogue/domain.yaml
       - catalogue/envoy-gateway-crds.yaml
       - catalogue/envoy-gateway.yaml
+      - catalogue/escape-canary.yaml
       - catalogue/etcd-snapshots.yaml
       - catalogue/external-dns-dashboard.yaml
       - catalogue/external-dns.yaml
@@ -83,8 +88,11 @@ configMapGenerator:
       - catalogue/linstor-cluster.yaml
       - catalogue/linstor-monitoring-dashboard.yaml
       - catalogue/linstor-monitoring.yaml
+      - catalogue/locust-route.yaml
+      - catalogue/locust.yaml
       - catalogue/metrics-server.yaml
       - catalogue/n8n.yaml
+      - catalogue/network-audit.yaml
       - catalogue/oauth2-proxy.yaml
       - catalogue/open-feature-operator.yaml
       - catalogue/open-webui.yaml
@@ -98,6 +106,8 @@ configMapGenerator:
       - catalogue/prometheus-operator-crds.yaml
       - catalogue/reflector.yaml
       - catalogue/reloader.yaml
+      - catalogue/robot-ascender.yaml
+      - catalogue/robot.yaml
       - catalogue/runtime-classes.yaml
       - catalogue/silence-operator-dashboard.yaml
       - catalogue/silence-operator.yaml
@@ -107,6 +117,7 @@ configMapGenerator:
       - catalogue/vector.yaml
       - catalogue/victoria-logs-route.yaml
       - catalogue/victoria-logs.yaml
+      - catalogue/vmauth.yaml
       - catalogue/volsync-demo.yaml
       - catalogue/volsync.yaml
       - catalogue/vpa.yaml

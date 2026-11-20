@@ -8,9 +8,10 @@ the cluster: encrypted with age to the Talos age key's recipient, opened with th
 `SOPS_AGE_KEY_FILE`, or `SOPS_AGE_KEY`, into memory only, and read only where no one but the
 operator can have written it, as [openbao.md](openbao.md#first-initialisation) says: its place is
 what vouches for it. This runbook covers checking the first
-backup, restoring a claim from its repository, opening a repository by hand, replacing the cluster's
-S3 key, seeding the store again from the file once it lost the key, as on a rebuilt cluster, and
-losing the master's file, or the file and the store's key both. `<file>` is the custody file.
+backup and the first restore drill, restoring a claim from its repository, opening a repository by
+hand, replacing the cluster's S3 key, seeding the store again from the file once it lost the key, as
+on a rebuilt cluster, and losing the master's file, or the file and the store's key both. `<file>` is
+the custody file.
 
 ## Checking the first backup
 
@@ -24,11 +25,41 @@ After `just bao-seed-volsync <file>`, each of these only reads:
 - `kubectl --namespace demo get pvc volsync-demo`: `Bound`, as the claim is made from that snapshot
   and the pod that uses it is scheduled.
 - `kubectl --namespace demo get replicationsource volsync-demo --output jsonpath='{.status.lastSyncTime}'`:
-  set after the first run at the schedule's time, 03:17, and `{.status.latestMoverStatus.result}`
-  says `Successful` for it. The Kustomization owns the object, so nothing here triggers a run
-  sooner.
+  set once the first backup has ended, and `{.status.latestMoverStatus.result}` says `Successful`
+  for it. VolSync starts the first backup of a new ReplicationSource at once, whatever its
+  schedule, so it runs once the Secret holds the key and the claim is bound, and every later one at
+  the schedule's time, 03:17. `just cluster-last-copies`, before a cluster is taken down, runs a
+  backup of every volume now, by VolSync's manual trigger while the Kustomization is suspended
+  ([cluster.md](../cluster.md#recipes)).
 - `just bao-volsync-password <file> volsync-demo restic snapshots`: the repository lists a snapshot,
   with restic installed on the operator's machine.
+
+## Checking the first drill
+
+The restore drill of `volsync-demo` ([The restore drill](../kubernetes.md#the-restore-drill)) restores
+at once when its ReplicationDestination is created, then at 04:17, and checks at 05:17, all UTC. Each
+of these only reads:
+
+- `kubectl --namespace demo get replicationdestination volsync-demo-drill --output yaml`:
+  `status.lastSyncTime` set by the first restore, `status.latestMoverStatus.result` `Successful`,
+  with the tail of the mover's log, which names the snapshot it restored or says
+  `No eligible snapshots found`, `status.lastSyncDuration` far below the hour before the check, and
+  `status.nextSyncTime` at the next 04:17.
+- `kubectl --namespace demo get pvc volsync-demo-drill`: Pending until the first restore's mover is
+  scheduled, then `Bound`.
+- `kubectl --namespace demo get cronjob volsync-demo-drill-check` and
+  `kubectl --namespace demo get jobs`, after 05:17: the CronJob's last schedule, and the job it made;
+  `kubectl --namespace demo logs job/<job>` is the check's one line, which on a pass reads
+  `restore drill check passed: the heartbeat is <age> seconds old, within the largest age of 95400
+  seconds`, `<age>` from a little under 7200 to about 8700.
+
+A check after a restore of a backup without a heartbeat, as one taken before the pod wrote it, fails
+once, saying so. The first check does when the drill is first applied from a few minutes before
+03:17 until 05:17, as the pod's heartbeat comes with it and the 03:17 backup holds none until the
+pod's Recreate rollout has finished and written one. It raises
+[RestoreDrillJobFailing](alerts.md#restoredrilljobfailing) half an hour later, which the next
+night's pass clears, and the stock `KubeJobFailed` 15 minutes later, which clears only once the
+failed job is deleted, as that section says.
 
 ## Restoring a claim from its repository
 
@@ -102,7 +133,11 @@ the store is seeded from it, never with a new one:
 3. Check as in [Checking the first backup](#checking-the-first-backup): each ExternalSecret
    `SecretSynced`, each ReplicationDestination's `status.latestImage` set by a restore of the latest
    backup, each claim `Bound`, and `just bao-volsync-password <file> <app> restic snapshots` listing
-   the backups the application had.
+   the backups the application had. On a rebuilt cluster the listing does not check the restore:
+   each rebuilt ReplicationSource backs its claim up as soon as it is bound, and on the day of the
+   last backup the retention, which keeps the newest backup of each day, then forgets that backup's
+   snapshot. Check each claim by its ReplicationDestination instead, as step 6 of
+   [Building it again](rebuild.md#building-it-again) does.
 
 An empty store cannot tell a rebuilt cluster from a new one, so a seeding given a new file there
 makes a new master; its usage and the last line it prints say that a store that held the key before

@@ -20,14 +20,22 @@ kind: Component
 #       CNPG_NAMESPACE: <the Kustomization's targetNamespace>
 #
 #   CNPG_CLUSTER_NAME  the Cluster's name, and the name of its ObjectStore, its ScheduledBackup, the
-#                      Secret of its backup credentials and the directory of its archive and dumps
+#                      Secret of its backup credentials and the directory of its dumps and, while it
+#                      runs PostgreSQL 18, of its archive
 #   CNPG_NAMESPACE     the namespace the application is applied to, which a component cannot read
 #                      from targetNamespace; it is a level of the archive's path, so that two
 #                      databases of one name in two namespaces archive to two places
+#   CNPG_BACKUPS_SUSPENDED
+#                      "true" holds the dump CronJob and the ScheduledBackup, which make no dump and
+#                      no base backup while it is set, and changes nothing else: a database being
+#                      restored onto a rebuilt cluster, whose Cluster comes back empty under the old
+#                      name, so that its dumps and base backups do not go to the old path; false
+#                      when unset (docs/kubernetes.md, PostgreSQL; docs/runbooks/rebuild.md)
 #
-# The archive is s3://<BACKUP_BUCKET_PREFIX>-postgres/<CLUSTER_NAME>/<CNPG_NAMESPACE>/<name>, from
-# cluster-config and the two values above: its base backups in base/ and its WAL in wals/ there, the
-# dumps beside them as files of their own names.
+# The archive is s3://<BACKUP_BUCKET_PREFIX>-postgres/<CLUSTER_NAME>/<CNPG_NAMESPACE>/<server name>,
+# from cluster-config, the two values above and the server name of the Cluster's plugin entry
+# (cluster.yaml): its base backups in base/ and its WAL in wals/ there. The dumps are files of their
+# own names in <name>, beside them while the server name is the cluster's name.
 resources:
   - cluster.yaml
   - podmonitor.yaml

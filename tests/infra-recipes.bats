@@ -1234,6 +1234,82 @@ EOF
   [ "$(tofu_calls apply | awk '{ print $1 }')" = "-chdir=$PLUMBING" ]
 }
 
+@test "infra-destroy --check makes the cluster and plumbing stacks' refusals as a destroy would, and plans nothing" {
+  # The copy as a git repository with this repository's ignore rules, holding the files the recipes
+  # generate for the fixture's cluster, which a destroy of its stack removes.
+  GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git init -q "$REPO"
+  cp "$ROOT/.gitignore" "$REPO/.gitignore"
+  cluster="$REPO/talos/fixture"
+  for file in talman.yaml clusterconfig/talosconfig clusterconfig/kubeconfig; do
+    echo "marker-content-of-$file" > "$cluster/$file"
+  done
+
+  # A cluster stack that holds resources, whose cluster owns no load balancer and no volume.
+  recipe infra-destroy sto2/cluster --check < /dev/null
+
+  [ "$status" -eq 0 ]
+  [[ $output == *"sto2/cluster: nothing refuses its destroy; --check planned and destroyed nothing"* ]]
+  [[ $output != *"Type sto2/cluster"* ]]
+  grep -q '^kubectl get services ' "$RECORD/argv"
+  tofu_only_reads
+  for file in talman.yaml clusterconfig/talosconfig clusterconfig/kubeconfig; do
+    [ "$(cat "$cluster/$file")" = "marker-content-of-$file" ]
+  done
+
+  # Without a stack, each stack the run would destroy, in order.
+  rm -f "$RECORD/tofu"
+  recipe infra-destroy --check < /dev/null
+
+  [ "$status" -eq 0 ]
+  [ "$(grep -o '^sto2/[a-z]*: nothing refuses its destroy; --check planned and destroyed nothing$' <<< "$output" | cut -d: -f1)" = "sto2/cluster
+sto2/plumbing" ]
+  tofu_only_reads
+
+  # The plumbing stack while the ci stack holds resources is refused as its destroy would be.
+  state_tofu
+  holds sto2/ci state-with-resources.json
+  holds sto2/cluster state-never-applied.json
+  for args in 'sto2/plumbing --check' '--check'; do
+    rm -f "$RECORD/tofu"
+    # shellcheck disable=SC2086 # the arguments as an operator types them
+    recipe infra-destroy $args < /dev/null
+
+    [ "$status" -eq 1 ]
+    [[ $output == *"sto2/ci still holds resources"*"just infra-destroy sto2/ci"* ]]
+    [[ $output != *"nothing refuses"* ]]
+    tofu_only_reads
+  done
+
+  # A cluster stack that holds resources, whose cluster cannot be asked, is refused, unless
+  # --unreachable is given.
+  holds sto2/cluster state-with-resources.json
+  rm -f "$REPO/talos/fixture/clusterconfig/kubeconfig" "$RECORD/tofu"
+  recipe infra-destroy sto2/cluster --check < /dev/null
+
+  [ "$status" -eq 1 ]
+  [[ $output == *"--unreachable"* ]]
+  [[ $output != *"nothing refuses"* ]]
+  tofu_only_reads
+
+  recipe infra-destroy sto2/cluster --check --unreachable < /dev/null
+
+  [ "$status" -eq 0 ]
+  [[ $output == *"sto2/cluster: nothing refuses its destroy; --check planned and destroyed nothing"* ]]
+  tofu_only_reads
+  [ -f "$cluster/talman.yaml" ]
+
+  # --ignore-dns belongs to the edge stack's destroy alone.
+  for args in '--ignore-dns' 'sto2/plumbing --ignore-dns' 'sto2/cluster --check --ignore-dns'; do
+    rm -f "$RECORD/tofu"
+    # shellcheck disable=SC2086 # the arguments as an operator types them
+    recipe infra-destroy $args < /dev/null
+
+    [ "$status" -eq 2 ]
+    [[ $output == *"usage: infra-destroy [stack] [--yes] [--unreachable] [--check] [--ignore-dns]"* ]]
+    [ ! -e "$RECORD/tofu" ]
+  done
+}
+
 @test "the ci stack takes the allowlist, the image and the public key from the environment" {
   with CI_HOST_IMAGE=fixture-image 'CI_HOST_SSH_PUBLIC_KEY=ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureOperatorKey fixture'
 

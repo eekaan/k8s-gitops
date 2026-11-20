@@ -1,0 +1,113 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cert-manager.io/issuer_v1.json
+# The storage cluster's two authorities, that of LINSTOR's API and that of the link between the
+# controller and the satellites, made by cert-manager in this namespace, as OpenBao's is: this
+# self-signed Issuer signs the two authorities' certificates and nothing else. It is an Issuer, not a
+# ClusterIssuer, so it serves this namespace alone and no other namespace can ask it for a
+# certificate.
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: linstor-ca-bootstrap
+spec:
+  selfSigned: {}
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cert-manager.io/certificate_v1.json
+# The API's authority: the certificate and its private key, which cert-manager makes and keeps in the
+# Secret linstor-api-ca of this namespace. It signs the storage cluster's API certificates alone, the
+# controller's and its clients', so the controller's truststore, which holds it, admits no
+# certificate another authority signed, the cluster's own CA included. The key is never in the tree,
+# and a rebuilt cluster makes a new one.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: linstor-api-ca
+spec:
+  isCA: true
+  commonName: linstor-api-ca
+  secretName: linstor-api-ca
+  # Ten years, renewed in the last one, so a long-lived cluster is never left with an expired
+  # authority.
+  duration: 87600h
+  renewBefore: 8760h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    # A renewal gives the same authority a longer life, not a new key, so what it signed stays
+    # valid.
+    rotationPolicy: Never
+  issuerRef:
+    group: cert-manager.io
+    kind: Issuer
+    name: linstor-ca-bootstrap
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cert-manager.io/issuer_v1.json
+# What the LinstorCluster's apiTLS names: the operator asks it for the controller's server
+# certificate and for a client certificate for itself and for each of its components that calls the
+# API, and every one of them trusts the ca.crt it writes beside each certificate, this authority.
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: linstor-api-ca
+spec:
+  ca:
+    secretName: linstor-api-ca
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cert-manager.io/certificate_v1.json
+# The internal authority: the certificate and its private key, which cert-manager makes and keeps in
+# the Secret linstor-internal-ca of this namespace. It signs the certificates of the link between the
+# controller and the satellites alone, the controller's client certificate and each satellite's server
+# certificate, so a satellite, whose truststore holds it, takes a connection from no holder of a
+# certificate another authority signed, the API's callers included, and the controller connects to no
+# satellite without one. It is not the API's authority, so a certificate for one link is not accepted
+# on the other. The key is never in the tree, and a rebuilt cluster makes a new one.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: linstor-internal-ca
+spec:
+  isCA: true
+  commonName: linstor-internal-ca
+  secretName: linstor-internal-ca
+  # Ten years, renewed in the last one, so a long-lived cluster is never left with an expired
+  # authority.
+  duration: 87600h
+  renewBefore: 8760h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    # A renewal gives the same authority a longer life, not a new key, so what it signed stays
+    # valid.
+    rotationPolicy: Never
+  issuerRef:
+    group: cert-manager.io
+    kind: Issuer
+    name: linstor-ca-bootstrap
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cert-manager.io/issuer_v1.json
+# What internalTLS names, on the LinstorCluster and on the configuration below: the operator asks it
+# for the controller's client certificate and for each satellite's server certificate, and each side
+# trusts the ca.crt it writes beside its own certificate, this authority.
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: linstor-internal-ca
+spec:
+  ca:
+    secretName: linstor-internal-ca
+---
+# Applies to every satellite: each gets a server certificate from the internal authority's issuer,
+# in the Secret <node>-tls with the authority beside it, serves LINSTOR's connector over TLS on 3367
+# and takes a connection only from a holder of a certificate that authority signed, the controller.
+# No other configuration sets internalTLS: the operator gives a satellite the internalTLS of the last
+# configuration, by name, that sets it (pkg/merge of the operator).
+apiVersion: piraeus.io/v1
+kind: LinstorSatelliteConfiguration
+metadata:
+  name: internal-tls
+spec:
+  internalTLS:
+    certManager:
+      group: cert-manager.io
+      kind: Issuer
+      name: linstor-internal-ca

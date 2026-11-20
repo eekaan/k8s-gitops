@@ -1,0 +1,17 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/yannh/kubernetes-json-schema/master/master-standalone-strict/persistentvolumeclaim-v1.json
+# The runs' reports, a dated directory each, the newest 30 of them, about 0.6 MiB a run offline. On
+# the default StorageClass, which makes the volume for the claim's first pod, the report server's,
+# and attaches it to one node at a time: the runner's pod runs on that node. Nothing backs it up,
+# snapshots or clones it: the next run writes the reports again, and removing the application
+# deletes it with every report (docs/kubernetes.md, Robot Framework).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: robot-reports
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi

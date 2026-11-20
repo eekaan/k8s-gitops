@@ -1,0 +1,11 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/helmrepository-source-v1.json
+# Ctrl IQ publishes the operator's chart to a classic Helm repository on GitHub Pages only, one
+# release per tag of the operator, so Flux reads the repository's index.
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: ascender-operator
+spec:
+  interval: 12h
+  url: https://ctrliq.github.io/ascender-operator

@@ -1,0 +1,30 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/kustomization
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - serviceaccount.yaml
+  - ciliumnetworkpolicy.yaml
+  - cronjob-network.yaml
+  - cronjob-rights.yaml
+  - prometheusrule.yaml
+
+# The table and the checks' scripts, each under a fixed name: the jobs mount them at every run, so a
+# change reaches the next run with no hash in the name. Flux's substitution leaves them alone: the
+# scripts' ${...} are the shell's.
+configMapGenerator:
+  - name: escape-canary-expected
+    files:
+      - expected.tsv
+    options:
+      disableNameSuffixHash: true
+      annotations:
+        kustomize.toolkit.fluxcd.io/substitute: disabled
+  - name: escape-canary-scripts
+    files:
+      - scripts/network.sh
+      - scripts/rights.sh
+    options:
+      disableNameSuffixHash: true
+      annotations:
+        kustomize.toolkit.fluxcd.io/substitute: disabled

@@ -5,11 +5,27 @@
 # own pods' logs out of what it collects.
 #
 # Vector runs as an agent, one pod on every node, and sends to the VictoriaLogs store
-# (victoria-logs) every pod's log lines and the log of each of the node's Talos services, the
-# kernel's included less its audit records, which Talos writes to /var/log (ADR 0014), and less the
-# log of its auditd service. It reads files only: nothing on the node sends to it, and it listens
-# only for Prometheus.
+# (victoria-logs), through vmauth, every pod's log lines and the log of each of the node's Talos
+# services, the kernel's included less its audit records, which Talos writes to /var/log (ADR 0014),
+# and less the log of its auditd service. It reads files only: nothing on the node sends to it, and
+# it listens only for Prometheus.
 role: Agent
+
+# The collector's credential to vmauth, from the Secret vmauth-vector, which the sink's password
+# names as ${VMAUTH_PASSWORD}. Without the Secret the pod does not start. Vector puts a variable in
+# place of a ${...} of its configuration only with interpolation allowed, which it is not by
+# default, and would otherwise send the placeholder itself as the password (src/cli.rs and
+# src/config/loading/mod.rs, prepare_input, in Vector v0.61.0); with it allowed, a variable that is
+# not set fails the configuration's load. The configuration is the tree's own and names no other
+# variable.
+env:
+  - name: VMAUTH_PASSWORD
+    valueFrom:
+      secretKeyRef:
+        name: vmauth-vector
+        key: password
+  - name: VECTOR_DANGEROUSLY_ALLOW_ENV_VAR_INTERPOLATION
+    value: "true"
 
 # Every node, control planes included: a toleration without a key tolerates every taint. At the
 # priority Kubernetes gives node agents, the scheduler makes room for it on a full node.
@@ -207,19 +223,33 @@ customConfig:
           .kubernetes.pod_labels = labels
         }
   sinks:
-    # VictoriaLogs' Elasticsearch-compatible bulk API, as its documentation sets Vector up. Each
-    # container's lines are one stream, and each Talos service's on each node.
+    # VictoriaLogs' Elasticsearch-compatible bulk API, as its documentation sets Vector up, through
+    # vmauth, which takes the user vector on <endpoint>/_bulk alone and sends it on with the store's
+    # own credential. Each container's lines are one stream, and each Talos service's on each node.
+    # vmauth refuses a credential it does not know with 401, which the sink does not retry: those
+    # lines are dropped, and counted where LogCollectorDiscardingEvents reads.
     victoria_logs:
       type: elasticsearch
       inputs:
         - pod_fields
         - drop_auditd_log
       endpoints:
-        - http://victoria-logs.monitoring.svc.cluster.local:9428/insert/elasticsearch/
+        - http://vmauth.monitoring.svc.cluster.local:8427/insert/elasticsearch/
+      auth:
+        strategy: basic
+        user: vector
+        password: "${VMAUTH_PASSWORD}"
       api_version: v8
       compression: gzip
       healthcheck:
         enabled: false
+      # Once five requests in a row fail at the connection or with a 5xx, Vector stops sending to the
+      # store and tries it again after a wait that doubles from a second, up to an hour unless set.
+      # At 30 seconds the collector resumes within half a minute of the store's return, and the
+      # requests it counts move in every 5 minutes of an outage, which LogCollectorSendFailing
+      # reads. No line is dropped: they wait in the buffer.
+      distribution:
+        retry_max_duration_secs: 30
       query:
         _msg_field: message
         _time_field: timestamp

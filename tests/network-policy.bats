@@ -275,7 +275,7 @@ proxies_egress() {
   real_render
   run "$REPO/scripts/network-policy-check" "$REAL" "$REPO/network-policy-exceptions.yaml"
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-  [ "$(grep ' denies ingress and egress' <<<"$output" | cut -d' ' -f1 | paste -sd' ')" = "backstage crowdsec demo envoy-gateway-system kguardian kromgo open-feature-operator security-system sso-system" ]
+  [ "$(grep ' denies ingress and egress' <<<"$output" | cut -d' ' -f1 | paste -sd' ')" = "ascender backstage crowdsec demo envoy-gateway-system escape-canary kguardian kromgo locust open-feature-operator robot security-system sso-system" ]
   [ "$(grep -c ' listed' <<<"$output")" -eq "$(yq '.exceptions | length' "$REPO/network-policy-exceptions.yaml")" ]
 }
 
@@ -561,6 +561,19 @@ E
   denied "$VIEW" "$PROXY" "$BACKSTAGE_DB" 5432/tcp
   denied_in "$VIEW" "$PROXY" "$BACKSTAGE_DB" 5432/tcp
   denied "$VIEW" "$PROXY" "$PGDUMP" 7007/tcp
+  # Ascender's route sends them to nginx's 8052 in its web pods in ascender, which carries the
+  # Gateway label and denies by default: the pods are the operator's, by the labels its templates
+  # give them. The proxies' egress and the web pods' ingress both take that port and no other, and
+  # neither reaches the task pods, the job pods or the database.
+  local ascender_web='ascender:app.kubernetes.io/name=ascender-web,app.kubernetes.io/part-of=ascender,app.kubernetes.io/managed-by=awx-operator,app.kubernetes.io/component=awx'
+  allowed "$VIEW" "$PROXY" "$ascender_web" 8052/tcp
+  allowed_in "$VIEW" "$PROXY" "$ascender_web" 8052/tcp
+  denied "$VIEW" "$PROXY" "$ascender_web" 8050/tcp
+  denied_in "$VIEW" "$PROXY" "$ascender_web" 8050/tcp
+  denied "$VIEW" "$PROXY" 'ascender:app.kubernetes.io/name=ascender-task,app.kubernetes.io/part-of=ascender,app.kubernetes.io/managed-by=awx-operator,app.kubernetes.io/component=awx' 8052/tcp
+  denied "$VIEW" "$PROXY" 'ascender:ansible_job=' 8052/tcp
+  denied "$VIEW" "$PROXY" 'ascender:cnpg.io/cluster=ascender-db,cnpg.io/podRole=instance' 5432/tcp
+  denied "$VIEW" @world "$ascender_web" 8052/tcp
   # The proxies' egress names each routed backend's pods and the port its route sends to, and no
   # other, so in a namespace that is listed, and takes them on every port, they reach neither n8n's
   # other ports, demo's backend's port among them, nor its database on any port.
@@ -587,20 +600,32 @@ E
   denied "$VIEW" @remote-node sso-system/Deployment/oauth2-proxy 4180/tcp
   denied_in "$VIEW" envoy-gateway-system/Deployment/envoy-gateway sso-system/Deployment/dex 5556/tcp
   denied_in "$VIEW" envoy-gateway-system/Deployment/envoy-gateway sso-system/Deployment/oauth2-proxy 4180/tcp
-  # The log store's route sends the proxies to VictoriaLogs' 9428 in monitoring, which carries the
-  # Gateway label and is listed, so it takes them on every port: the proxies' egress names the
-  # store's pod on that port alone, so they reach no other port of it and no pod of Prometheus,
-  # Grafana, Alertmanager or the collector. Those pods and ports are read from the render: the
-  # Services of Prometheus and Alertmanager, which select the pods their operator makes; the Grafana
-  # its operator runs, whose pods it labels app with the Grafana's name and serves on 3000 unless the
+  # The log store's route sends the proxies to vmauth's 8427 in monitoring, which carries the
+  # Gateway label and is listed, so it takes them on every port: the proxies' egress names vmauth's
+  # pods on that port alone, so they reach neither vmauth's internal port, where its own endpoints
+  # are, nor the store itself, nor any pod of Prometheus, Grafana, Alertmanager or the collector.
+  # Those pods and ports are read from the render: vmauth's ports from its Deployment; the Services
+  # of Prometheus and Alertmanager, which select the pods their operator makes; the Grafana its
+  # operator runs, whose pods it labels app with the Grafana's name and serves on 3000 unless the
   # Grafana's configuration sets another port (grafana-operator v5.25.0, controllers/reconcilers/grafana/
   # and controllers/config/operator_constants.go); and the collector's DaemonSet. The controller's
-  # pods do not reach the store.
-  local store=monitoring/StatefulSet/victoria-logs selector port grafana
-  allowed "$VIEW" "$PROXY" "$store" 9428/tcp
+  # pods reach neither vmauth nor the store.
+  local vmauth=monitoring/Deployment/vmauth store=monitoring/StatefulSet/victoria-logs selector port grafana proxied internal
+  proxied=$(yq '.spec.template.spec.containers[] | select(.name == "vmauth") | .ports[] | select(.name == "http") | .containerPort' "$REAL"/*/vmauth/Deployment.apps_monitoring_vmauth.yaml)
+  internal=$(yq '.spec.template.spec.containers[] | select(.name == "vmauth") | .ports[] | select(.name == "internal") | .containerPort' "$REAL"/*/vmauth/Deployment.apps_monitoring_vmauth.yaml)
+  [ "$proxied $internal" = "8427 8426" ] || { echo "vmauth's ports in the render: $proxied $internal"; return 1; }
+  allowed "$VIEW" "$PROXY" "$vmauth" "$proxied/tcp"
+  denied "$VIEW" "$PROXY" "$vmauth" "$internal/tcp"
+  denied "$VIEW" "$PROXY" "$vmauth" 8080/tcp
+  denied "$VIEW" envoy-gateway-system/Deployment/envoy-gateway "$vmauth" "$proxied/tcp"
+  # The store is no backend of the proxies, on its port or any other, nor of the controller.
+  port=$(yq '.spec.template.spec.containers[0].ports[] | select(.name == "http") | .containerPort' "$REAL"/*/victoria-logs/StatefulSet.apps_monitoring_victoria-logs.yaml)
+  [ "$port" = 9428 ] || { echo "the store's port in the render: $port"; return 1; }
+  denied "$VIEW" "$PROXY" "$store" "$port/tcp"
+  denied "$VIEW" "$PROXY" "$store" "$proxied/tcp"
   denied "$VIEW" "$PROXY" "$store" 9429/tcp
   denied "$VIEW" "$PROXY" "$store" 8080/tcp
-  denied "$VIEW" envoy-gateway-system/Deployment/envoy-gateway "$store" 9428/tcp
+  denied "$VIEW" envoy-gateway-system/Deployment/envoy-gateway "$store" "$port/tcp"
   selector=$(yq '.spec.selector | to_entries | map(.key + "=" + .value) | join(",")' "$REAL"/*/kube-prometheus-stack/Service_monitoring_kube-prometheus-stack-prometheus.yaml)
   port=$(yq '.spec.ports[] | select(.name == "http-web") | .targetPort' "$REAL"/*/kube-prometheus-stack/Service_monitoring_kube-prometheus-stack-prometheus.yaml)
   [ "$port" = 9090 ] || { echo "Prometheus' web port in the render: $port"; return 1; }
@@ -615,10 +640,25 @@ E
   port=$(yq '.spec.template.spec.containers[].ports[] | select(.name == "prom-exporter") | .containerPort' "$REAL"/*/vector/DaemonSet.apps_monitoring_vector.yaml)
   [ "$port" = 9598 ] || { echo "the collector's metrics port in the render: $port"; return 1; }
   denied "$VIEW" "$PROXY" monitoring/DaemonSet/vector "$port/tcp"
-  # The rule names the store's pod, not the namespace: another pod of monitoring is no backend on the
-  # store's port either.
+  # The rule names vmauth's pods, not the namespace: another pod of monitoring is no backend on
+  # vmauth's port or the store's either.
+  denied "$VIEW" "$PROXY" monitoring/DaemonSet/vector "$proxied/tcp"
+  denied "$VIEW" "$PROXY" "monitoring:app=${grafana% *}" "$proxied/tcp"
   denied "$VIEW" "$PROXY" monitoring/DaemonSet/vector 9428/tcp
   denied "$VIEW" "$PROXY" "monitoring:app=${grafana% *}" 9428/tcp
+  # Locust's route sends the proxies to its master's web port, 8089, in locust, which carries the
+  # Gateway label and denies by default: the proxies' egress and the master's own ingress both take
+  # that port, and neither the port the master takes its workers on nor a worker; the controller's
+  # pods do not reach the master.
+  local locust_master=locust/Deployment/locust-master locust_worker=locust/Deployment/locust-worker
+  allowed "$VIEW" "$PROXY" "$locust_master" 8089/tcp
+  allowed_in "$VIEW" "$PROXY" "$locust_master" 8089/tcp
+  denied "$VIEW" "$PROXY" "$locust_master" 5557/tcp
+  denied_in "$VIEW" "$PROXY" "$locust_master" 5557/tcp
+  denied "$VIEW" "$PROXY" "$locust_worker" 8089/tcp
+  denied "$VIEW" "$PROXY" "$locust_worker" 5557/tcp
+  denied_in "$VIEW" envoy-gateway-system/Deployment/envoy-gateway "$locust_master" 8089/tcp
+  denied "$VIEW" @world "$locust_master" 8089/tcp
   allowed "$VIEW" "$PROXY" envoy-gateway-system/Deployment/envoy-gateway 18000/tcp
   allowed "$VIEW" "$PROXY" "$DNS" 53/udp
   # Nothing but the listener ports reaches the proxies from outside.
@@ -679,7 +719,7 @@ E
   local probes pod port
   probes=$(yq -N -o json -I0 'select(. != null)' "$VIEW"/*/*/*.yaml | jq -r '
     select(.kind | IN("Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob"))
-    | select(.metadata.namespace | IN("backstage", "demo", "envoy-gateway-system", "kromgo", "open-feature-operator", "security-system", "sso-system"))
+    | select(.metadata.namespace | IN("ascender", "backstage", "demo", "envoy-gateway-system", "kromgo", "open-feature-operator", "security-system", "sso-system"))
     | . as $w
     | (if .kind == "CronJob" then .spec.jobTemplate.spec.template else .spec.template end).spec.containers[]
     | . as $c
@@ -713,9 +753,10 @@ E
   named=$(proxies_egress "$VIEW")
   echo "the routes' backends' container ports: $routed; the proxies' egress to the labelled namespaces: ${named:-every port}"
   [[ " $routed " == *" demo:8080 "* && " $routed " == *" ai-system:5678 "* && " $routed " == *" ai-system:8080 "* \
-    && " $routed " == *" kromgo:8080 "* && " $routed " == *" backstage:7007 "* ]]
+    && " $routed " == *" kromgo:8080 "* && " $routed " == *" backstage:7007 "* && " $routed " == *" ascender:8052 "* ]]
   [[ " $routed " == *" sso-system:4180 "* && " $routed " == *" sso-system:5556 "* ]]
-  [[ " $routed " == *" monitoring:9428 "* ]]
+  [[ " $routed " == *" monitoring:8427 "* && " $routed " != *" monitoring:9428 "* ]]
+  [[ " $routed " == *" locust:8089 "* ]]
   [ "$named" = "$routed" ]
   # A route to a backend in a namespace without the Gateway label, or behind a Service without a
   # selector, has no port the comparison could name, and fails it saying why.
@@ -771,6 +812,84 @@ E
     run proxies_egress "$dir"
     [ "$output" != "$routed" ] && [[ $output == *"${says[$case]}"* ]] || { echo "$case passes the comparison: $output"; return 1; }
   done
+}
+
+# probe_ports RENDER: the container port of the proxies each Probe of RENDER asks for, sorted and
+# unique: a Probe's target names the proxies' Service, which takes the port of the public Gateway's
+# listener of the target's scheme, https or http, where it names none, and Envoy Gateway serves a
+# listener under 1024 on its port plus 10000. A target that names a port, or a scheme no listener
+# has, fails it.
+probe_ports() {
+  (set -o pipefail; yq -N -o json -I0 'select(. != null)' "$1"/*/*/Probe.monitoring.coreos.com_*.yaml \
+    "$1"/*/*/Gateway.gateway.networking.k8s.io_*.yaml | jq -s -r '
+    ([ .[] | select(.kind == "Gateway" and .metadata.namespace == "envoy-gateway-system" and .metadata.name == "public") ][0]
+      // error("no Gateway public")) as $gw
+    | [ .[] | select(.kind == "Probe") | .spec.targets.staticConfig.static[]
+        | capture("^(?<scheme>https?)://(?<host>[^/:]+)(?<port>:[0-9]+)?(/|$)") // error("the target \(.) is not http or https")
+        | if .port != null then error("the target names the port \(.port), which this test does not map to a listener") else . end
+        | .scheme | ascii_upcase as $protocol
+        | ([ $gw.spec.listeners[] | select(.protocol == $protocol) | .port ] | unique
+           | if length == 1 then .[0] else error("the Gateway has not one listener of \($protocol)") end)
+        | if . < 1024 then . + 10000 else . end ]
+    | unique | map(tostring) | join(" ")')
+}
+
+@test "The probes of the public hostnames reach the Gateway's listeners from inside the cluster, and no other pod does" {
+  real_render
+  local exporter ports port pod pods taken=()
+  # The exporter is the workload whose pods the Service of the Probes' prober selects: the prober is
+  # that Service's cluster name and port, the same for every Probe.
+  exporter=$(yq -N -o json -I0 'select(. != null)' "$REAL"/*/*/Probe.monitoring.coreos.com_*.yaml "$REAL"/*/*/Service_*.yaml \
+    "$REAL"/*/*/Deployment.apps_*.yaml | jq -s -r '
+    ([ .[] | select(.kind == "Probe") | .spec.prober.url ] | unique
+      | if length == 1 then .[0] else error("the Probes name not one prober: \(.)") end
+      | capture("^(?<name>[a-z0-9-]+)\\.(?<ns>[a-z0-9-]+)\\.svc\\.cluster\\.local:(?<port>[0-9]+)$")
+      // error("the prober is no Service by its cluster name")) as $p
+    | ([ .[] | select(.kind == "Service" and .metadata.name == $p.name and .metadata.namespace == $p.ns) ][0]
+      // error("no Service \($p.ns)/\($p.name)")) as $svc
+    | [ .[] | select(.kind == "Deployment" and .metadata.namespace == $p.ns)
+        | select(.spec.template.metadata.labels as $l | $svc.spec.selector | to_entries | all(.[]; $l[.key] == .value))
+        | "\(.metadata.namespace)/Deployment/\(.metadata.name)" ]
+    | if length == 1 then .[0] else error("not one Deployment behind \($p.ns)/\($p.name)") end')
+  echo "the exporter: $exporter"
+  [ "$exporter" = monitoring/Deployment/blackbox-exporter ]
+  # A Probe's target is the proxies' Service by its cluster name (tests/probes.bats), whose address
+  # Cilium translates to a proxy's before policy applies: the proxies see the exporter's pods, not
+  # the world, on the container port of the listener the target's scheme names.
+  ports=$(probe_ports "$REAL")
+  echo "the listener ports the Probes ask for: $ports"
+  [ "$ports" = "10080 10443" ]
+  for port in $ports; do
+    allowed "$VIEW" "$exporter" "$PROXY" "$port/tcp"
+  done
+  # And no other port of the proxies: not their readiness, shutdown, stats or admin port.
+  for port in 19000 19001 19002 19003 22; do
+    denied "$VIEW" "$exporter" "$PROXY" "$port/tcp"
+  done
+  # A probe goes through the proxies: the exporter reaches no backend in a namespace that denies by
+  # default, nor the Gateway's controller.
+  denied "$VIEW" "$exporter" demo/Deployment/hello 8080/tcp
+  denied "$VIEW" "$exporter" "$KROMGO" 8080/tcp
+  denied "$VIEW" "$exporter" envoy-gateway-system/Deployment/envoy-gateway 18000/tcp
+  # The exporter's are the only pods the proxies take on those ports from inside the cluster: every
+  # workload of the render, in every namespace, and the pods the operators make at run time.
+  mapfile -t pods < <(yq -N -o json -I0 'select(. != null)' "$VIEW"/*/*/*.yaml | jq -r '
+    select(.kind | IN("Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob", "Pod"))
+    | select((.metadata.namespace // "") != "") | "\(.metadata.namespace)/\(.kind)/\(.metadata.name)"' | sort -u)
+  [ "${#pods[@]}" -gt 30 ]
+  pods+=("$PROMETHEUS" "$MOVER" "$N8N_DB" "$STORAGE" "$OTHER_APP")
+  for pod in "${pods[@]}"; do
+    for port in $ports; do
+      run "$REPO/scripts/network-policy-check" --reach-ingress "$VIEW" "$pod" "$PROXY" "$port/tcp"
+      case $status in
+        0) taken+=("$pod:$port") ;;
+        1) ;;
+        *) echo "no answer for $pod on $port: $output"; return 1 ;;
+      esac
+    done
+  done
+  echo "taken on the listener ports from inside the cluster, of ${#pods[@]} sources: ${taken[*]}"
+  [ "${taken[*]}" = "$exporter:10080 $exporter:10443" ]
 }
 
 @test "A pod of an application cannot reach the secret store, the storage controller or another application" {
@@ -985,6 +1104,78 @@ E
   denied "$VIEW" "$OPEN_FEATURE" ai-system/Deployment/n8n 5678/tcp
   denied "$VIEW" "$OPEN_FEATURE" demo/Deployment/hello 8080/tcp
   denied "$VIEW" "$OPEN_FEATURE" @host 10250/tcp
+}
+
+@test "The restore drill's mover has the movers' flows and its check job has none" {
+  real_render
+  local destination job drill_mover check=demo/CronJob/volsync-demo-drill-check endpoint s3 port peer
+  # The ReplicationDestination of volsync-demo's drill, whose mover VolSync runs, and the check's
+  # CronJob, whose pod template the render holds.
+  destination=$(echo "$REAL"/*/volsync-demo/ReplicationDestination.volsync.backube_demo_volsync-demo-drill.yaml)
+  [ -f "$destination" ] || { echo "the render holds no ReplicationDestination volsync-demo-drill"; return 1; }
+  [ -f "$(echo "$VIEW"/*/volsync-demo/CronJob.batch_demo_volsync-demo-drill-check.yaml)" ] ||
+    { echo "the render holds no CronJob volsync-demo-drill-check"; return 1; }
+  # The labels of the mover's pod at the pinned VolSync, v0.17.0: the restic mover's ensureJob
+  # (internal/controller/mover/restic/mover.go) names the Job volsync-dst-<name> and labels its pod
+  # template app.kubernetes.io/created-by: volsync (utils.SetOwnedByVolSync, labels.go), which only
+  # spec.restic.moverPodLabels would add to; the Job controller adds the Job's name and uid.
+  [ "$(yq '.spec.restic.moverPodLabels // {} | length' "$destination")" -eq 0 ]
+  job="volsync-dst-$(yq '.metadata.name' "$destination")"
+  drill_mover="demo:app.kubernetes.io/created-by=volsync,batch.kubernetes.io/job-name=$job,job-name=$job,batch.kubernetes.io/controller-uid=marker-uid,controller-uid=marker-uid"
+  # The mover resolves the repository's name through the cluster's resolver and reaches the object
+  # storage on the port of its endpoint as cluster-config's example gives it, and nothing else.
+  endpoint=$(yq '.S3_ENDPOINT' "$REPO/kubernetes/clusters/lab-sto2/cluster-config.example.yaml")
+  [[ $endpoint =~ ^https://[^/:]+(:([0-9]+))?$ ]]
+  s3=${BASH_REMATCH[2]:-443}
+  allowed "$VIEW" "$drill_mover" "$DNS" 53/udp
+  allowed "$VIEW" "$drill_mover" "$DNS" 53/tcp
+  allowed "$VIEW" "$drill_mover" @world "$s3/tcp"
+  denied "$VIEW" "$drill_mover" "$DNS" 9153/tcp
+  for port in 80 22 53 5432 6443 8080; do
+    [ "$port" = "$s3" ] || denied "$VIEW" "$drill_mover" @world "$port/tcp"
+  done
+  for peer in @kube-apiserver @host @remote-node; do
+    for port in 443 6443 10250; do
+      denied "$VIEW" "$drill_mover" "$peer" "$port/tcp"
+    done
+  done
+  denied "$VIEW" "$drill_mover" demo/Deployment/hello 8080/tcp
+  denied "$VIEW" "$drill_mover" demo/Deployment/volsync-demo 8080/tcp
+  denied "$VIEW" "$drill_mover" "$check" 8080/tcp
+  denied "$VIEW" "$drill_mover" openbao/StatefulSet/openbao 8200/tcp
+  denied "$VIEW" "$drill_mover" "$STORAGE" 3370/tcp
+  # The check job, by the labels of its pod template in the render, reaches nothing on any port tried:
+  # not the resolver, the object storage's port, the API server, a node's kubelet, another pod of
+  # demo, the secret store or the world.
+  for port in 53/udp 53/tcp 9153/tcp; do
+    denied "$VIEW" "$check" "$DNS" "$port"
+  done
+  for port in "$s3/tcp" 443/tcp 80/tcp 53/udp 53/tcp 22/tcp; do
+    denied "$VIEW" "$check" @world "$port"
+  done
+  for peer in @kube-apiserver @host @remote-node; do
+    for port in 443 6443 10250; do
+      denied "$VIEW" "$check" "$peer" "$port/tcp"
+    done
+  done
+  denied "$VIEW" "$check" demo/Deployment/hello 8080/tcp
+  denied "$VIEW" "$check" demo/Deployment/volsync-demo 8080/tcp
+  denied "$VIEW" "$check" "$drill_mover" 8080/tcp
+  denied "$VIEW" "$check" "$MOVER" 443/tcp
+  denied "$VIEW" "$check" openbao/StatefulSet/openbao 8200/tcp
+  denied "$VIEW" "$check" openbao/StatefulSet/openbao 8201/tcp
+  denied "$VIEW" "$check" "$STORAGE" 3370/tcp
+  denied "$VIEW" "$check" "$OTHER_APP" 8080/tcp
+  # Nothing reaches either.
+  for peer in "$drill_mover" "$check"; do
+    denied "$VIEW" @world "$peer" 443/tcp
+    denied "$VIEW" @remote-node "$peer" 8080/tcp
+    denied "$VIEW" demo/Deployment/hello "$peer" 8080/tcp
+    denied "$VIEW" demo/Deployment/volsync-demo "$peer" 8080/tcp
+    denied "$VIEW" "$PROMETHEUS" "$peer" 8080/tcp
+    denied "$VIEW" "$PROXY" "$peer" 8080/tcp
+    denied "$VIEW" "$OTHER_APP" "$peer" 8080/tcp
+  done
 }
 
 @test "An allow that names an address fails the check" {
@@ -1380,14 +1571,14 @@ probed_ports() {
   # Its allows, each with the entities it names. The observers run in the host's network namespace
   # on every node, so no pod selector matches them: the broker takes the local host and other nodes'
   # hosts on its port by the one rule of a policy of its own, which carries its reason. The world is
-  # named only by the database's instances, for the object storage, and its dump job, for the object
-  # storage and age's release, each in a policy of its own with its reason, as Backstage's are, and
-  # the API server only by the database's.
+  # named only by the database's instances and a restore's recovery job, for the object storage, and
+  # its dump job, for the object storage and age's release, each in a policy of its own with its
+  # reason, as Backstage's are, and the API server only by the database's.
   local policies=("$REAL"/*/kguardian/CiliumNetworkPolicy.cilium.io_kguardian_*.yaml)
   [ "$(yq -N '.metadata.name + "=" + ([.spec.ingress[]?.fromEntities[]?, .spec.egress[]?.toEntities[]?] | unique | join("+"))' "${policies[@]}" | LC_ALL=C sort | paste -sd' ' -)" \
-    = "kguardian-broker-observers=host+remote-node kguardian-broker= kguardian-db-instances-world=world kguardian-db-instances=host kguardian-db-pgdump-world=world kguardian-db-pgdump= kguardian-db=kube-apiserver kguardian-frontend=host" ]
+    = "kguardian-broker-observers=host+remote-node kguardian-broker= kguardian-db-full-recovery-world=world kguardian-db-instances-world=world kguardian-db-instances=host kguardian-db-pgdump-world=world kguardian-db-pgdump= kguardian-db=kube-apiserver kguardian-frontend=host" ]
   [ "$(yq -N 'select(.metadata.annotations["k8s-gitops/network-policy-reason"] != null) | .metadata.name' "${policies[@]}" | LC_ALL=C sort | paste -sd' ' -)" \
-    = "kguardian-broker-observers kguardian-db-instances-world kguardian-db-pgdump-world" ]
+    = "kguardian-broker-observers kguardian-db-full-recovery-world kguardian-db-instances-world kguardian-db-pgdump-world" ]
   [ "$(yq -o json -I0 '.spec | [.ingress, .egress // []]' "$REAL"/*/kguardian/CiliumNetworkPolicy.cilium.io_kguardian_kguardian-broker-observers.yaml)" \
     = '[[{"fromEntities":["host","remote-node"],"toPorts":[{"ports":[{"port":"9090","protocol":"TCP"}]}]}],[]]' ]
   # Every policy that can let a flow of the namespace through, whatever its kind: each object of
@@ -1396,7 +1587,7 @@ probed_ports() {
   # cluster-wide network policy of the render, whichever application's tree it comes from and
   # whatever namespace the build wrote into it, but a Cilium one whose every endpoint selector pins
   # another namespace. They are the namespace's default
-  # deny and the eight allows above, and nothing else.
+  # deny and the nine allows above, and nothing else.
   local every=() file listed
   while IFS= read -r file; do every+=("$file"); done < <(find "$REAL" -type f \( -path "$REAL/*/kguardian/*" -o -name '*_kguardian_*' \) -print0 \
     | xargs -0 -r yq -N 'select((.apiVersion | test("^(cilium[.]io|([a-z0-9-]+[.])*networking[.]k8s[.]io)/")) or (.kind | test("Policy$"))) | filename' | LC_ALL=C sort)
@@ -1406,7 +1597,7 @@ probed_ports() {
           | any_c((.matchLabels["k8s:io.kubernetes.pod.namespace"] // "kguardian") == "kguardian"))) | filename')
   mapfile -t every < <(printf '%s\n' "${every[@]}" | LC_ALL=C sort -u)
   listed="$(yq -N '.kind + "/" + (.metadata.namespace // "") + "/" + .metadata.name' "${every[@]}" | LC_ALL=C sort | paste -sd' ' -)"
-  [ "$listed" = "CiliumNetworkPolicy/kguardian/kguardian-broker CiliumNetworkPolicy/kguardian/kguardian-broker-observers CiliumNetworkPolicy/kguardian/kguardian-db CiliumNetworkPolicy/kguardian/kguardian-db-instances CiliumNetworkPolicy/kguardian/kguardian-db-instances-world CiliumNetworkPolicy/kguardian/kguardian-db-pgdump CiliumNetworkPolicy/kguardian/kguardian-db-pgdump-world CiliumNetworkPolicy/kguardian/kguardian-frontend NetworkPolicy/kguardian/default-deny" ] \
+  [ "$listed" = "CiliumNetworkPolicy/kguardian/kguardian-broker CiliumNetworkPolicy/kguardian/kguardian-broker-observers CiliumNetworkPolicy/kguardian/kguardian-db CiliumNetworkPolicy/kguardian/kguardian-db-full-recovery-world CiliumNetworkPolicy/kguardian/kguardian-db-instances CiliumNetworkPolicy/kguardian/kguardian-db-instances-world CiliumNetworkPolicy/kguardian/kguardian-db-pgdump CiliumNetworkPolicy/kguardian/kguardian-db-pgdump-world CiliumNetworkPolicy/kguardian/kguardian-frontend NetworkPolicy/kguardian/default-deny" ] \
     || { echo "kguardian's policies are $listed"; return 1; }
   # The evaluation below sees a peer only as pods by their labels or as an entity: one named by a DNS
   # name, a Service or an address matches no pod there, and a rule on what a request carries is not
@@ -1422,12 +1613,13 @@ probed_ports() {
   [ -z "$peers" ] || { echo "kguardian's policies use $peers, beyond what the evaluation and this test read"; return 1; }
   held="$(yq -o json -I0 '.' "${every[@]}" | jq -cS . | jq -r '"\(.kind)/\(.metadata.name) \(del(.metadata) | tojson)"' | LC_ALL=C sort)"
   want="$(cat <<'POLICIES'
-CiliumNetworkPolicy/kguardian-broker {"apiVersion":"cilium.io/v2","kind":"CiliumNetworkPolicy","spec":{"egress":[{"toEndpoints":[{"matchLabels":{"k8s:io.kubernetes.pod.namespace":"kube-system","k8s:k8s-app":"kube-dns"}}],"toPorts":[{"ports":[{"port":"53","protocol":"UDP"},{"port":"53","protocol":"TCP"}]}]},{"toEndpoints":[{"matchLabels":{"cnpg.io/cluster":"kguardian-db","cnpg.io/podRole":"instance"}}],"toPorts":[{"ports":[{"port":"5432","protocol":"TCP"}]}]}],"enableDefaultDeny":{"egress":false,"ingress":false},"endpointSelector":{"matchLabels":{"app.kubernetes.io/name":"kguardian-broker"}},"ingress":[{"fromEndpoints":[{"matchLabels":{"app.kubernetes.io/name":"kguardian-frontend"}}],"toPorts":[{"ports":[{"port":"9090","protocol":"TCP"}]}]},{"fromEndpoints":[{"matchLabels":{"app.kubernetes.io/name":"prometheus","k8s:io.kubernetes.pod.namespace":"monitoring"}}],"toPorts":[{"ports":[{"port":"9090","protocol":"TCP"}]}]}]}}
+CiliumNetworkPolicy/kguardian-broker {"apiVersion":"cilium.io/v2","kind":"CiliumNetworkPolicy","spec":{"egress":[{"toEndpoints":[{"matchLabels":{"k8s:io.kubernetes.pod.namespace":"kube-system","k8s:k8s-app":"kube-dns"}}],"toPorts":[{"ports":[{"port":"53","protocol":"UDP"},{"port":"53","protocol":"TCP"}]}]},{"toEndpoints":[{"matchExpressions":[{"key":"cnpg.io/cluster","operator":"Exists"}],"matchLabels":{"cnpg.io/podRole":"instance"}}],"toPorts":[{"ports":[{"port":"5432","protocol":"TCP"}]}]}],"enableDefaultDeny":{"egress":false,"ingress":false},"endpointSelector":{"matchLabels":{"app.kubernetes.io/name":"kguardian-broker"}},"ingress":[{"fromEndpoints":[{"matchLabels":{"app.kubernetes.io/name":"kguardian-frontend"}}],"toPorts":[{"ports":[{"port":"9090","protocol":"TCP"}]}]},{"fromEndpoints":[{"matchLabels":{"app.kubernetes.io/name":"prometheus","k8s:io.kubernetes.pod.namespace":"monitoring"}}],"toPorts":[{"ports":[{"port":"9090","protocol":"TCP"}]}]}]}}
 CiliumNetworkPolicy/kguardian-broker-observers {"apiVersion":"cilium.io/v2","kind":"CiliumNetworkPolicy","spec":{"enableDefaultDeny":{"egress":false,"ingress":false},"endpointSelector":{"matchLabels":{"app.kubernetes.io/name":"kguardian-broker"}},"ingress":[{"fromEntities":["host","remote-node"],"toPorts":[{"ports":[{"port":"9090","protocol":"TCP"}]}]}]}}
-CiliumNetworkPolicy/kguardian-db {"apiVersion":"cilium.io/v2","kind":"CiliumNetworkPolicy","spec":{"egress":[{"toEndpoints":[{"matchLabels":{"k8s:io.kubernetes.pod.namespace":"kube-system","k8s:k8s-app":"kube-dns"}}],"toPorts":[{"ports":[{"port":"53","protocol":"UDP"},{"port":"53","protocol":"TCP"}]}]},{"toEndpoints":[{"matchLabels":{"cnpg.io/cluster":"kguardian-db"}}]},{"toEntities":["kube-apiserver"],"toPorts":[{"ports":[{"port":"443","protocol":"TCP"},{"port":"6443","protocol":"TCP"}]}]}],"enableDefaultDeny":{"egress":false,"ingress":false},"endpointSelector":{"matchLabels":{"cnpg.io/cluster":"kguardian-db"}},"ingress":[{"fromEndpoints":[{"matchLabels":{"app.kubernetes.io/name":"cloudnative-pg","k8s:io.kubernetes.pod.namespace":"cnpg-system"}}],"toPorts":[{"ports":[{"port":"8000","protocol":"TCP"},{"port":"5432","protocol":"TCP"}]}]},{"fromEndpoints":[{"matchLabels":{"cnpg.io/cluster":"kguardian-db"}}]}]}}
-CiliumNetworkPolicy/kguardian-db-instances {"apiVersion":"cilium.io/v2","kind":"CiliumNetworkPolicy","spec":{"enableDefaultDeny":{"egress":false,"ingress":false},"endpointSelector":{"matchLabels":{"cnpg.io/cluster":"kguardian-db","cnpg.io/podRole":"instance"}},"ingress":[{"fromEndpoints":[{"matchLabels":{"app.kubernetes.io/name":"kguardian-broker"}},{"matchLabels":{"app.kubernetes.io/instance":"kguardian-db","app.kubernetes.io/name":"pgdump"}}],"toPorts":[{"ports":[{"port":"5432","protocol":"TCP"}]}]},{"fromEndpoints":[{"matchLabels":{"app.kubernetes.io/name":"prometheus","k8s:io.kubernetes.pod.namespace":"monitoring"}}],"toPorts":[{"ports":[{"port":"9187","protocol":"TCP"}]}]},{"fromEntities":["host"],"toPorts":[{"ports":[{"port":"8000","protocol":"TCP"}]}]}]}}
-CiliumNetworkPolicy/kguardian-db-instances-world {"apiVersion":"cilium.io/v2","kind":"CiliumNetworkPolicy","spec":{"egress":[{"toEntities":["world"],"toPorts":[{"ports":[{"port":"443","protocol":"TCP"}]}]}],"enableDefaultDeny":{"egress":false,"ingress":false},"endpointSelector":{"matchLabels":{"cnpg.io/cluster":"kguardian-db","cnpg.io/podRole":"instance"}}}}
-CiliumNetworkPolicy/kguardian-db-pgdump {"apiVersion":"cilium.io/v2","kind":"CiliumNetworkPolicy","spec":{"egress":[{"toEndpoints":[{"matchLabels":{"k8s:io.kubernetes.pod.namespace":"kube-system","k8s:k8s-app":"kube-dns"}}],"toPorts":[{"ports":[{"port":"53","protocol":"UDP"},{"port":"53","protocol":"TCP"}]}]},{"toEndpoints":[{"matchLabels":{"cnpg.io/cluster":"kguardian-db","cnpg.io/podRole":"instance"}}],"toPorts":[{"ports":[{"port":"5432","protocol":"TCP"}]}]}],"enableDefaultDeny":{"egress":false,"ingress":false},"endpointSelector":{"matchLabels":{"app.kubernetes.io/instance":"kguardian-db","app.kubernetes.io/name":"pgdump"}}}}
+CiliumNetworkPolicy/kguardian-db {"apiVersion":"cilium.io/v2","kind":"CiliumNetworkPolicy","spec":{"egress":[{"toEndpoints":[{"matchLabels":{"k8s:io.kubernetes.pod.namespace":"kube-system","k8s:k8s-app":"kube-dns"}}],"toPorts":[{"ports":[{"port":"53","protocol":"UDP"},{"port":"53","protocol":"TCP"}]}]},{"toEndpoints":[{"matchExpressions":[{"key":"cnpg.io/cluster","operator":"Exists"}]}]},{"toEntities":["kube-apiserver"],"toPorts":[{"ports":[{"port":"443","protocol":"TCP"},{"port":"6443","protocol":"TCP"}]}]}],"enableDefaultDeny":{"egress":false,"ingress":false},"endpointSelector":{"matchExpressions":[{"key":"cnpg.io/cluster","operator":"Exists"}]},"ingress":[{"fromEndpoints":[{"matchLabels":{"app.kubernetes.io/name":"cloudnative-pg","k8s:io.kubernetes.pod.namespace":"cnpg-system"}}],"toPorts":[{"ports":[{"port":"8000","protocol":"TCP"},{"port":"5432","protocol":"TCP"}]}]},{"fromEndpoints":[{"matchExpressions":[{"key":"cnpg.io/cluster","operator":"Exists"}]}]}]}}
+CiliumNetworkPolicy/kguardian-db-full-recovery-world {"apiVersion":"cilium.io/v2","kind":"CiliumNetworkPolicy","spec":{"egress":[{"toEntities":["world"],"toPorts":[{"ports":[{"port":"443","protocol":"TCP"}]}]}],"enableDefaultDeny":{"egress":false,"ingress":false},"endpointSelector":{"matchExpressions":[{"key":"cnpg.io/cluster","operator":"Exists"}],"matchLabels":{"cnpg.io/jobRole":"full-recovery"}}}}
+CiliumNetworkPolicy/kguardian-db-instances {"apiVersion":"cilium.io/v2","kind":"CiliumNetworkPolicy","spec":{"enableDefaultDeny":{"egress":false,"ingress":false},"endpointSelector":{"matchExpressions":[{"key":"cnpg.io/cluster","operator":"Exists"}],"matchLabels":{"cnpg.io/podRole":"instance"}},"ingress":[{"fromEndpoints":[{"matchLabels":{"app.kubernetes.io/name":"kguardian-broker"}},{"matchLabels":{"app.kubernetes.io/instance":"kguardian-db","app.kubernetes.io/name":"pgdump"}}],"toPorts":[{"ports":[{"port":"5432","protocol":"TCP"}]}]},{"fromEndpoints":[{"matchLabels":{"app.kubernetes.io/name":"prometheus","k8s:io.kubernetes.pod.namespace":"monitoring"}}],"toPorts":[{"ports":[{"port":"9187","protocol":"TCP"}]}]},{"fromEntities":["host"],"toPorts":[{"ports":[{"port":"8000","protocol":"TCP"}]}]}]}}
+CiliumNetworkPolicy/kguardian-db-instances-world {"apiVersion":"cilium.io/v2","kind":"CiliumNetworkPolicy","spec":{"egress":[{"toEntities":["world"],"toPorts":[{"ports":[{"port":"443","protocol":"TCP"}]}]}],"enableDefaultDeny":{"egress":false,"ingress":false},"endpointSelector":{"matchExpressions":[{"key":"cnpg.io/cluster","operator":"Exists"}],"matchLabels":{"cnpg.io/podRole":"instance"}}}}
+CiliumNetworkPolicy/kguardian-db-pgdump {"apiVersion":"cilium.io/v2","kind":"CiliumNetworkPolicy","spec":{"egress":[{"toEndpoints":[{"matchLabels":{"k8s:io.kubernetes.pod.namespace":"kube-system","k8s:k8s-app":"kube-dns"}}],"toPorts":[{"ports":[{"port":"53","protocol":"UDP"},{"port":"53","protocol":"TCP"}]}]},{"toEndpoints":[{"matchExpressions":[{"key":"cnpg.io/cluster","operator":"Exists"}],"matchLabels":{"cnpg.io/podRole":"instance"}}],"toPorts":[{"ports":[{"port":"5432","protocol":"TCP"}]}]}],"enableDefaultDeny":{"egress":false,"ingress":false},"endpointSelector":{"matchLabels":{"app.kubernetes.io/instance":"kguardian-db","app.kubernetes.io/name":"pgdump"}}}}
 CiliumNetworkPolicy/kguardian-db-pgdump-world {"apiVersion":"cilium.io/v2","kind":"CiliumNetworkPolicy","spec":{"egress":[{"toEntities":["world"],"toPorts":[{"ports":[{"port":"443","protocol":"TCP"}]}]}],"enableDefaultDeny":{"egress":false,"ingress":false},"endpointSelector":{"matchLabels":{"app.kubernetes.io/instance":"kguardian-db","app.kubernetes.io/name":"pgdump"}}}}
 CiliumNetworkPolicy/kguardian-frontend {"apiVersion":"cilium.io/v2","kind":"CiliumNetworkPolicy","spec":{"egress":[{"toEndpoints":[{"matchLabels":{"k8s:io.kubernetes.pod.namespace":"kube-system","k8s:k8s-app":"kube-dns"}}],"toPorts":[{"ports":[{"port":"53","protocol":"UDP"},{"port":"53","protocol":"TCP"}]}]},{"toEndpoints":[{"matchLabels":{"app.kubernetes.io/name":"kguardian-broker"}}],"toPorts":[{"ports":[{"port":"9090","protocol":"TCP"}]}]}],"enableDefaultDeny":{"egress":false,"ingress":false},"endpointSelector":{"matchLabels":{"app.kubernetes.io/name":"kguardian-frontend"}},"ingress":[{"fromEntities":["host"],"toPorts":[{"ports":[{"port":"5173","protocol":"TCP"}]}]}]}}
 NetworkPolicy/default-deny {"apiVersion":"networking.k8s.io/v1","kind":"NetworkPolicy","spec":{"podSelector":{},"policyTypes":["Ingress","Egress"]}}

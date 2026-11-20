@@ -1,0 +1,23 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/yannh/kubernetes-json-schema/master/master-standalone-strict/service-v1.json
+# The web pods, for the route. The operator makes a Service of its own, ascender-service, at run
+# time, which no render holds, so the route's backend is this one, declared in the tree: the selector
+# is the one the operator's Service and the web Deployment use (roles/installer/templates/networking/
+# service.yaml.j2 and deployments/web.yaml.j2 at the release recorded below), and port 80 goes to
+# nginx's 8052, numbered, so the checks of the proxies' egress read the container port from it.
+# ascender-operator-templates: 25.6.3
+apiVersion: v1
+kind: Service
+metadata:
+  name: ascender-web
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: ascender-web
+    app.kubernetes.io/managed-by: awx-operator
+    app.kubernetes.io/component: awx
+  ports:
+    - name: http
+      port: 80
+      protocol: TCP
+      targetPort: 8052

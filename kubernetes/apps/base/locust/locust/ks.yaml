@@ -1,0 +1,27 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/kustomization-kustomize-v1.json
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: locust
+  namespace: flux-system
+spec:
+  path: ./apps/base/locust/locust/app
+  targetNamespace: locust
+  # Its CiliumNetworkPolicies are a kind Cilium's operator defines. Nothing else: Locust starts
+  # without its target, which only a test reaches, and its workers retry the master until it answers.
+  dependsOn:
+    - name: cilium
+  # Ready only once the master answers its readiness probe and both workers run.
+  wait: true
+  postBuild:
+    substitute:
+      # What the workers put load on, the host the master hands them: a Service of the cluster by
+      # its name, its namespace, the cluster's DNS domain and its port. Another target takes the
+      # workers' egress rule to its pods and an allow beside the target's application
+      # (docs/kubernetes.md, Locust). Named so that it is never taken for LOCUST_HOST, the
+      # variable Locust reads its host from.
+      LOCUST_TARGET: http://hello.demo.svc.cluster.local:80
+  sourceRef:
+    kind: ExternalArtifact
+    name: locust

@@ -1,8 +1,12 @@
 #!/usr/bin/env bats
 # Proves the scenarios of features/edge-routers.feature about the edge scripts: edge-check and
-# edge-rollout, with the tests of the scripts around them. The scripts run in a copy against
-# recording fakes of tofu, ssh and the edge's own commands, so nothing here reaches a cloud or a
-# host, no test reads this checkout's .env, and the edges' key is a file in the test's own directory.
+# edge-rollout, with the tests of the scripts around them, and those of features/dns.feature about
+# destroying the edge stack while the routes' names point at it. The scripts run in a copy against
+# recording fakes of tofu, ssh, the edge's own commands, the tree's offline check and the public
+# resolver, so nothing here reaches a cloud, a host or a resolver, no test reads this checkout's
+# .env, and the edges' key is a file in the test's own directory.
+
+bats_require_minimum_version 1.5.0
 
 setup() {
   ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
@@ -69,11 +73,25 @@ JSON
   # created one is a new server: the outputs give it an identifier of its own, the next of
   # instance_id's for that edge or what the file next-id-NUMBER in the fake host's directory names,
   # and the server it replaced is deleted, so the client finds no console for its identifier.
+  # While the fake host's directory holds output-fails, reading the outputs fails as a state that
+  # cannot be loaded does; show without a plan gives the state, the file state.json, when there is one.
   fake tofu << EOF
 printf '%s\n' "tofu \$*" >> "$RECORD/argv"
 case \${2-} in
-  output) cat "$BATS_TEST_TMPDIR/outputs.json" ;;
-  show) cat "$RECORD/plan.saved" ;;
+  output)
+    if [[ -e "$HOST/output-fails" ]]; then
+      echo "Error: Failed to load state: fixture failure" >&2
+      exit 1
+    fi
+    cat "$BATS_TEST_TMPDIR/outputs.json"
+    ;;
+  show)
+    if [[ \$# -eq 3 && -f "$BATS_TEST_TMPDIR/state.json" ]]; then
+      cat "$BATS_TEST_TMPDIR/state.json"
+    else
+      cat "$RECORD/plan.saved"
+    fi
+    ;;
   plan)
     targeted=0 forced=()
     for argument; do
@@ -710,6 +728,174 @@ other_edge_down_answered() {
   [ -z "$(answers_left)" ]
   [ ! -s "$RECORD/had-answers" ]
   no_address "$output"
+}
+
+# published_world: what the edge stack's destroy reads to know which names point at the edges, as
+# the tree and a public resolver would give it. The copy gets the cluster's example key list, whose
+# CLUSTER_DOMAIN is example.org, not the tree's, so a domain the code itself names would show; and a
+# stand-in scripts/kubernetes-check, which refuses a KUBERNETES_CHECK_BUILT that is not an existing
+# empty directory, as the real one does, and writes to it one build of what Flux builds, the file
+# routes.yaml of the fake host's directory: routes on the Gateway public's https listener for hello,
+# n8n and hello-sso, whose name its build has substituted already, the redirect on its http listener
+# without hostnames, a route on another Gateway and a Service. While the fake host's directory holds
+# no-builds, it passes and keeps the build without its record, the file builds. curl answers only
+# the public resolver's JSON interface over HTTPS, without --resolve or another authority, for the
+# names the fake host's dns/ holds, each with its file's body or, for the word down, the timeout of
+# a resolver that cannot be reached; it refuses any other call. Both note the secrets of the stack's
+# environment they see, by name, the variables that would hand curl a trust store of the caller's
+# among them, kubernetes-check the mode of its directory and curl that of the directory it writes the
+# answer in. The recipe's TMPDIR is a directory of the test's own, the environment names a trust
+# store, and CLUSTER_DOMAIN is example.net; every name is NXDOMAIN to start with.
+published_world() {
+  mkdir -p "$REPO/kubernetes/clusters/lab-sto2" "$HOST/dns" "$BATS_TEST_TMPDIR/tmp"
+  printf 'CLUSTER_DOMAIN: example.org\nCLUSTER_NAME: example-cluster\n' > "$REPO/kubernetes/clusters/lab-sto2/cluster-config.example.yaml"
+  : > "$RECORD/secrets-seen"
+  cat > "$HOST/routes.yaml" << 'YAML'
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: {name: hello, namespace: demo}
+spec:
+  parentRefs: [{name: public, namespace: envoy-gateway-system, sectionName: https}]
+  hostnames: [hello.example.org]
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: {name: n8n, namespace: ai-system}
+spec:
+  parentRefs: [{name: public, namespace: envoy-gateway-system, sectionName: https}]
+  hostnames: [n8n.example.org]
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: {name: hello-sso, namespace: demo}
+spec:
+  parentRefs: [{name: public, namespace: envoy-gateway-system, sectionName: https}]
+  hostnames: [hello-sso.example.org]
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: {name: https-redirect, namespace: envoy-gateway-system}
+spec:
+  parentRefs: [{name: public, sectionName: http}]
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: {name: inside, namespace: demo}
+spec:
+  parentRefs: [{name: internal, namespace: envoy-gateway-system}]
+  hostnames: [internal.example.org]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: hello, namespace: demo}
+spec:
+  ports: [{port: 80}]
+YAML
+  cat > "$REPO/scripts/kubernetes-check" << EOF
+#!/usr/bin/env bash
+printf '%s\n' "kubernetes-check \$*" >> "$RECORD/argv"
+compgen -e | grep -E '^(AWS_|OS_|TF_VAR_|TF_ENCRYPTION\$|TF_STATE_PASSPHRASE\$|EDGE_SSH_KEY_FILE\$)' | sed 's/^/kubernetes-check /' >> "$RECORD/secrets-seen"
+if [[ -e "$HOST/kubernetes-check-fails" ]]; then
+  echo "kubernetes-check: fixture failure naming example.org" >&2
+  exit 1
+fi
+dir=\${KUBERNETES_CHECK_BUILT-}
+if [[ ! -d \$dir || -n \$(find "\$dir" -mindepth 1 -print -quit) ]]; then
+  echo "kubernetes-check: KUBERNETES_CHECK_BUILT must name an existing empty directory, not \$dir" >&2
+  exit 1
+fi
+stat -c %a "\$dir" > "$RECORD/kubernetes-check-mode"
+cp "$HOST/routes.yaml" "\$dir/1.yaml"
+[[ -e "$HOST/no-builds" ]] || printf '%s\0%s\0%s\0' 1.yaml kubernetes/apps/base/demo/hello/ks.yaml kubernetes/apps/base/demo/hello > "\$dir/builds"
+echo "built kubernetes/apps/base/demo/hello/ks.yaml"
+EOF
+  chmod +x "$REPO/scripts/kubernetes-check"
+  fake curl << EOF
+printf '%s\n' "curl \$*" >> "$RECORD/argv"
+compgen -e | grep -E '^(AWS_|OS_|TF_VAR_|TF_ENCRYPTION\$|TF_STATE_PASSPHRASE\$|EDGE_SSH_KEY_FILE\$|CURL_CA_BUNDLE\$|SSL_CERT_)' | sed 's/^/curl /' >> "$RECORD/secrets-seen"
+output='' url=''
+while ((\$#)); do
+  case \$1 in
+    --output) output=\$2; shift 2 ;;
+    --connect-timeout | --max-time | --noproxy) shift 2 ;;
+    --disable | --silent) shift ;;
+    *) [[ \$1 != -* && -z \$url ]] || { echo "unexpected call: curl option \$1" >&2; exit 1; }; url=\$1; shift ;;
+  esac
+done
+[[ \$url =~ ^https://dns\.google/resolve\?name=([a-z0-9.-]+)\&type=A\$ && -n \$output ]] || { echo "unexpected call: curl \$url" >&2; exit 1; }
+stat -c %a "\$(dirname "\$output")" >> "$RECORD/answer-dir-modes"
+answer="$HOST/dns/\${BASH_REMATCH[1]}"
+[[ -f \$answer ]] || { echo "unexpected lookup: \$url" >&2; exit 1; }
+if [[ \$(< "\$answer") == down ]]; then
+  echo "curl: (28) Connection timed out after 5001 milliseconds" >&2
+  exit 28
+fi
+cat "\$answer" > "\$output"
+EOF
+  ENVIRONMENT+=(CLUSTER_DOMAIN=example.net TMPDIR="$BATS_TEST_TMPDIR/tmp" CURL_CA_BUNDLE="$BATS_TEST_TMPDIR/ca.pem"
+    SSL_CERT_FILE="$BATS_TEST_TMPDIR/ca.pem" SSL_CERT_DIR="$BATS_TEST_TMPDIR/certs")
+  for name in hello n8n hello-sso; do
+    nxdomain "$name"
+  done
+}
+
+# nxdomain LABEL: the public resolver says LABEL.example.net does not exist.
+nxdomain() {
+  printf '{"Status": 3, "Question": [{"name": "%s.example.net.", "type": 1}]}\n' "$1" > "$HOST/dns/$1.example.net"
+}
+
+# resolves LABEL ADDRESS...: the public resolver's answer for LABEL.example.net, NOERROR with an A
+# record of the name itself for each ADDRESS.
+resolves() {
+  local label=$1
+  shift
+  jq -nc --arg name "$label.example.net." --args '{Status: 0, Answer: [$ARGS.positional[] | {name: $name, type: 1, TTL: 300, data: .}]}' "$@" \
+    > "$HOST/dns/$label.example.net"
+}
+
+# answers LABEL BODY: the public resolver answers BODY for LABEL.example.net; down for no answer.
+answers() {
+  printf '%s\n' "$2" > "$HOST/dns/$1.example.net"
+}
+
+# planned: the tofu calls that plan or apply, one per line.
+planned() {
+  grep -E '^tofu [^ ]+ (plan|apply)( |$)' "$RECORD/argv" || true
+}
+
+# looked_up: the names curl asked the public resolver for, sorted byte by byte.
+looked_up() {
+  sed -nE 's/^curl .*https:\/\/dns\.google\/resolve\?name=([^&]+)&type=A$/\1/p' "$RECORD/argv" | LC_ALL=C sort
+}
+
+# without_domain: the environment above without CLUSTER_DOMAIN.
+without_domain() {
+  local -a entries=()
+  local entry
+  for entry in "${ENVIRONMENT[@]}"; do
+    [[ $entry == CLUSTER_DOMAIN=* ]] || entries+=("$entry")
+  done
+  ENVIRONMENT=("${entries[@]}")
+}
+
+# floating_state COUNT: the edge stack's state, as tofu show -json gives it, in state.json: COUNT of
+# the edges' floating IPs and the edges' key pair.
+floating_state() {
+  jq -n --argjson count "$1" '{format_version: "1.0", values: {root_module: {resources:
+    ([range($count) | {address: "openstack_networking_floatingip_v2.edge[\"\(. + 1)\"]", mode: "managed",
+       type: "openstack_networking_floatingip_v2", name: "edge", index: "\(. + 1)", values: {pool: "external"}}]
+     + [{address: "openstack_compute_keypair_v2.edge", mode: "managed", type: "openstack_compute_keypair_v2",
+       name: "edge", values: {}}])}}}' > "$BATS_TEST_TMPDIR/state.json"
+}
+
+# destroy_edge [ARG...]: infra-destroy sto2/edge with ARG... in the copy, in the environment above, its
+# standard error apart in stderr.
+destroy_edge() {
+  : > "$RECORD/argv"
+  run --separate-stderr env "${ENVIRONMENT[@]}" "$REPO/scripts/infra-destroy" sto2/edge "$@" < /dev/null
+  echo "$output"
+  echo "$stderr"
 }
 
 @test "edge-check passes with every worker's session established and fails, saying which, when one is missing or a route outside the range is present, and no address is printed" {
@@ -1736,10 +1922,289 @@ instance_plan() {
   [ "$(recorded 2)" = "AAAAC3NzaC1lZDI1NTE5AAAAIFixtureHostKeyOf${ADDRESS_2//./}Replacement" ]
 }
 
+@test "Destroying the edge stack is refused while a name the routes publish resolves to one of its addresses, and nothing is planned" {
+  local case label addresses
+  edge_state 1 active "$WORKERS" 203.0.113.17/32
+  echo '{"resource_changes": []}' > "$BATS_TEST_TMPDIR/plan.json"
+  published_world
+  # A name at one edge's address, at one and another address, or at both.
+  for case in "n8n $ADDRESS_2" "n8n $ADDRESS_1 198.51.100.9" "hello $ADDRESS_1 $ADDRESS_2"; do
+    read -r label addresses <<< "$case"
+    for name in hello n8n hello-sso; do
+      nxdomain "$name"
+    done
+    # shellcheck disable=SC2086 # the addresses, one argument each
+    resolves "$label" $addresses
+    destroy_edge --yes
+
+    [ "$status" -eq 1 ]
+    [[ $stderr == *"infra-destroy: $label resolves to an address of the edge routers at the public resolver"* ]]
+    [ "$(grep -c 'resolves to an address of the edge routers' <<< "$stderr")" -eq 1 ]
+    [[ $stderr == *"just cluster-dns-remove"*"extdns- TXT"*"--ignore-dns"* ]]
+    [ -z "$(planned)" ]
+    [ "$(recorded 1)" = "$(cat "$HOST/key-$ADDRESS_1")" ]
+    [ "$(recorded 2)" = "$(cat "$HOST/key-$ADDRESS_2")" ]
+    # Each name the routes on the Gateway publish is looked up, and the route on another Gateway is
+    # not, nor anything else.
+    [ "$(looked_up)" = "$(printf '%s\n' hello-sso.example.net hello.example.net n8n.example.net)" ]
+    [ "$(grep -c '^curl ' "$RECORD/argv")" -eq 3 ]
+    no_address "$output$stderr"
+    [[ $output$stderr != *example.* ]]
+  done
+
+  # A lookup whose answer cannot be told from one at the edges refuses as well: the resolver cannot be
+  # asked, its answer is not JSON, it answers SERVFAIL, or it answers with a CNAME to a name whose
+  # address is an edge's.
+  local -a failing=(
+    'down|could not be asked'
+    'not JSON {|could not be read'
+    '{"Status": 2}|status 2'
+    '{"Status": 0, "Answer": [{"name": "hello.example.net.", "type": 5, "TTL": 300, "data": "edge.example.com."}, {"name": "edge.example.com.", "type": 1, "TTL": 300, "data": "203.0.113.51"}]}|another type or name'
+  )
+  for case in "${failing[@]}"; do
+    for name in hello n8n hello-sso; do
+      nxdomain "$name"
+    done
+    answers hello "${case%|*}"
+    destroy_edge --yes
+
+    [ "$status" -eq 1 ]
+    [[ $stderr == *"infra-destroy: hello could not be looked up at the public resolver"*"${case##*|}"*"cannot be told apart from a name at the edge routers"* ]]
+    [[ $stderr == *"just cluster-dns-remove"* ]]
+    [ -z "$(planned)" ]
+    [ -n "$(recorded 1)" ] && [ -n "$(recorded 2)" ]
+    no_address "$output$stderr"
+    [[ $output$stderr != *example.* ]]
+  done
+
+  # Names the tree cannot list refuse too, without kubernetes-check's words.
+  for name in hello n8n hello-sso; do
+    nxdomain "$name"
+  done
+  : > "$HOST/kubernetes-check-fails"
+  destroy_edge --yes
+
+  [ "$status" -eq 1 ]
+  [[ $stderr == *"scripts/kubernetes-check fails on this tree"*"just kubernetes-check says why"* ]]
+  [[ $stderr == *"the names the routes publish could not be listed"*"sto2/edge is not planned or destroyed"* ]]
+  [[ $output$stderr != *example.* ]]
+  [ -z "$(planned)" ]
+  [ -z "$(looked_up)" ]
+  # Neither the listing nor the lookups see a secret of the stack's environment.
+  [ ! -s "$RECORD/secrets-seen" ]
+}
+
+@test "The edge stack is destroyed once no name the routes publish resolves to its addresses" {
+  edge_state 1 active "$WORKERS" 203.0.113.17/32
+  echo '{"resource_changes": []}' > "$BATS_TEST_TMPDIR/plan.json"
+  published_world
+  destroy_edge --yes
+
+  [ "$status" -eq 0 ]
+  [ "$(planned | wc -l)" -eq 2 ]
+  [[ $output == *"sto2/edge destroyed"* ]]
+  [ "$(looked_up | wc -l)" -eq 3 ]
+  # The builds were read, and the resolver's answers kept, in directories only this user can enter,
+  # which are gone once the run has ended.
+  [ "$(cat "$RECORD/kubernetes-check-mode")" = 700 ]
+  [ "$(sort -u "$RECORD/answer-dir-modes")" = 700 ]
+  [ -z "$(find "$BATS_TEST_TMPDIR/tmp" -mindepth 1)" ]
+  [ ! -s "$RECORD/secrets-seen" ]
+  [ -z "$(recorded 1)" ] && [ -z "$(recorded 2)" ]
+
+  # An answer with the status NOERROR whose address is no edge's is no refusal either.
+  original_keys
+  for name in hello n8n hello-sso; do
+    resolves "$name" 198.51.100.9
+  done
+  destroy_edge --yes
+
+  [ "$status" -eq 0 ]
+  [ "$(planned | wc -l)" -eq 2 ]
+  [[ $output == *"sto2/edge destroyed"* ]]
+  [ "$(looked_up | wc -l)" -eq 3 ]
+  no_address "$output$stderr"
+}
+
+@test "The edge stack's destroy goes past resolving names only with --ignore-dns, naming each" {
+  edge_state 1 active "$WORKERS" 203.0.113.17/32
+  echo '{"resource_changes": []}' > "$BATS_TEST_TMPDIR/plan.json"
+  published_world
+  resolves n8n "$ADDRESS_2"
+  answers hello down
+  destroy_edge --yes --ignore-dns
+
+  [ "$status" -eq 0 ]
+  [ "$(planned | wc -l)" -eq 2 ]
+  [[ $output == *"sto2/edge destroyed"* ]]
+  # Each name is still looked up, and the one at an edge and the one that could not be looked up are
+  # named, on standard error.
+  [ "$(looked_up | wc -l)" -eq 3 ]
+  [[ $stderr == *"infra-destroy: n8n resolves to an address of the edge routers at the public resolver"* ]]
+  [[ $stderr == *"infra-destroy: hello could not be looked up at the public resolver"* ]]
+  [[ $stderr == *"--ignore-dns"* ]]
+  [[ $output != *n8n* && $output != *hello* ]]
+  no_address "$output$stderr"
+
+  # Without CLUSTER_DOMAIN no name is looked up: --ignore-dns destroys the stack, saying so in one
+  # line, and without it the run is refused, naming the variable.
+  original_keys
+  without_domain
+  destroy_edge --yes --ignore-dns
+
+  [ "$status" -eq 0 ]
+  [[ $output == *"sto2/edge destroyed"* ]]
+  [ "$(grep -c 'no name the routes publish was looked up' <<< "$stderr")" -eq 1 ]
+  [[ $stderr == *CLUSTER_DOMAIN* ]]
+  [ -z "$(looked_up)" ]
+
+  original_keys
+  destroy_edge --yes
+
+  [ "$status" -eq 1 ]
+  [[ $stderr == *"CLUSTER_DOMAIN is not set"* ]]
+  [ -z "$(planned)" ]
+  [ -n "$(recorded 1)" ] && [ -n "$(recorded 2)" ]
+
+  # Another stack, or none, does not take it.
+  for args in 'sto2/ci --ignore-dns' '--ignore-dns sto2/plumbing' '--ignore-dns'; do
+    : > "$RECORD/argv"
+    # shellcheck disable=SC2086 # the arguments as an operator types them
+    run --separate-stderr env "${ENVIRONMENT[@]}" "$REPO/scripts/infra-destroy" $args --yes < /dev/null
+
+    [ "$status" -eq 2 ]
+    [[ $stderr == *"usage: infra-destroy [stack] [--yes] [--unreachable] [--check] [--ignore-dns]"* ]]
+    absent -E '^(tofu|curl|kubernetes-check) ' "$RECORD/argv"
+  done
+}
+
+@test "infra-destroy --check says whether a destroy would be refused, and plans and destroys nothing" {
+  edge_state 1 active "$WORKERS" 203.0.113.17/32
+  echo '{"resource_changes": []}' > "$BATS_TEST_TMPDIR/plan.json"
+  published_world
+  resolves n8n "$ADDRESS_1" "$ADDRESS_2"
+  destroy_edge --check
+
+  [ "$status" -eq 1 ]
+  [[ $stderr == *"infra-destroy: n8n resolves to an address of the edge routers at the public resolver"* ]]
+  [[ $output != *"nothing refuses"* ]]
+  [ -z "$(planned)" ]
+  [ -n "$(recorded 1)" ] && [ -n "$(recorded 2)" ]
+
+  nxdomain n8n
+  destroy_edge --check
+
+  [ "$status" -eq 0 ]
+  [[ $output == *"sto2/edge: nothing refuses its destroy; --check planned and destroyed nothing"* ]]
+  [[ $output$stderr != *"Type sto2/edge"* ]]
+  [ "$(looked_up | wc -l)" -eq 3 ]
+  [ -z "$(planned)" ]
+  # tofu read the outputs only, and the host keys stay.
+  absent -vE '^tofu [^ ]+ (init|output)( |$)' <(grep '^tofu ' "$RECORD/argv")
+  [ "$(recorded 1)" = "$(cat "$HOST/key-$ADDRESS_1")" ]
+  [ "$(recorded 2)" = "$(cat "$HOST/key-$ADDRESS_2")" ]
+  no_address "$output$stderr"
+}
+
+@test "destroying the edge stack is refused, planning nothing, while its outputs and state cannot say which addresses it gives back" {
+  local case args
+  edge_state 1 active "$WORKERS" 203.0.113.17/32
+  echo '{"resource_changes": []}' > "$BATS_TEST_TMPDIR/plan.json"
+  published_world
+  cp "$BATS_TEST_TMPDIR/outputs.json" "$BATS_TEST_TMPDIR/outputs.both"
+  # The outputs cannot be read, are not JSON, or name one edge; they name none while the state holds
+  # the edges' floating IPs, or while the state cannot be read.
+  for case in unreadable not-json one-edge none-with-floating-ips none-without-state; do
+    echo "the outputs: $case"
+    rm -f "$HOST/output-fails"
+    cp "$BATS_TEST_TMPDIR/outputs.both" "$BATS_TEST_TMPDIR/outputs.json"
+    floating_state 2
+    case $case in
+      unreadable) : > "$HOST/output-fails" ;;
+      not-json) echo 'not JSON {' > "$BATS_TEST_TMPDIR/outputs.json" ;;
+      one-edge) jq '.addresses.value |= .[:1] | .names.value |= .[:1]' "$BATS_TEST_TMPDIR/outputs.both" > "$BATS_TEST_TMPDIR/outputs.json" ;;
+      none-with-floating-ips) echo '{}' > "$BATS_TEST_TMPDIR/outputs.json" ;;
+      none-without-state)
+        echo '{}' > "$BATS_TEST_TMPDIR/outputs.json"
+        echo 'not JSON {' > "$BATS_TEST_TMPDIR/state.json"
+        ;;
+    esac
+    for args in --yes --check; do
+      destroy_edge "$args"
+
+      [ "$status" -eq 1 ]
+      [[ $stderr == *"sto2/edge is not planned or destroyed while the addresses it gives back are not known"*"--ignore-dns"* ]]
+      [ -z "$(planned)" ]
+      [ -z "$(looked_up)" ]
+      [ "$(recorded 1)" = "$(cat "$HOST/key-$ADDRESS_1")" ]
+      [ "$(recorded 2)" = "$(cat "$HOST/key-$ADDRESS_2")" ]
+      no_address "$output$stderr"
+    done
+  done
+
+  # --ignore-dns destroys it all the same, saying in one line that no name was looked up; the host
+  # keys stay, as which addresses they are for is not known.
+  destroy_edge --yes --ignore-dns
+
+  [ "$status" -eq 0 ]
+  [[ $output == *"sto2/edge destroyed"* ]]
+  [ "$(grep -c 'no name the routes publish was looked up' <<< "$stderr")" -eq 1 ]
+  [ -z "$(looked_up)" ]
+  [ -n "$(recorded 1)" ] && [ -n "$(recorded 2)" ]
+  no_address "$output$stderr"
+
+  # Outputs that name no address, of a state that holds no floating IP, have nothing to look up.
+  rm -f "$HOST/output-fails"
+  echo '{}' > "$BATS_TEST_TMPDIR/outputs.json"
+  floating_state 0
+  destroy_edge --yes
+
+  [ "$status" -eq 0 ]
+  [[ $output == *"sto2/edge destroyed"* ]]
+  [ -z "$(looked_up)" ]
+  absent -E '^kubernetes-check ' "$RECORD/argv"
+}
+
+@test "destroying the edge stack is refused, planning nothing, while the tree's builds give no name to look up" {
+  edge_state 1 active "$WORKERS" 203.0.113.17/32
+  echo '{"resource_changes": []}' > "$BATS_TEST_TMPDIR/plan.json"
+  published_world
+  # kubernetes-check passes and keeps no record of what it built.
+  : > "$HOST/no-builds"
+  destroy_edge --yes
+
+  [ "$status" -eq 1 ]
+  [[ $stderr == *"scripts/kubernetes-check kept no record of what it built"* ]]
+  [[ $stderr == *"the names the routes publish could not be listed"*"sto2/edge is not planned or destroyed"* ]]
+  [ -z "$(planned)" ]
+  [ -z "$(looked_up)" ]
+
+  # Builds whose routes on the Gateway publish no name: the redirect and the route on another Gateway.
+  rm "$HOST/no-builds"
+  yq -i 'select(.kind != "HTTPRoute" or .metadata.name == "inside" or .metadata.name == "https-redirect")' "$HOST/routes.yaml"
+  destroy_edge --yes
+
+  [ "$status" -eq 1 ]
+  [[ $stderr == *"no route the tree builds publishes a name under CLUSTER_DOMAIN"*"sto2/edge is not planned or destroyed"*"--ignore-dns"* ]]
+  [ -z "$(planned)" ]
+  [ -z "$(looked_up)" ]
+  [ -n "$(recorded 1)" ] && [ -n "$(recorded 2)" ]
+
+  destroy_edge --yes --ignore-dns
+
+  [ "$status" -eq 0 ]
+  [[ $output == *"sto2/edge destroyed"* ]]
+  [ "$(grep -c 'publishes a name under CLUSTER_DOMAIN' <<< "$stderr")" -eq 1 ]
+  [ -z "$(looked_up)" ]
+  no_address "$output$stderr"
+  [[ $output$stderr != *example.* ]]
+}
+
 @test "destroying the edge stack drops the edges' recorded host keys" {
   edge_state 1 active "$WORKERS" 203.0.113.17/32
   echo "198.51.100.200 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureHostKeyOfAnotherHost" >> "$HOME_DIR/.local/state/k8s-gitops/edge.known_hosts"
   echo '{"resource_changes": []}' > "$BATS_TEST_TMPDIR/plan.json"
+  published_world
   run env "${ENVIRONMENT[@]}" "$REPO/scripts/infra-destroy" sto2/edge --yes < /dev/null
   echo "$output"
   [ "$status" -eq 0 ]

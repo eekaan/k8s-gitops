@@ -197,6 +197,23 @@ spec:
               protocol: TCP
             - port: "10443"
               protocol: TCP
+    # The blackbox exporter's probes of the public hostnames (docs/kubernetes.md, Probes). A Probe's
+    # target is the proxies' Service by its cluster name, whose address Cilium translates to a
+    # proxy's before policy applies, so the connection arrives from the exporter's pod, which is no
+    # world, on the listener port of the target's scheme. The pods the exporter's Service selects, by
+    # the labels its chart gives them; tests/network-policy.bats fails unless they are the only pods
+    # of the cluster taken on these ports.
+    - fromEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": monitoring
+            app.kubernetes.io/instance: blackbox-exporter
+            app.kubernetes.io/name: prometheus-blackbox-exporter
+      toPorts:
+        - ports:
+            - port: "10080"
+              protocol: TCP
+            - port: "10443"
+              protocol: TCP
     # The kubelet's probes: Envoy Gateway probes the envoy container on its readiness port, 19003,
     # and the shutdown manager on 19002. The pinned Cilium lets the local host reach its pods
     # whatever the policies say; the rule states the ports, so that the offline evaluation proves
@@ -322,17 +339,42 @@ spec:
         - ports:
             - port: "7007"
               protocol: TCP
-    # VictoriaLogs' 9428 in monitoring, for the route logs to the store's interface and queries.
+    # Ascender's 8052 in ascender, nginx in the web pods its operator makes, by the labels of their
+    # Deployment's selector.
+    - toEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": ascender
+            "k8s:io.cilium.k8s.namespace.labels.k8s-gitops/gateway": public
+            app.kubernetes.io/name: ascender-web
+            app.kubernetes.io/managed-by: awx-operator
+            app.kubernetes.io/component: awx
+      toPorts:
+        - ports:
+            - port: "8052"
+              protocol: TCP
+    # vmauth's 8427 in monitoring, for the route logs to the store's interface and queries, which
+    # vmauth admits with the route's own credential and forwards to the store with the store's.
     # monitoring is listed and takes the proxies on every port, so this rule is what keeps them off
-    # Prometheus, Grafana, Alertmanager and every other pod and port there.
+    # vmauth's internal port, the store, Prometheus, Grafana, Alertmanager and every other pod and
+    # port there.
     - toEndpoints:
         - matchLabels:
             "k8s:io.kubernetes.pod.namespace": monitoring
             "k8s:io.cilium.k8s.namespace.labels.k8s-gitops/gateway": public
-            app: server
-            app.kubernetes.io/instance: victoria-logs
-            app.kubernetes.io/name: victoria-logs-single
+            app.kubernetes.io/name: vmauth
       toPorts:
         - ports:
-            - port: "9428"
+            - port: "8427"
+              protocol: TCP
+    # Locust's master's 8089 in locust, for the route locust to its interface: the master's pods
+    # alone, on the web port, not the port the workers connect to, and no worker.
+    - toEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": locust
+            "k8s:io.cilium.k8s.namespace.labels.k8s-gitops/gateway": public
+            app.kubernetes.io/name: locust
+            app.kubernetes.io/component: master
+      toPorts:
+        - ports:
+            - port: "8089"
               protocol: TCP

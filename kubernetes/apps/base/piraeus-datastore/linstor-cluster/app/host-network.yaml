@@ -1,0 +1,18 @@
+---
+# Applies to every satellite: each runs in its node's network namespace, as Piraeus' how-to sets it
+# (https://github.com/piraeusdatastore/piraeus-operator/blob/v2.12.1/docs/how-to/drbd-host-networking.md).
+# DRBD's connections belong to the network namespace that configured them, so on the node's network
+# they stay up while a satellite pod is replaced. The operator registers each node in LINSTOR at the
+# node's own address, from which LINSTOR takes every resource's addresses. The nodes' firewall admits
+# the satellites' ports, DRBD's port range and the DRBD reactor's port (talos/firewall.yaml). The
+# satellite calls no API and resolves no cluster name, so the node's resolver serves it. Taking this
+# configuration out does not move the connections back: that takes the steps of the how-to on every
+# satellite.
+apiVersion: piraeus.io/v1
+kind: LinstorSatelliteConfiguration
+metadata:
+  name: host-network
+spec:
+  podTemplate:
+    spec:
+      hostNetwork: true

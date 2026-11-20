@@ -1,0 +1,56 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/kustomization
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+# The restore drill of an application's volume (docs/kubernetes.md, The restore drill): every night
+# VolSync restores the newest backup of the application's repository into a scratch claim of its
+# own, with the repository Secret of components/volsync, and later a CronJob reads that claim and
+# fails unless the canary the application writes, the file heartbeat at the volume's root, is there
+# and fresh. An application that writes that canary adds the component beside components/volsync,
+# never without it, in its ks.yaml:
+#
+#   components:
+#     - ../../../../../components/volsync
+#     - ../../../../../components/volsync-drill
+#   postBuild:
+#     substitute:
+#       APP: <app>
+#       VOLSYNC_CAPACITY: 1Gi
+#       VOLSYNC_SCHEDULE: "17 3 * * *"
+#       VOLSYNC_DRILL_RESTORE_SCHEDULE: "17 4 * * *"
+#       VOLSYNC_DRILL_CHECK_SCHEDULE: "17 5 * * *"
+#       VOLSYNC_DRILL_MAX_AGE: '"95400"'
+#
+#   VOLSYNC_DRILL_RESTORE_SCHEDULE  when the newest backup is restored, in cron syntax, read in
+#                                   UTC: an hour after VOLSYNC_SCHEDULE
+#   VOLSYNC_DRILL_CHECK_SCHEDULE    when the check reads the scratch claim, in cron syntax, read in
+#                                   UTC: an hour after the restore
+#   VOLSYNC_DRILL_MAX_AGE           the largest age in seconds the heartbeat may have, which follows
+#                                   from the two schedules and the check's deadlines as the docs work
+#                                   it out, and moves with them; written with its double quotes, as
+#                                   the check's environment takes it as text and Flux substitutes
+#                                   after kustomize has dropped a manifest's own quotes
+#
+# Each is required: the build fails without it. APP names the scratch claim and the
+# ReplicationDestination <app>-drill, the CronJob <app>-drill-check, at most 52 characters, so APP is
+# at most 40, and the ConfigMap <app>-drill-scripts; VOLSYNC_CAPACITY sizes the scratch claim, and
+# VOLSYNC_UID and VOLSYNC_GID are the user and group of the mover and of the check, as for
+# components/volsync's movers.
+#
+# The mover is one of the namespace's movers, with their two flows; the check takes no connection and
+# opens none, holds no token and mounts the scratch claim read-only.
+resources:
+  - persistentvolumeclaim.yaml
+  - replicationdestination.yaml
+  - cronjob.yaml
+
+# The check's script, which tests/volume-backups.bats runs as the container runs it. The job reads
+# the ConfigMap afresh at every run, so it needs no hash in its name. Flux substitutes a `${...}` in
+# a ConfigMap's data; the script writes none, so Flux leaves it alone.
+configMapGenerator:
+  - name: ${APP}-drill-scripts
+    files:
+      - scripts/check.sh
+generatorOptions:
+  disableNameSuffixHash: true

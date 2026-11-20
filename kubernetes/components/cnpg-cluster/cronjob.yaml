@@ -32,6 +32,10 @@ spec:
   # PostgresDumpJobFailing has waited its hour, so it never fires on a run still going
   # (tests/postgres-dumps.bats).
   schedule: "0 2 * * *"
+  # Held while the database is restored, with the ScheduledBackup: a Cluster made again under the
+  # old name starts empty, and its dumps would rotate the real ones out of this path
+  # (kustomization.yaml, CNPG_BACKUPS_SUSPENDED).
+  suspend: ${CNPG_BACKUPS_SUSPENDED:=false}
   concurrencyPolicy: Forbid
   startingDeadlineSeconds: 3600
   successfulJobsHistoryLimit: 1

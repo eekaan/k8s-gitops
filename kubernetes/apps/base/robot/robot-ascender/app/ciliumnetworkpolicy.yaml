@@ -1,0 +1,32 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
+# The runner's one flow to Ascender, built only where a cluster runs it: ROBOT_TARGET_ASCENDER in
+# robot's ks.yaml, the pods the Service ascender-web in ascender selects, on the container port its
+# port 80 targets, 8052, numbered there. The pods are Ascender's operator's, made at run time, so no
+# render holds them, and the Service's selector is the one the operator's templates give them. A
+# Service's address is translated to a pod's before policy applies, so the rule names the pods;
+# ascender-web's policy admits the runner by a rule beside it. The resolver is robot-runner's.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: robot-runner-ascender
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: robot
+      app.kubernetes.io/component: runner
+  # The namespace's default deny alone denies; this policy only allows.
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": ascender
+            app.kubernetes.io/name: ascender-web
+            app.kubernetes.io/managed-by: awx-operator
+            app.kubernetes.io/component: awx
+      toPorts:
+        - ports:
+            - port: "8052"
+              protocol: TCP

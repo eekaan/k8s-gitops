@@ -1,0 +1,30 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/monitoring.coreos.com/probe_v1.json
+# hello's route, probed from inside the cluster by the blackbox exporter (docs/kubernetes.md, Probes):
+# the target is the public Gateway's proxies' Service, by its cluster name, over https, and the
+# hostname goes to the exporter as the parameter that sets the Host header and the name the TLS
+# handshake verifies, so the request is the one a client of the hostname makes and goes through the
+# proxies, the route and the backend without leaving the cluster. The name is Envoy Gateway's for the
+# Service of the Gateway public in envoy-gateway-system: envoy-<namespace>-<name>-<the first 8
+# characters of the SHA-256 of "<namespace>/<name>">; tests/probes.bats derives it and fails when it
+# differs. The module takes a 200 only.
+apiVersion: monitoring.coreos.com/v1
+kind: Probe
+metadata:
+  name: hello
+spec:
+  jobName: public-endpoints
+  module: public_https
+  prober:
+    url: blackbox-exporter.monitoring.svc.cluster.local:9115
+  targets:
+    staticConfig:
+      static:
+        - https://envoy-envoy-gateway-system-public-5ea56ca9.envoy-gateway-system.svc.cluster.local/
+      labels:
+        hostname: hello.${CLUSTER_DOMAIN}
+      relabelingConfigs:
+        - action: replace
+          sourceLabels:
+            - hostname
+          targetLabel: __param_hostname

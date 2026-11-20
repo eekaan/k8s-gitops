@@ -1,0 +1,582 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
+# The pods of this file are the operator's, made at run time, so no render holds them: each policy
+# selects them by the labels the operator's templates give them at the release recorded below
+# (roles/installer/templates/deployments/web.yaml.j2 and task.yaml.j2, jobs/migration.yaml.j2 and
+# roles/common/templates/labels/common.yaml.j2), and the job pods by the label Ascender gives the pods
+# it starts (awx/main/utils/execution_environments.py of the image).
+# ascender-operator-templates: 25.6.3
+#
+# What the web pods let through, on top of the namespace's default deny: nginx's 8052, where the
+# public Gateway's proxies send the route, the kubelet asks the readiness probe, the task pods'
+# websocket relay connects and Robot Framework's runner opens the sign-in page. Their egress is the
+# instance's, in ascender-instance.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: ascender-web
+spec:
+  # The selector of the web Deployment and of the Service ascender-web.
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: ascender-web
+      app.kubernetes.io/managed-by: awx-operator
+      app.kubernetes.io/component: awx
+  # The namespace's default deny alone denies; this policy only allows.
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  ingress:
+    # The routed backend: only the pods Envoy Gateway runs for the public Gateway, selected by their
+    # labels and not by their namespace, whose controller and certificate job are no proxies. The
+    # route sends to the Service's port 80, which targets the container's 8052.
+    - fromEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": envoy-gateway-system
+            app.kubernetes.io/name: envoy
+            app.kubernetes.io/component: proxy
+            app.kubernetes.io/managed-by: envoy-gateway
+            gateway.envoyproxy.io/owning-gateway-name: public
+            gateway.envoyproxy.io/owning-gateway-namespace: envoy-gateway-system
+      toPorts:
+        - ports:
+            - port: "8052"
+              protocol: TCP
+    # The kubelet's readiness probe on /api/v2/ping/, which arrives from the node the pod runs on;
+    # the liveness probe runs supervisorctl in the container, which is no connection.
+    - fromEntities:
+        - host
+      toPorts:
+        - ports:
+            - port: "8052"
+              protocol: TCP
+    # The task pods' websocket relay, which connects to each web pod on BROADCAST_WEBSOCKET_PORT,
+    # 8052, to hand job events to the browsers connected there (awx/main/wsrelay.py).
+    - fromEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: ascender-task
+            app.kubernetes.io/managed-by: awx-operator
+            app.kubernetes.io/component: awx
+      toPorts:
+        - ports:
+            - port: "8052"
+              protocol: TCP
+    # Robot Framework's runner, whose suite opens the sign-in page from inside the cluster through
+    # the Service ascender-web and signs in nowhere (docs/kubernetes.md, Robot Framework): by the
+    # runner's labels in robot, so the report server and any other pod there are not admitted. While
+    # no run runs it admits nothing.
+    - fromEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": robot
+            app.kubernetes.io/name: robot
+            app.kubernetes.io/component: runner
+      toPorts:
+        - ports:
+            - port: "8052"
+              protocol: TCP
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
+# What the task pods reach in the cluster, on top of the instance's: the web pods for the relay, and
+# the API server, where receptor in the control plane's execution environment starts each job's pod
+# and streams its output through pods/attach and pods/log, and the dispatcher reads and removes those
+# pods. They take no connection: receptor listens on a socket in the pod alone (local-only in the
+# operator's receptor.conf) and valkey on its socket.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: ascender-task
+spec:
+  # The selector of the task Deployment.
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: ascender-task
+      app.kubernetes.io/managed-by: awx-operator
+      app.kubernetes.io/component: awx
+  # The namespace's default deny alone denies; this policy only allows.
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  egress:
+    # The web pods, by their selector's labels, on the relay's port.
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: ascender-web
+            app.kubernetes.io/managed-by: awx-operator
+            app.kubernetes.io/component: awx
+      toPorts:
+        - ports:
+            - port: "8052"
+              protocol: TCP
+    # The API server. A Service's address is translated to the control plane's before policy
+    # applies, so 6443 is the port that counts.
+    - toEntities:
+        - kube-apiserver
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+            - port: "6443"
+              protocol: TCP
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
+# The task pods' calls outside the cluster over https. Project updates and system jobs are of the
+# control plane's capacity (get_capacity_type in awx/main/utils/common.py of the image), so they run
+# on the task pod itself, in its execution environment (work_type local in awx/main/tasks/receptor.py),
+# and a project update clones its repository and installs the roles and collections its requirements
+# name from their sources, at hosts the owner configures in Ascender, which no DNS name rule of the
+# tree can name.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: ascender-task-world-https
+  annotations:
+    k8s-gitops/network-policy-reason: >-
+      project updates run in the task pod's execution environment and fetch the project's
+      repository, roles and collections over https from hosts the owner configures in Ascender,
+      which no DNS name of the tree can name; it reaches them on 443 only
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: ascender-task
+      app.kubernetes.io/managed-by: awx-operator
+      app.kubernetes.io/component: awx
+  # The namespace's default deny alone denies; this policy only allows.
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  egress:
+    - toEntities:
+        - world
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
+# The task pods' calls outside the cluster over SSH: a project update clones a repository whose URL
+# is an SSH one there, as above.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: ascender-task-world-ssh
+  annotations:
+    k8s-gitops/network-policy-reason: >-
+      project updates run in the task pod's execution environment and clone a project's repository
+      over SSH from a host the owner configures in Ascender, which no DNS name of the tree can name;
+      it reaches it on 22 only
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: ascender-task
+      app.kubernetes.io/managed-by: awx-operator
+      app.kubernetes.io/component: awx
+  # The namespace's default deny alone denies; this policy only allows.
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  egress:
+    - toEntities:
+        - world
+      toPorts:
+        - ports:
+            - port: "22"
+              protocol: TCP
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
+# What every pod of the instance reaches, the web and task pods and the migration Job's, which all
+# carry these three labels: the cluster's resolver, for the name of the database's Service, the key
+# host of the Secret ascender-db-app, and the database.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: ascender-instance
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: ascender
+      app.kubernetes.io/managed-by: awx-operator
+      app.kubernetes.io/component: awx
+  # The namespace's default deny alone denies; this policy only allows.
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": kube-system
+            "k8s:k8s-app": kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+    # The database: the pods the Service ascender-db-rw selects are the cluster's primary, which a
+    # failover moves to another instance, so the rule names every instance, on PostgreSQL's port.
+    # The instances of every cluster of the namespace, by cnpg.io/cluster existing: the operator
+    # labels each pod with its own cluster's name, and a restore adds a cluster beside ascender-db
+    # that Ascender is pointed at (docs/runbooks/postgres-restore.md). Every cluster of the namespace
+    # is Ascender's, from the reviewed tree.
+    - toEndpoints:
+        - matchExpressions:
+            - key: cnpg.io/cluster
+              operator: Exists
+          matchLabels:
+            cnpg.io/podRole: instance
+      toPorts:
+        - ports:
+            - port: "5432"
+              protocol: TCP
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
+# What the pods Ascender starts for jobs let through: they resolve the names of the hosts and sources
+# a playbook names. They take nothing, as receptor attaches to them through the API server, and reach
+# nothing in the cluster: the default pod mounts no service account token and its job reports through
+# its output. Their calls outside are the two policies below.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: ascender-jobs
+spec:
+  # The label Ascender gives every pod it starts (AWX_CONTAINER_GROUP_DEFAULT_JOB_LABEL).
+  endpointSelector:
+    matchLabels:
+      ansible_job: ""
+  # The namespace's default deny alone denies; this policy only allows.
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": kube-system
+            "k8s:k8s-app": kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
+# The job pods' calls outside the cluster over https: the APIs of the hosts and services a playbook
+# manages, and the sources of what it fetches, which the owner configures in Ascender and no DNS name
+# rule of the tree can name.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: ascender-jobs-world-https
+  annotations:
+    k8s-gitops/network-policy-reason: >-
+      the pods Ascender starts run the owner's playbooks, which reach the APIs and sources they
+      manage and fetch from over https, at hosts the owner configures in Ascender that no DNS name of
+      the tree can name; they reach them on 443 only
+spec:
+  endpointSelector:
+    matchLabels:
+      ansible_job: ""
+  # The namespace's default deny alone denies; this policy only allows.
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  egress:
+    - toEntities:
+        - world
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
+# The job pods' calls outside the cluster over SSH: an automation runner reaches the hosts of its
+# inventory there.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: ascender-jobs-world-ssh
+  annotations:
+    k8s-gitops/network-policy-reason: >-
+      the pods Ascender starts run the owner's playbooks against the hosts of the owner's
+      inventories over SSH, which no DNS name of the tree can name; they reach them on 22 only
+spec:
+  endpointSelector:
+    matchLabels:
+      ansible_job: ""
+  # The namespace's default deny alone denies; this policy only allows.
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  egress:
+    - toEntities:
+        - world
+      toPorts:
+        - ports:
+            - port: "22"
+              protocol: TCP
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
+# What the pods of the database let through among themselves and with the operator, on top of the
+# namespace's default deny: every pod the operator makes for a cluster of the namespace,
+# ascender-db's instances and the jobs that create, join and recover them, and those of a cluster a
+# restore adds beside it (docs/runbooks/postgres-restore.md). The operator labels each of them
+# cnpg.io/cluster with its own cluster's name (pkg/specs/pods.go and jobs.go), so this policy and
+# the database's below select by the label existing, not by its value: a restore's cluster has the
+# database's flows from its start, and its pull request adds none. Every cluster of the namespace
+# shares them, and every one is Ascender's, from the reviewed tree. The pinned operator's
+# documentation asks that the operator reach every pod of a cluster on 8000, the instance manager's
+# status port, and 5432, PostgreSQL's, and that the cluster's pods connect to each other
+# (docs/src/security.md, Exposed Ports; docs/src/networking.md); a replica streams from the primary
+# through the Service ascender-db-rw. The instance manager reads and writes the Cluster and its
+# Secrets through the API server, and so does the Barman Cloud plugin's sidecar in each instance's
+# pod and in a recovery job's, for its ObjectStore and the Secret of its credentials.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: ascender-db
+spec:
+  endpointSelector:
+    matchExpressions:
+      - key: cnpg.io/cluster
+        operator: Exists
+  # The namespace's default deny alone denies; this policy only allows.
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  ingress:
+    # The operator, the pods of its Deployment in cnpg-system.
+    - fromEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": cnpg-system
+            app.kubernetes.io/name: cloudnative-pg
+      toPorts:
+        - ports:
+            - port: "8000"
+              protocol: TCP
+            - port: "5432"
+              protocol: TCP
+    # The pods of the namespace's clusters: replication, and a joining instance's copy of the
+    # primary. They listen on 5432, 8000 and 9187 alone.
+    - fromEndpoints:
+        - matchExpressions:
+            - key: cnpg.io/cluster
+              operator: Exists
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": kube-system
+            "k8s:k8s-app": kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+    - toEndpoints:
+        - matchExpressions:
+            - key: cnpg.io/cluster
+              operator: Exists
+    # The API server. A Service's address is translated to the control plane's before policy
+    # applies, so 6443 is the port that counts.
+    - toEntities:
+        - kube-apiserver
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+            - port: "6443"
+              protocol: TCP
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
+# Who reaches the database's instances besides the operator and each other: every pod of Ascender's
+# instance and the dump job on PostgreSQL's port, Prometheus on the exporter's port the PodMonitor
+# names, metrics, and the kubelet's probes on the status port, where the operator puts them
+# (pkg/specs/pods.go). The instances of every cluster of the namespace, as above.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: ascender-db-instances
+spec:
+  endpointSelector:
+    matchExpressions:
+      - key: cnpg.io/cluster
+        operator: Exists
+    matchLabels:
+      cnpg.io/podRole: instance
+  # The namespace's default deny alone denies; this policy only allows.
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            app.kubernetes.io/part-of: ascender
+            app.kubernetes.io/managed-by: awx-operator
+            app.kubernetes.io/component: awx
+        - matchLabels:
+            app.kubernetes.io/name: pgdump
+            app.kubernetes.io/instance: ascender-db
+      toPorts:
+        - ports:
+            - port: "5432"
+              protocol: TCP
+    - fromEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": monitoring
+            app.kubernetes.io/name: prometheus
+      toPorts:
+        - ports:
+            - port: "9187"
+              protocol: TCP
+    - fromEntities:
+        - host
+      toPorts:
+        - ports:
+            - port: "8000"
+              protocol: TCP
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
+# The instances' one call outside the cluster: the Barman Cloud plugin's sidecar, which the operator
+# puts in every instance's pod, archives the WAL and writes the base backups to the object storage,
+# and reads them back, at the endpoint cluster-config holds as a URL. That cannot be named by a DNS
+# name here, so the policy allows the world on 443, the port https reaches it on (docs/kubernetes.md,
+# Network policy). The sidecar talks to the instance manager over a socket in the pod, which policy
+# does not see, and a policy selects pods, not containers, so PostgreSQL's container shares the
+# rule. The instances of every cluster of the namespace, as above. The jobs that create an instance
+# by initdb and join one hold no sidecar and are not selected; a recovery job holds one, below.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: ascender-db-instances-world
+  annotations:
+    k8s-gitops/network-policy-reason: >-
+      the Barman Cloud plugin's sidecar in each instance's pod writes the WAL archive and the base
+      backups to the object storage outside the cluster, and reads them back, whose endpoint
+      cluster-config holds as a URL and so cannot name a DNS name here; it reaches it on 443 only
+spec:
+  endpointSelector:
+    matchExpressions:
+      - key: cnpg.io/cluster
+        operator: Exists
+    matchLabels:
+      cnpg.io/podRole: instance
+  # The namespace's default deny alone denies; this policy only allows.
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  egress:
+    - toEntities:
+        - world
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
+# A recovery job's one call outside the cluster. A restore from the archive makes the first instance
+# of its new cluster in a job whose pod carries cnpg.io/jobRole full-recovery (pkg/specs/jobs.go of
+# the pinned operator), and the Barman Cloud plugin puts its sidecar in that pod, which reads the
+# base backup and the WAL from the object storage (internal/cnpgi/operator/lifecycle.go, reconcileJob,
+# and internal/cnpgi/restore/restore.go of the plugin's release). It reaches it on 443, as the
+# instances do; its resolver and the API server are ascender-db's, as for every pod of a cluster.
+# The policy stands, so that a restore's pull request adds none.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: ascender-db-full-recovery-world
+  annotations:
+    k8s-gitops/network-policy-reason: >-
+      the Barman Cloud plugin's sidecar in a restore's recovery job reads the base backup and the
+      WAL from the object storage outside the cluster, whose endpoint cluster-config holds as a URL
+      and so cannot name a DNS name here; it reaches it on 443 only
+spec:
+  endpointSelector:
+    matchExpressions:
+      - key: cnpg.io/cluster
+        operator: Exists
+    matchLabels:
+      cnpg.io/jobRole: full-recovery
+  # The namespace's default deny alone denies; this policy only allows.
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  egress:
+    - toEntities:
+        - world
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
+# What the database's daily dump job lets through, on top of the namespace's default deny: it
+# resolves the names of the replicas' and the primary's Services and reaches the instances on
+# PostgreSQL's port, the replicas first and the primary when none answers, the instances of every
+# cluster of the namespace, as above; it takes no connection. The job's pods carry the labels
+# app.kubernetes.io/name pgdump and app.kubernetes.io/instance ascender-db, which kustomization.yaml
+# gives the component's CronJob. Two policies: the object storage's rule carries a reason of its own.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: ascender-db-pgdump
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: pgdump
+      app.kubernetes.io/instance: ascender-db
+  # The namespace's default deny alone denies; this policy only allows.
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": kube-system
+            "k8s:k8s-app": kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+    - toEndpoints:
+        - matchExpressions:
+            - key: cnpg.io/cluster
+              operator: Exists
+          matchLabels:
+            cnpg.io/podRole: instance
+      toPorts:
+        - ports:
+            - port: "5432"
+              protocol: TCP
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
+# The dump job's two calls outside the cluster: its first step downloads the pinned age release from
+# GitHub, whose URL redirects to a second host that serves the file, and its last uploads the
+# encrypted dump to the object storage, whose endpoint cluster-config holds as a URL. Neither can be
+# named by a DNS name here, so the policy allows the world on 443, the port https reaches both on
+# (docs/kubernetes.md, Network policy).
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: ascender-db-pgdump-world
+  annotations:
+    k8s-gitops/network-policy-reason: >-
+      the dump job downloads the pinned age release from GitHub, whose URL redirects to another
+      host, and uploads the encrypted dump to the object storage outside the cluster, whose endpoint
+      cluster-config holds as a URL and so cannot name a DNS name here; it reaches them on 443 only
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: pgdump
+      app.kubernetes.io/instance: ascender-db
+  # The namespace's default deny alone denies; this policy only allows.
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  egress:
+    - toEntities:
+        - world
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP

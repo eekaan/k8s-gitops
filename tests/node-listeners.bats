@@ -5,13 +5,16 @@
 # public registries, and read with yq and jq beside talos/firewall.yaml and
 # node-firewall-exceptions.yaml. The checks are functions of this file that take a render, an
 # inventory and an exceptions file, so each test runs them on the tree and then on copies with one
-# change each. Needs flux, helm, kustomize, yq and jq on PATH (the versions pinned for the
-# repository). Nothing here reaches a node, a cluster or the cloud.
+# change each. Needs flux, helm, kustomize, yq, jq and sha256sum on PATH (the versions pinned for
+# the repository). Nothing here reaches a node, a cluster or the cloud.
+
+load fixtures/probe-shape
 
 # The kinds that carry a pod template, which scripts/pod-security-check evaluates, and the other
-# kinds the checks read: the releases a chart's object takes its namespace from, and what scrapes.
+# kinds the checks read: the releases a chart's object takes its namespace from, what scrapes, and
+# what holds a Probe's prober and targets to the pod network.
 WORKLOADS='Pod Deployment StatefulSet DaemonSet ReplicaSet ReplicationController Job CronJob'
-OTHERS='HelmRelease Service PodMonitor ServiceMonitor Probe ScrapeConfig Prometheus PrometheusAgent'
+OTHERS='HelmRelease Service PodMonitor ServiceMonitor Probe ScrapeConfig Prometheus PrometheusAgent Gateway EnvoyProxy Namespace Endpoints EndpointSlice'
 
 setup_file() {
   local repo kinds
@@ -26,6 +29,10 @@ setup_file() {
   mkdir "$BATS_FILE_TMPDIR/view"
   (cd "$BATS_FILE_TMPDIR/render" && grep -rlxE "kind: (${kinds// /|})" . |
     while IFS= read -r file; do cp --parents "$file" "$BATS_FILE_TMPDIR/view/"; done)
+  # And the configuration of Envoy Gateway's controller, which fixtures/probe-shape.bash reads by
+  # its path.
+  (cd "$BATS_FILE_TMPDIR/render" && for file in */envoy-gateway/ConfigMap_*.yaml; do
+    [ ! -f "$file" ] || cp --parents "$file" "$BATS_FILE_TMPDIR/view/"; done)
 }
 
 setup() {
@@ -36,6 +43,51 @@ setup() {
   INVENTORY="$REPO/talos/firewall.yaml"
   EXCEPTIONS="$REPO/node-firewall-exceptions.yaml"
   DOCS="$REPO/docs/cluster.md"
+}
+
+# probe_places RENDER: where a Probe in the one shape the checks accept has its prober and its
+# targets, read from RENDER by fixtures/probe-shape.bash as tests/probes.bats reads them, as one JSON
+# document: .exporter, the address of the blackbox exporter's Service; .controller, the namespace of
+# Envoy Gateway's controller and the default EnvoyProxy its configuration holds; and .gateways, each
+# Gateway of the render with the cluster name of its proxies' Service. Each has an .error in place
+# of what cannot be read, as in a render of more than one cluster.
+probe_places() {
+  local render=$1 dir exporter='' exporter_error='' controller='' controller_error='' default='{}'
+  local file namespace name service gateways=()
+  local -a controllers=() exporters=()
+  for dir in "$render"/*/envoy-gateway; do [ ! -d "$dir" ] || controllers+=("${dir%/envoy-gateway}"); done
+  for dir in "$render"/*/blackbox-exporter; do [ ! -d "$dir" ] || exporters+=("${dir%/blackbox-exporter}"); done
+  if [ "${#exporters[@]}" -ne 1 ]; then
+    exporter_error="the render holds ${#exporters[@]} applications blackbox-exporter, not one"
+  elif ! exporter=$(exporter_service "${exporters[0]}" 2>&1); then
+    exporter_error=$exporter
+    exporter=''
+  fi
+  if [ "${#controllers[@]}" -ne 1 ]; then
+    controller_error="the render holds ${#controllers[@]} applications envoy-gateway, not one"
+  elif ! controller=$(controller_namespace "${controllers[0]}" 2>&1); then
+    controller_error=$controller
+    controller=''
+  else
+    default=$(yq -N -o json -I0 'select(.kind == "ConfigMap" and .data["envoy-gateway.yaml"] != null) | .data["envoy-gateway.yaml"] | from_yaml
+      | .envoyProxy // {}' "${controllers[0]}"/envoy-gateway/ConfigMap_*.yaml) || return 2
+  fi
+  while IFS= read -r file; do
+    while read -r namespace name; do
+      if [ -z "$controller" ]; then
+        gateways+=("$(jq -cn --arg gateway "$namespace/$name" '{gateway: $gateway, error: "no controller to name its proxies"}')")
+      elif service=$(proxy_service_name "$namespace" "$name" "$controller" 2>&1); then
+        gateways+=("$(jq -cn --arg gateway "$namespace/$name" --arg service "$service" '{gateway: $gateway, service: $service}')")
+      else
+        gateways+=("$(jq -cn --arg gateway "$namespace/$name" --arg error "$service" '{gateway: $gateway, error: $error}')")
+      fi
+    done < <(yq -N 'select(.kind == "Gateway") | (.metadata.namespace // "") + " " + .metadata.name' "$file")
+  done < <(grep -rlx 'kind: Gateway' "$render" || true)
+  jq -n --arg exporter "$exporter" --arg exporterError "$exporter_error" --arg controller "$controller" \
+    --arg controllerError "$controller_error" --argjson default "$default" --argjson gateways "$(printf '%s\n' "${gateways[@]}" | jq -cs 'map(select(. != null))')" '
+    {exporter: (if $exporterError != "" then {error: $exporterError} else {address: $exporter} end),
+     controller: (if $controllerError != "" then {error: $controllerError} else {namespace: $controller, default: $default} end),
+     gateways: $gateways}'
 }
 
 # evaluate RENDER INVENTORY EXCEPTIONS: what the checks find, as one JSON document. RENDER is a
@@ -55,11 +107,12 @@ setup() {
 #   .served      one line per rule: the listeners it admits, or no-pod
 #   .hostPorts   host ports that pod templates off the host network declare
 #   .onHost      one line per host port that a pod template on the host network declares
-#   .scraped     monitors that scrape a listener listed under no-rule, and scrapers it cannot read
+#   .scraped     monitors that scrape a listener listed under no-rule, Probes that are not in the
+#                one shape it accepts, and scrapers it cannot read
 #   .unscraped   one line per listener listed under no-rule
-#   .read        how many pod templates, on and off the host network, and monitors it read
+#   .read        how many pod templates, on and off the host network, monitors and Probes it read
 evaluate() {
-  local render=$1 inventory=$2 exceptions=$3 file listed='{}' present=true
+  local render=$1 inventory=$2 exceptions=$3 file listed='{}' present=true probing
   local -a files=()
   # A file yq cannot read fails the evaluation, instead of leaving jq with what came before it.
   local -
@@ -76,9 +129,11 @@ evaluate() {
   else
     present=false
   fi
+  probing=$(probe_places "$render") || return 2
   # shellcheck disable=SC2016 # a jq program
   yq -N -o json -I0 'select(. != null)' "${files[@]}" | jq -n --arg workloads "$WORKLOADS" --arg others "$OTHERS" \
-    --argjson inventory "$(yq -o json -I0 '.' "$inventory")" --argjson exceptions "$listed" --argjson present "$present" '
+    --argjson inventory "$(yq -o json -I0 '.' "$inventory")" --argjson exceptions "$listed" --argjson present "$present" \
+    --argjson probing "$probing" --argjson relabelings "$PROBE_RELABELINGS" --argjson modules "$PROBE_MODULES" '
     ($workloads / " ") as $workloadKinds
     | [inputs | select(type == "object" and (.kind | IN(($workloads + " " + $others) / " " | .[])))] as $objects
     # A chart object without a namespace is installed into its release namespace, which the labels
@@ -91,11 +146,16 @@ evaluate() {
           // $releases[($labels["helm.toolkit.fluxcd.io/namespace"] // "") + "/" + ($labels["helm.toolkit.fluxcd.io/name"] // "")] // "";
       def named: "\(.kind) \(namespace)/\(.metadata.name)";
       def id: "\(.ns) \(.workload) \(.protocol) \(.port)";
+      # How the pods of a pod spec on input resolve a name besides by the resolver of the cluster:
+      # by addresses of their own for it, by a resolver configuration of their own, or by none of
+      # those of the cluster.
+      def resolution: [(select(.hostAliases != null) | "hostAliases"), (select(.dnsConfig != null) | "dnsConfig"),
+        (select(.dnsPolicy == "None") | "dnsPolicy None")];
 
     [$objects[] | select(.kind | IN($workloadKinds[]))
       | (if .kind == "Pod" then {metadata, spec} elif .kind == "CronJob" then .spec.jobTemplate.spec.template else .spec.template end) as $template
       | {ns: namespace, workload: "\(.kind)/\(.metadata.name)", host: ($template.spec.hostNetwork == true),
-         labels: ($template.metadata.labels // {}),
+         labels: ($template.metadata.labels // {}), resolution: ($template.spec | resolution),
          ports: [($template.spec.initContainers // [])[], ($template.spec.containers // [])[] | (.ports // [])[]
            | {name: (.name // ""), protocol: ((.protocol // "TCP") | ascii_downcase), port: .containerPort, hostPort: (.hostPort // 0)}]}] as $templates
     | ([$templates[] | select(.host) | . as $t | .ports[] | {ns: $t.ns, workload: $t.workload, protocol, port}]
@@ -125,7 +185,7 @@ evaluate() {
      end] as $malformed
 
     | [($templates[] | select(.ns == "") | "\(.workload) has no namespace and no HelmRelease to take one from"),
-       ($objects[] | select(.kind | IN("Service", "PodMonitor", "ServiceMonitor")) | select(namespace == "")
+       ($objects[] | select(.kind | IN("Service", "PodMonitor", "ServiceMonitor", "Probe")) | select(namespace == "")
          | "\(.kind)/\(.metadata.name) has no namespace and no HelmRelease to take one from")] as $unplaced
 
     | [$listeners[] | . as $l
@@ -184,13 +244,127 @@ evaluate() {
             elif .operator == "Exists" then $labels | has($key)
             elif .operator == "DoesNotExist" then $labels | has($key) | not
             else true end));
-      # Whether the endpoint of a monitor on input rewrites the address it scrapes, which this does not follow.
-      def readdressed: any(.relabelings[]?; .targetLabel == "__address__");
+      # Whether the endpoint of a monitor on input rewrites the address it scrapes, which this does not
+      # follow: by name, or by a relabeling that writes a label it does not name, which can be the
+      # address. A labelmap writes the labels its replacement makes of the names its regex matches,
+      # and a replacement expands the groups of the regex in its target label (relabel.go of
+      # Prometheus).
+      def readdressed: any(.relabelings[]?; .targetLabel == "__address__"
+        or ((.action // "replace") | ascii_downcase) == "labelmap" or ((.targetLabel // "") | contains("$")));
       # The target port of the endpoint or the Service port on input, a name or a number, or 0 where
       # it names none: one that is 0 or empty names none, to the Prometheus Operator, which then
       # keeps every port, and to Kubernetes, which then takes the number of the Service port itself.
       def target: (.targetPort // 0) | if . == "" then 0 else . end;
-    ([($judged[] | select(.listed > 0) | .l as $l | .id as $id
+      # The keys of an object on input, and none of anything else.
+      def fields: if type == "object" then keys else [] end;
+      # The endpoints the render holds for the Service NAME in NAMESPACE, written by hand, which lead
+      # where they say: an EndpointSlice that names the Service, or its Endpoints, which the cluster
+      # mirrors into one.
+      def endpoints($namespace; $name): [$objects[] | select(namespace == $namespace
+          and ((.kind == "EndpointSlice" and (.metadata.labels // {})["kubernetes.io/service-name"] == $name)
+            or (.kind == "Endpoints" and .metadata.name == $name)))
+        | "\(.kind) \(namespace)/\(.metadata.name)"];
+
+    # The one shape of a Probe this accepts, where probe_places reads with fixtures/probe-shape.bash
+    # what it names: its prober the Service of the blackbox exporter, by the name and port the
+    # render gives it, whose pods the render holds, none on the host network and none resolving
+    # names their own way, nor Prometheus, which resolves the name of the prober; its targets
+    # static, each the Service of the proxies of the one Gateway of the render, by the name the
+    # controller gives it, over http or https on a port of the listeners of the Gateway, the port
+    # the URL names or the one its scheme implies, as the http prober of every module the Probe may
+    # name takes it; its spec, its prober and its targets nothing more, its labels the hostname
+    # alone, and its relabelings the one of the tree, which run after those of the operator, that
+    # set the address to the prober and the target to the static one, and change neither. The
+    # controller makes the proxies and their Service at run time, by its source at
+    # PROXY_SERVICE_READ_AT: the Service by that name, of one of the types an EnvoyProxy may give
+    # it, each of which leads to the pods it selects, while no EnvoyProxy and no default of the
+    # controller names it, patches it or merges the Gateways, and the render holds no Service of the
+    # name; the pods off the host network unless a patch puts them there, in a namespace whose Pod
+    # Security level must refuse it. Whatever a module runs, the only hosts a Probe in the shape
+    # reaches are those two Services, on the ports they have. Any other Probe is refused, as this
+    # does not follow where another name leads: a Service made at run time, a headless Service,
+    # whose name resolves to the own addresses of its pods, those of the nodes for pods on the host
+    # network, a Service without a selector and an ExternalName, which lead where endpoints or
+    # another name say.
+    ([$objects[] | select(.kind == "Probe")] | length > 0) as $probed
+    | ($probing.exporter.address // null) as $prober
+    | ($prober // "" | capture("^(?<name>[^.]+)[.](?<namespace>[^.]+)[.]svc[.]cluster[.]local:[0-9]+$") // null) as $exporterAt
+    | [$objects[] | select($exporterAt != null and .kind == "Service" and .metadata.name == $exporterAt.name and namespace == $exporterAt.namespace)] as $exporterServices
+    | (if $probing.exporter.error != null then [$probing.exporter.error]
+       elif ($exporterServices | length) != 1 then ["the render holds not one Service \($prober)"]
+       else $exporterServices[0] as $s | ($s | namespace) as $ns
+         | "the Service of the blackbox exporter, \($ns)/\($s.metadata.name)," as $it
+         | [if ($s.spec.type // "ClusterIP") != "ClusterIP" then "\($it) is of the type \($s.spec.type)"
+            elif (($s.spec.selector // {}) | length) == 0 then "\($it) has no selector"
+            else [$templates[] | select(.ns == $ns) | . as $t | select($s.spec.selector | to_entries | all(.key as $key | .value == $t.labels[$key]))] as $selected
+              | if ($selected | length) == 0 then "\($it) selects no pod template of the render"
+                else $selected[] | (select(.host) | "\($it) selects \(.workload), whose pods are on the host network"),
+                  (select(.resolution | length > 0) | "\($it) selects \(.workload), whose pods resolve names by their own \(.resolution | join(", "))") end
+            end,
+            (endpoints($ns; $s.metadata.name) | select(length > 0)
+              | "the render holds endpoints of the Service of the blackbox exporter, which lead where they say: \(join(", "))")]
+       end
+       # Prometheus resolves the name of the prober.
+       + [$objects[] | select(.kind == "Prometheus" or .kind == "PrometheusAgent") | (.spec | resolution) as $own | select($own | length > 0)
+           | "\(named) resolves names by its own \($own | join(", "))"]) as $exporterProblems
+    | [$objects[] | select(.kind == "Gateway")] as $gateways
+    | (if ($gateways | length) == 1 then $gateways[0] | "\(namespace)/\(.metadata.name)" else null end) as $gateway
+    | ([$probing.gateways[] | select($gateway != null and .gateway == $gateway)][0] // null) as $named
+    | {service: ($named.service // null), ports: ([$gateways[0].spec.listeners[]?.port] | unique)} as $proxies
+    # What of the EnvoyProxy spec on input leaves the proxies other than the controller builds them:
+    # a patch of their pods, or of their Service, which can make it any type, an ExternalName to
+    # another name among them, a name of its own for the Service, or the Gateways merged, the
+    # objects of whose proxies then take the name of their GatewayClass
+    # (internal/gatewayapi/translator.go).
+    | def rebuilds($who; $by): (.provider.kubernetes // {}) as $k
+        | (select($k.envoyDeployment.patch != null or $k.envoyDaemonSet.patch != null)
+            | "\($who) patches the pods of the proxies\($by), which can put them on the host network"),
+          (select($k.envoyService.patch != null) | "\($who) patches the Service of the proxies\($by), which can lead its name elsewhere"),
+          (select($k.envoyService.name != null)
+            | "\($who) names the Service of the proxies\($by), which then has another name than the one derived"),
+          (select(.mergeGateways == true) | "\($who) merges the Gateways\($by), whose proxies then take the name of their class");
+    (if ($gateways | length) != 1 then
+         ["the render holds \($gateways | length) Gateways, and a Probe may name the Service of the proxies of the one public Gateway alone"]
+       elif $probing.controller.error != null then [$probing.controller.error]
+       elif $named == null then ["no Service of the proxies of the Gateway \($gateway) was named"]
+       elif $named.error != null then [$named.error]
+       else [($objects[] | select(.kind == "EnvoyProxy") | "the EnvoyProxy \(namespace)/\(.metadata.name)" as $who | .spec // {} | rebuilds($who; "")),
+             ($probing.controller.default | rebuilds("the configuration of the controller of Envoy Gateway"; " by default")),
+             (($proxies.service | split(".")[0]) as $name
+               | $objects[] | select(.kind == "Service" and namespace == $probing.controller.namespace and .metadata.name == $name)
+               | "the render holds \(named) by the name of the Service of the proxies, which leads where it says and not to the proxies the controller makes"),
+             ([$objects[] | select(.kind == "Namespace" and .metadata.name == $probing.controller.namespace)][0] // null
+               | select((. // {} | .metadata.labels // {})["pod-security.kubernetes.io/enforce"] | IN("baseline", "restricted") | not)
+               | "the namespace \($probing.controller.namespace), where the controller makes the proxies, does not enforce the Pod Security level baseline or restricted, which refuse pods on the host network"),
+             (endpoints($probing.controller.namespace; $proxies.service | split(".")[0]) | select(length > 0)
+               | "the render holds endpoints of the Service of the proxies, which lead where they say: \(join(", "))")]
+       end) as $proxiesProblems
+    # Whether a static target on input is the Service of the proxies on a port of the listeners.
+    | def at_proxies: (capture("^(?<scheme>https?)://(?<host>[^/:?#]+)(?::(?<port>[0-9]+))?(?:[/?#].*)?$") // null)
+        | . != null and .host == $proxies.service
+          and ((if .port != null then .port | tonumber elif .scheme == "https" then 443 else 80 end) | IN($proxies.ports[]));
+    [($objects[] | select(.kind == "Probe") | "\(named) is not in the one shape this check accepts: " as $refused
+      | (((.spec | fields) - ["jobName", "module", "prober", "targets"] | select(length > 0)
+          | $refused + "its spec holds \(join(", ")) beyond jobName, module, prober and targets"),
+        ((.spec.prober | fields) - ["url"] | select(length > 0) | $refused + "its prober holds \(join(", ")) beyond url"),
+        (select($prober != null and .spec.prober.url != $prober)
+          | $refused + "its prober is \(.spec.prober.url), which is not the Service of the blackbox exporter, \($prober)"),
+        (select(.spec.module | IN($modules[]) | not)
+          | $refused + "its module is \(.spec.module), which is not one of those tests/probes.bats pins whole: \($modules | join(", "))"),
+        ((.spec.targets | fields) - ["staticConfig"] | select(length > 0) | $refused + "its targets hold \(join(", ")) beyond staticConfig"),
+        (.spec.targets.staticConfig as $static
+          | if ($static.static | type) != "array" or ($static.static | length) == 0 then $refused + "it has no static target"
+            else (($static | fields) - ["labels", "relabelingConfigs", "static"] | select(length > 0)
+                   | $refused + "its static targets hold \(join(", ")) beyond static, labels and relabelingConfigs"),
+                 (($static.labels | fields) - ["hostname"] | select(length > 0) | $refused + "its labels hold \(join(", ")) beyond hostname"),
+                 (select($static.relabelingConfigs != $relabelings)
+                   | $refused + "its relabelings are not the one of the tree, which makes the label hostname the parameter hostname"),
+                 (select($proxies.service != null) | $static.static[] | select((type == "string" and at_proxies) | not)
+                   | $refused + "it probes \(.), which is not the Service of the proxies of the public Gateway, \($proxies.service), over http or https on a port of its listeners, \($proxies.ports | map(tostring) | join(" or "))")
+            end))),
+     ($exporterProblems[] | select($probed) | "no prober of a Probe is accepted: \(.)"),
+     ($proxiesProblems[] | select($probed) | "no target of a Probe is accepted: \(.)")] as $refusedProbes
+    | ([($judged[] | select(.listed > 0) | .l as $l | .id as $id
          | $templates[] | select(.host and .ns == $l.ns and .workload == $l.workload) | . as $t
          # The names the template gives the port, by which a monitor or a Service may mean it.
          | ([$t.ports[] | select(.port == $l.port and .name != "") | .name] | unique) as $names
@@ -217,17 +391,21 @@ evaluate() {
                       elif target != 0 then (target as $port | $port == $l.port or any($names[]; . == $port))
                       else true end)))
               | "\($monitor | named) scrapes \($id), which has no rule, through \($service | named)"))),
-        ($objects[] | select(.kind == "Probe" or .kind == "ScrapeConfig")
-          | "\(named): this reads PodMonitors and ServiceMonitors alone, and must learn to read a \(.kind) before the render holds one"),
+        $refusedProbes[],
+        ($objects[] | select(.kind == "ScrapeConfig")
+          | "\(named): this reads PodMonitors, ServiceMonitors and Probes alone, and must learn to read a \(.kind) before the render holds one"),
         ($objects[] | select((.kind == "Prometheus" or .kind == "PrometheusAgent") and .spec.additionalScrapeConfigs != null)
-          | "\(named) takes additional scrape configurations, which this does not read")]
+          | "\(named) takes additional scrape configurations, which this does not read"),
+        ($objects[] | select((.kind == "Prometheus" or .kind == "PrometheusAgent") and any(.spec.scrapeClasses[]?; (.relabelings // []) | length > 0))
+          | "\(named) has a scrape class with relabelings, which run on the monitors and Probes it selects and which this does not read")]
        | unique) as $scraped
     | [$judged[] | select(.listed > 0) | "\(.id): no monitor"] as $unscraped
 
     | {malformed: $malformed, unplaced: $unplaced, unaccounted: $unaccounted, account: $account, unserved: $unserved,
        served: $served, hostPorts: $hostPorts, onHost: $onHost, scraped: $scraped, unscraped: $unscraped,
        read: {onHostNetwork: ([$templates[] | select(.host)] | length), onPodNetwork: ([$templates[] | select(.host | not)] | length),
-              monitors: ([$objects[] | select(.kind == "PodMonitor" or .kind == "ServiceMonitor")] | length)}}'
+              monitors: ([$objects[] | select(.kind == "PodMonitor" or .kind == "ServiceMonitor" or .kind == "Probe")] | length),
+              probes: ([$objects[] | select(.kind == "Probe")] | length)}}'
 }
 
 # verdict PROBLEMS ACCOUNT RENDER INVENTORY EXCEPTIONS: the lines of the lists of evaluate's
@@ -347,21 +525,22 @@ monitoring DaemonSet/kube-prometheus-stack-prometheus-node-exporter tcp 9100: no
 kube-system DaemonSet/cilium udp 6061: no rule of the inventory admits it and the exceptions file does not list it under no-rule
 monitoring DaemonSet/kube-prometheus-stack-prometheus-node-exporter udp 9100: no rule of the inventory admits it and the exceptions file does not list it under no-rule' ]
 
-  # A workload of each other kind that moves to the host network, with the ports it declares.
+  # A workload of each other kind that moves to the host network, with the ports it declares, on
+  # ports no rule of the inventory admits.
   copy moved
   yq -i '.spec.template.spec.hostNetwork = true' "$(object Deployment.apps_kube-system_hubble-relay.yaml)"
   yq -i '.spec.template.spec.hostNetwork = true' "$(object StatefulSet.apps_openbao_openbao.yaml)"
   yq -i '.spec.jobTemplate.spec.template.spec.hostNetwork = true
-    | .spec.jobTemplate.spec.template.spec.containers[0].ports = [{"containerPort": 7001}]' "$(object CronJob.batch_etcd-snapshots_etcd-snapshots.yaml)"
+    | .spec.jobTemplate.spec.template.spec.containers[0].ports = [{"containerPort": 8001}]' "$(object CronJob.batch_etcd-snapshots_etcd-snapshots.yaml)"
   yq -i '.spec.template.spec.hostNetwork = true
-    | .spec.template.spec.containers[0].ports = [{"containerPort": 7002}]' "$(object Job.batch_cert-manager_cert-manager-startupapicheck.yaml)"
-  yq -i '.spec.hostNetwork = true | .spec.containers[0].ports = [{"containerPort": 7003}]' "$(object Pod_kube-system_spegel-cleanup-wait.yaml)"
+    | .spec.template.spec.containers[0].ports = [{"containerPort": 8002}]' "$(object Job.batch_cert-manager_cert-manager-startupapicheck.yaml)"
+  yq -i '.spec.hostNetwork = true | .spec.containers[0].ports = [{"containerPort": 8003}]' "$(object Pod_kube-system_spegel-cleanup-wait.yaml)"
   on_copy listeners
   [ "$status" -eq 1 ]
-  [ "$output" = 'cert-manager Job/cert-manager-startupapicheck tcp 7002: no rule of the inventory admits it and the exceptions file does not list it under no-rule
-etcd-snapshots CronJob/etcd-snapshots tcp 7001: no rule of the inventory admits it and the exceptions file does not list it under no-rule
+  [ "$output" = 'cert-manager Job/cert-manager-startupapicheck tcp 8002: no rule of the inventory admits it and the exceptions file does not list it under no-rule
+etcd-snapshots CronJob/etcd-snapshots tcp 8001: no rule of the inventory admits it and the exceptions file does not list it under no-rule
 kube-system Deployment/hubble-relay tcp 4245: no rule of the inventory admits it and the exceptions file does not list it under no-rule
-kube-system Pod/spegel-cleanup-wait tcp 7003: no rule of the inventory admits it and the exceptions file does not list it under no-rule
+kube-system Pod/spegel-cleanup-wait tcp 8003: no rule of the inventory admits it and the exceptions file does not list it under no-rule
 openbao StatefulSet/openbao tcp 8200: no rule of the inventory admits it and the exceptions file does not list it under no-rule
 openbao StatefulSet/openbao tcp 8201: no rule of the inventory admits it and the exceptions file does not list it under no-rule
 openbao StatefulSet/openbao tcp 8202: no rule of the inventory admits it and the exceptions file does not list it under no-rule' ]
@@ -446,10 +625,14 @@ kube-controller-manager: no-pod
 kube-scheduler: no-pod
 kubelet: no-pod
 cilium-vxlan: no-pod
+cilium-wireguard: no-pod
 cilium-health: no-pod
 hubble: kube-system DaemonSet/cilium tcp 4244
 node-exporter: monitoring DaemonSet/kube-prometheus-stack-prometheus-node-exporter tcp 9100
-cilium-agent-metrics: kube-system DaemonSet/cilium tcp 9962'
+cilium-agent-metrics: kube-system DaemonSet/cilium tcp 9962
+linstor-satellite: no-pod
+drbd: no-pod
+drbd-reactor: no-pod'
   diff <(echo "$served") <(echo "$output")
 
   copy same
@@ -614,7 +797,7 @@ ServiceMonitor kube-system/cilium-operator scrapes kube-system Deployment/cilium
   # as a name and as a number, with no port at all or a target port that names none, which is
   # every port of the pod, from its own namespace where it names none, from another that it names
   # or from any, by expressions, by one of an operator the test does not know, and by rewriting the
-  # address it scrapes.
+  # address it scrapes: by name, by a labelmap, or by a target label built from the regex's groups.
   copy pods
   add podmonitors-scraping.yaml
   on_copy monitors
@@ -626,9 +809,11 @@ PodMonitor kube-system/by-target-number scrapes kube-system Deployment/cilium-op
 PodMonitor kube-system/every-port scrapes kube-system Deployment/cilium-operator tcp 9234, which has no rule
 PodMonitor kube-system/every-port scrapes kube-system Deployment/cilium-operator tcp 9963, which has no rule
 PodMonitor kube-system/from-its-own-namespace scrapes kube-system DaemonSet/cilium-envoy tcp 9964, which has no rule
+PodMonitor kube-system/labelmapped scrapes kube-system DaemonSet/cilium tcp 9879, which has no rule
 PodMonitor kube-system/readdressed scrapes kube-system DaemonSet/cilium tcp 9879, which has no rule
 PodMonitor kube-system/target-empty scrapes kube-system DaemonSet/cilium tcp 9879, which has no rule
 PodMonitor kube-system/target-zero scrapes kube-system DaemonSet/cilium-envoy tcp 9964, which has no rule
+PodMonitor kube-system/templated scrapes kube-system DaemonSet/cilium tcp 9879, which has no rule
 PodMonitor kube-system/unknown-operator scrapes kube-system DaemonSet/cilium-envoy tcp 9964, which has no rule
 PodMonitor monitoring/by-expressions scrapes kube-system DaemonSet/cilium-envoy tcp 9964, which has no rule
 PodMonitor monitoring/from-a-named-namespace scrapes kube-system DaemonSet/cilium-envoy tcp 9964, which has no rule
@@ -646,8 +831,8 @@ PodMonitor monitoring/from-any-namespace scrapes kube-system DaemonSet/cilium-en
   # ServiceMonitors that reach such a port: through a Service port whose target is the port's name
   # or its number, or that names no target, by none or by an empty one, and has its number, by the
   # deprecated target port as a name and as a number, with no port at all or a target port that
-  # names none, by rewriting the address, and through a Service without a selector, which leads
-  # where its endpoints say.
+  # names none, by rewriting the address, by name, by a labelmap or by a target label built from the
+  # regex's groups, and through a Service without a selector, which leads where its endpoints say.
   copy services
   add servicemonitors-scraping.yaml
   on_copy monitors
@@ -659,10 +844,14 @@ ServiceMonitor kube-system/by-target-number scrapes kube-system Deployment/ciliu
 ServiceMonitor kube-system/by-target-port scrapes kube-system Deployment/cilium-operator tcp 9963, which has no rule, through Service kube-system/operator-other-port
 ServiceMonitor kube-system/every-port scrapes kube-system Deployment/cilium-operator tcp 9234, which has no rule, through Service kube-system/operator-other-port
 ServiceMonitor kube-system/every-port scrapes kube-system Deployment/cilium-operator tcp 9963, which has no rule, through Service kube-system/operator-other-port
+ServiceMonitor kube-system/labelmapped scrapes kube-system Deployment/cilium-operator tcp 9234, which has no rule, through Service kube-system/operator-other-port
+ServiceMonitor kube-system/labelmapped scrapes kube-system Deployment/cilium-operator tcp 9963, which has no rule, through Service kube-system/operator-other-port
 ServiceMonitor kube-system/readdressed scrapes kube-system Deployment/cilium-operator tcp 9234, which has no rule, through Service kube-system/operator-other-port
 ServiceMonitor kube-system/readdressed scrapes kube-system Deployment/cilium-operator tcp 9963, which has no rule, through Service kube-system/operator-other-port
 ServiceMonitor kube-system/target-zero scrapes kube-system Deployment/cilium-operator tcp 9234, which has no rule, through Service kube-system/operator-other-port
 ServiceMonitor kube-system/target-zero scrapes kube-system Deployment/cilium-operator tcp 9963, which has no rule, through Service kube-system/operator-other-port
+ServiceMonitor kube-system/templated scrapes kube-system Deployment/cilium-operator tcp 9234, which has no rule, through Service kube-system/operator-other-port
+ServiceMonitor kube-system/templated scrapes kube-system Deployment/cilium-operator tcp 9963, which has no rule, through Service kube-system/operator-other-port
 ServiceMonitor kube-system/through-target-number scrapes kube-system Deployment/cilium-operator tcp 9963, which has no rule, through Service kube-system/operator-by-target-number
 ServiceMonitor monitoring/without-selector scrapes kube-system DaemonSet/cilium-envoy tcp 9964, which has no rule, through Service monitoring/without-selector' ]
 
@@ -676,21 +865,218 @@ ServiceMonitor monitoring/without-selector scrapes kube-system DaemonSet/cilium-
   [ "$status" -eq 0 ]
   [ "$output" = "$unscraped" ]
 
-  # A scraper of a kind the check does not read, and a Prometheus with scrape configurations of
-  # its own.
-  copy unread
-  add probe.yaml
-  add scrapeconfig.yaml
-  yq -i '.spec.additionalScrapeConfigs = {"name": "scrapes", "key": "scrapes.yaml"}' \
+  # A Probe is accepted in the one shape the tree's Probes have, and every other is refused, saying
+  # so. Prometheus scrapes a Probe's prober and the exporter there connects to each of its targets,
+  # and the check does not follow where a name leads: a Service that a controller makes at run time,
+  # the kubelet's among them, a headless Service, whose name is its pods' own addresses, the nodes'
+  # for pods on the host network, a Service without a selector or an ExternalName, which lead where
+  # endpoints or another name say. In the shape, the prober is the blackbox exporter's Service, by
+  # the name and port the render gives it, and every target the public Gateway's proxies' Service,
+  # by the name tests/probes.bats derives, over http or https on a port of the Gateway's listeners;
+  # the spec, the prober and the targets hold nothing more, the labels the hostname alone, the module
+  # is one tests/probes.bats pins whole and the relabelings are the tree's one
+  # (tests/fixtures/probe-shape.bash). The tree's Probes are in it, and the check refuses none of
+  # them, as the account of the tree above shows; that it read every one is shown below.
+
+  # Probes in that shape beside the tree's: the ports each scheme implies, the listeners' ports
+  # named, two targets, and another of the modules.
+  copy probes-accepted
+  add probes-accepted.yaml
+  on_copy monitors
+  [ "$status" -eq 0 ]
+  [ "$output" = "$unscraped" ]
+
+  # Probes that leave it, each in one way, many of them ways to a port that has no rule.
+  local shape="is not in the one shape this check accepts" exporter="blackbox-exporter.monitoring.svc.cluster.local:9115"
+  local proxies="which is not the Service of the proxies of the public Gateway, envoy-envoy-gateway-system-public-5ea56ca9.envoy-gateway-system.svc.cluster.local, over http or https on a port of its listeners, 80 or 443"
+  local relabelings="its relabelings are not the one of the tree, which makes the label hostname the parameter hostname"
+  copy probes-refused
+  add probes-refused.yaml
+  on_copy monitors
+  [ "$status" -eq 1 ]
+  [ "$output" = "Probe monitoring/external-name $shape: it probes https://rev-external.kube-system.svc:9963/, $proxies
+Probe monitoring/from-ingresses $shape: it has no static target
+Probe monitoring/from-ingresses $shape: its targets hold ingress beyond staticConfig
+Probe monitoring/headless-host-network $shape: it probes http://cilium-envoy.kube-system.svc.cluster.local:9963/, $proxies
+Probe monitoring/headless-static-pods $shape: its prober is kube-prometheus-stack-kube-scheduler.kube-system.svc:9964, which is not the Service of the blackbox exporter, $exporter
+Probe monitoring/kubelet-prober $shape: its prober is kube-prometheus-stack-kubelet.kube-system.svc:9879, which is not the Service of the blackbox exporter, $exporter
+Probe monitoring/kubelet-target $shape: it probes http://kube-prometheus-stack-kubelet.kube-system.svc.cluster.local:9963/metrics, $proxies
+Probe monitoring/labelmapped $shape: $relabelings
+Probe monitoring/not-the-exporter $shape: its prober is prober.example:9115, which is not the Service of the blackbox exporter, $exporter
+Probe monitoring/other-module $shape: its module is tcp_connect, which is not one of those tests/probes.bats pins whole: public_http_redirect, public_https, public_https_signin
+Probe monitoring/other-namespace $shape: it probes https://envoy-envoy-gateway-system-public-5ea56ca9.monitoring.svc.cluster.local/, $proxies
+Probe monitoring/other-port $shape: it probes https://envoy-envoy-gateway-system-public-5ea56ca9.envoy-gateway-system.svc.cluster.local:9964/, $proxies
+Probe monitoring/prober-proxy $shape: its prober holds proxyUrl beyond url
+Probe monitoring/prober-scheme $shape: its prober holds scheme beyond url
+Probe monitoring/readdressed $shape: $relabelings
+Probe monitoring/retargeted $shape: $relabelings
+Probe monitoring/scrape-class $shape: its spec holds scrapeClass beyond jobName, module, prober and targets
+Probe monitoring/second-label $shape: its labels hold __scheme__ beyond hostname
+Probe monitoring/second-target $shape: it probes http://node.example:9963/, $proxies
+Probe monitoring/static-and-ingresses $shape: its targets hold ingress beyond staticConfig
+Probe monitoring/templated $shape: $relabelings
+Probe monitoring/without-scheme $shape: it probes envoy-envoy-gateway-system-public-5ea56ca9.envoy-gateway-system.svc.cluster.local:443, $proxies
+Probe monitoring/without-selector $shape: it probes http://without-selector.kube-system.svc:9963/, $proxies" ]
+
+  # The shape holds only while the render says the two Services lead to pods on the pod network. The
+  # exporter's pods are in the render: its Service of a type that leads elsewhere, an ExternalName
+  # to another name among them, selecting no pod template of the render, or the exporter's on the
+  # host network, refuses every Probe's prober, as do the exporter's pods or the Prometheus that
+  # scrapes it resolving names their own way, and no Service of the exporter's release to name. A
+  # selector of two keys selects a template that carries both, and not the node exporter's, on the
+  # host network, which carries one.
+  copy exporter-external-name
+  yq -i '.spec.type = "ExternalName" | .spec.externalName = "node.example"' "$(object Service_monitoring_blackbox-exporter.yaml)"
+  on_copy monitors
+  [ "$status" -eq 1 ]
+  [ "$output" = "no prober of a Probe is accepted: the Service of the blackbox exporter, monitoring/blackbox-exporter, is of the type ExternalName" ]
+  copy exporter-two-keys
+  yq -i '.spec.selector = {"app.kubernetes.io/instance": "blackbox-exporter", "app.kubernetes.io/managed-by": "Helm"}' "$(object Service_monitoring_blackbox-exporter.yaml)"
+  on_copy monitors
+  [ "$status" -eq 0 ]
+  [ "$output" = "$unscraped" ]
+  copy exporter-resolving
+  yq -i '.spec.template.spec.hostAliases = [{"ip": "192.0.2.10", "hostnames": ["envoy-envoy-gateway-system-public-5ea56ca9.envoy-gateway-system.svc.cluster.local"]}]
+    | .spec.template.spec.dnsPolicy = "None" | .spec.template.spec.dnsConfig = {"nameservers": ["192.0.2.10"]}' \
+    "$(object Deployment.apps_monitoring_blackbox-exporter.yaml)"
+  on_copy monitors
+  [ "$status" -eq 1 ]
+  [ "$output" = "no prober of a Probe is accepted: the Service of the blackbox exporter, monitoring/blackbox-exporter, selects Deployment/blackbox-exporter, whose pods resolve names by their own hostAliases, dnsConfig, dnsPolicy None" ]
+  copy prometheus-resolving
+  yq -i '.spec.hostAliases = [{"ip": "192.0.2.10", "hostnames": ["blackbox-exporter.monitoring.svc.cluster.local"]}]
+    | .spec.dnsPolicy = "None" | .spec.dnsConfig = {"nameservers": ["192.0.2.10"]}' \
     "$(object Prometheus.monitoring.coreos.com_monitoring_kube-prometheus-stack-prometheus.yaml)"
   on_copy monitors
   [ "$status" -eq 1 ]
-  [ "$output" = 'Probe monitoring/node-ports: this reads PodMonitors and ServiceMonitors alone, and must learn to read a Probe before the render holds one
+  [ "$output" = "no prober of a Probe is accepted: Prometheus monitoring/kube-prometheus-stack-prometheus resolves names by its own hostAliases, dnsConfig, dnsPolicy None" ]
+  copy exporter-unselected
+  yq -i '.spec.selector = {"app.kubernetes.io/name": "elsewhere"}' "$(object Service_monitoring_blackbox-exporter.yaml)"
+  on_copy monitors
+  [ "$status" -eq 1 ]
+  [ "$output" = "no prober of a Probe is accepted: the Service of the blackbox exporter, monitoring/blackbox-exporter, selects no pod template of the render" ]
+  copy exporter-on-host
+  yq -i '.spec.template.spec.hostNetwork = true' "$(object Deployment.apps_monitoring_blackbox-exporter.yaml)"
+  on_copy monitors
+  [ "$status" -eq 1 ]
+  [ "$output" = "no prober of a Probe is accepted: the Service of the blackbox exporter, monitoring/blackbox-exporter, selects Deployment/blackbox-exporter, whose pods are on the host network" ]
+  copy exporter-gone
+  rm "$(object Service_monitoring_blackbox-exporter.yaml)"
+  on_copy monitors
+  [ "$status" -eq 1 ]
+  [[ $output == "no prober of a Probe is accepted: not one Service of the release blackbox-exporter in "* ]]
+  # The proxies' pods are not: Envoy Gateway makes them at run time, and at the version
+  # tests/probes.bats holds its controller to builds their pods without the host network, which only
+  # a patch changes, in the controller's namespace, where Pod Security refuses the host network
+  # below the privileged level. Nor is their Service, which the controller makes by the name
+  # tests/probes.bats derives unless an EnvoyProxy names it otherwise, patches it, into an
+  # ExternalName among others, or merges the Gateways, whose proxies then take their class's name.
+  # An EnvoyProxy with such a patch, a name or the merge, the default EnvoyProxy of the controller's
+  # configuration with one, a Service of that name in the render, which leads where it says, the
+  # namespace at the privileged level or not in the render, the controller deploying the proxies in
+  # each Gateway's namespace, for which the name's rule was not read, and a second Gateway refuse
+  # every Probe's target.
+  copy proxies-patched
+  yq -i '.spec.provider.kubernetes.envoyDeployment.patch = {"type": "StrategicMerge", "value": {"spec": {"template": {"spec": {"hostNetwork": true}}}}}' \
+    "$(object EnvoyProxy.gateway.envoyproxy.io_envoy-gateway-system_public.yaml)"
+  on_copy monitors
+  [ "$status" -eq 1 ]
+  [ "$output" = "no target of a Probe is accepted: the EnvoyProxy envoy-gateway-system/public patches the pods of the proxies, which can put them on the host network" ]
+  copy controller-patched
+  yq -i '.data["envoy-gateway.yaml"] |= (from_yaml | .envoyProxy = {"provider": {"type": "Kubernetes", "kubernetes": {"envoyDaemonSet":
+    {"patch": {"type": "StrategicMerge", "value": {"spec": {"template": {"spec": {"hostNetwork": true}}}}}}}}} | to_yaml)' \
+    "$(object ConfigMap_envoy-gateway-system_envoy-gateway-config.yaml)"
+  on_copy monitors
+  [ "$status" -eq 1 ]
+  [ "$output" = "no target of a Probe is accepted: the configuration of the controller of Envoy Gateway patches the pods of the proxies by default, which can put them on the host network" ]
+  local elsewhere='{"type": "StrategicMerge", "value": {"spec": {"type": "ExternalName", "externalName": "node.example"}}}'
+  copy service-patched
+  yq -i ".spec.provider.kubernetes.envoyService.patch = $elsewhere" "$(object EnvoyProxy.gateway.envoyproxy.io_envoy-gateway-system_public.yaml)"
+  on_copy monitors
+  [ "$status" -eq 1 ]
+  [ "$output" = "no target of a Probe is accepted: the EnvoyProxy envoy-gateway-system/public patches the Service of the proxies, which can lead its name elsewhere" ]
+  copy service-named
+  yq -i '.spec.provider.kubernetes.envoyService.name = "public-proxies"' "$(object EnvoyProxy.gateway.envoyproxy.io_envoy-gateway-system_public.yaml)"
+  on_copy monitors
+  [ "$status" -eq 1 ]
+  [ "$output" = "no target of a Probe is accepted: the EnvoyProxy envoy-gateway-system/public names the Service of the proxies, which then has another name than the one derived" ]
+  copy gateways-merged
+  yq -i '.spec.mergeGateways = true' "$(object EnvoyProxy.gateway.envoyproxy.io_envoy-gateway-system_public.yaml)"
+  on_copy monitors
+  [ "$status" -eq 1 ]
+  [ "$output" = "no target of a Probe is accepted: the EnvoyProxy envoy-gateway-system/public merges the Gateways, whose proxies then take the name of their class" ]
+  copy controller-service-patched
+  yq -i ".data[\"envoy-gateway.yaml\"] |= (from_yaml | .envoyProxy = {\"provider\": {\"type\": \"Kubernetes\", \"kubernetes\": {\"envoyService\": {\"patch\": $elsewhere}}}} | to_yaml)" \
+    "$(object ConfigMap_envoy-gateway-system_envoy-gateway-config.yaml)"
+  on_copy monitors
+  [ "$status" -eq 1 ]
+  [ "$output" = "no target of a Probe is accepted: the configuration of the controller of Envoy Gateway patches the Service of the proxies by default, which can lead its name elsewhere" ]
+  copy controller-service-named
+  yq -i '.data["envoy-gateway.yaml"] |= (from_yaml | .envoyProxy = {"provider": {"type": "Kubernetes", "kubernetes": {"envoyService": {"name": "public-proxies"}}}} | to_yaml)' \
+    "$(object ConfigMap_envoy-gateway-system_envoy-gateway-config.yaml)"
+  on_copy monitors
+  [ "$status" -eq 1 ]
+  [ "$output" = "no target of a Probe is accepted: the configuration of the controller of Envoy Gateway names the Service of the proxies by default, which then has another name than the one derived" ]
+  copy controller-merged
+  yq -i '.data["envoy-gateway.yaml"] |= (from_yaml | .envoyProxy = {"mergeGateways": true} | to_yaml)' \
+    "$(object ConfigMap_envoy-gateway-system_envoy-gateway-config.yaml)"
+  on_copy monitors
+  [ "$status" -eq 1 ]
+  [ "$output" = "no target of a Probe is accepted: the configuration of the controller of Envoy Gateway merges the Gateways by default, whose proxies then take the name of their class" ]
+  copy service-held
+  yq -n '{"apiVersion": "v1", "kind": "Service", "metadata": {"name": "envoy-envoy-gateway-system-public-5ea56ca9", "namespace": "envoy-gateway-system"},
+    "spec": {"type": "ExternalName", "externalName": "node.example"}}' \
+    > "$COPY/render/lab-sto2/envoy-gateway/Service_envoy-gateway-system_envoy-envoy-gateway-system-public-5ea56ca9.yaml"
+  on_copy monitors
+  [ "$status" -eq 1 ]
+  [ "$output" = "no target of a Probe is accepted: the render holds Service envoy-gateway-system/envoy-envoy-gateway-system-public-5ea56ca9 by the name of the Service of the proxies, which leads where it says and not to the proxies the controller makes" ]
+  copy proxies-privileged
+  yq -i '.metadata.labels["pod-security.kubernetes.io/enforce"] = "privileged"' "$(object Namespace__envoy-gateway-system.yaml)"
+  on_copy monitors
+  [ "$status" -eq 1 ]
+  [ "$output" = "no target of a Probe is accepted: the namespace envoy-gateway-system, where the controller makes the proxies, does not enforce the Pod Security level baseline or restricted, which refuse pods on the host network" ]
+  copy proxies-namespace-gone
+  rm "$(object Namespace__envoy-gateway-system.yaml)"
+  on_copy monitors
+  [ "$status" -eq 1 ]
+  [ "$output" = "no target of a Probe is accepted: the namespace envoy-gateway-system, where the controller makes the proxies, does not enforce the Pod Security level baseline or restricted, which refuse pods on the host network" ]
+  copy proxies-elsewhere
+  yq -i '.data["envoy-gateway.yaml"] |= (from_yaml | .provider.kubernetes.deploy.type = "GatewayNamespace" | to_yaml)' \
+    "$(object ConfigMap_envoy-gateway-system_envoy-gateway-config.yaml)"
+  on_copy monitors
+  [ "$status" -eq 1 ]
+  [[ $output == "no target of a Probe is accepted: Envoy Gateway's controller in "*" deploys the proxies in the mode GatewayNamespace, for which the rule for their Service's name was not read" ]]
+  copy two-gateways
+  yq '.metadata.name = "second"' "$(object Gateway.gateway.networking.k8s.io_envoy-gateway-system_public.yaml)" > "$COPY/render/lab-sto2/gateway-public/Gateway.gateway.networking.k8s.io_envoy-gateway-system_second.yaml"
+  on_copy monitors
+  [ "$status" -eq 1 ]
+  [ "$output" = "no target of a Probe is accepted: the render holds 2 Gateways, and a Probe may name the Service of the proxies of the one public Gateway alone" ]
+  # Endpoints written by hand for either Service lead where they say, beside the pods.
+  copy endpoints
+  add probes-endpoints.yaml
+  on_copy monitors
+  [ "$status" -eq 1 ]
+  [ "$output" = "no prober of a Probe is accepted: the render holds endpoints of the Service of the blackbox exporter, which lead where they say: EndpointSlice monitoring/blackbox-exporter-by-hand
+no target of a Probe is accepted: the render holds endpoints of the Service of the proxies, which lead where they say: Endpoints envoy-gateway-system/envoy-envoy-gateway-system-public-5ea56ca9" ]
+  # The check read every Probe of the tree, and refused none.
+  copy probes-of-the-tree
+  [ "$(find "$RENDER" -name 'Probe.monitoring.coreos.com_*.yaml' | wc -l)" -gt 0 ]
+  [ "$(evaluate "$COPY/render" "$COPY/firewall.yaml" "$COPY/exceptions.yaml" | jq '.read.probes')" -eq "$(find "$RENDER" -name 'Probe.monitoring.coreos.com_*.yaml' | wc -l)" ]
+
+  # A scraper of a kind the check does not read, and a Prometheus with scrape configurations of
+  # its own and with a scrape class whose relabelings run on every monitor and Probe it selects.
+  copy unread
+  add scrapeconfig.yaml
+  yq -i '.spec.additionalScrapeConfigs = {"name": "scrapes", "key": "scrapes.yaml"}
+    | .spec.scrapeClasses = [{"name": "nodes", "default": true, "relabelings": [{"targetLabel": "__address__", "replacement": "node.example:9963"}]}]' \
+    "$(object Prometheus.monitoring.coreos.com_monitoring_kube-prometheus-stack-prometheus.yaml)"
+  on_copy monitors
+  [ "$status" -eq 1 ]
+  [ "$output" = 'Prometheus monitoring/kube-prometheus-stack-prometheus has a scrape class with relabelings, which run on the monitors and Probes it selects and which this does not read
 Prometheus monitoring/kube-prometheus-stack-prometheus takes additional scrape configurations, which this does not read
-ScrapeConfig monitoring/node-ports: this reads PodMonitors and ServiceMonitors alone, and must learn to read a ScrapeConfig before the render holds one' ]
+ScrapeConfig monitoring/node-ports: this reads PodMonitors, ServiceMonitors and Probes alone, and must learn to read a ScrapeConfig before the render holds one' ]
 
   # A monitor of a chart that gives it no namespace is in its release's, and without a release it
-  # is in none the check can name.
+  # is in none the check can name: a PodMonitor, and a Probe of the tree's.
   copy unplaced
   add podmonitors-scraping.yaml
   yq -i 'select(.metadata.name == "by-number") | del(.metadata.namespace)
@@ -700,9 +1086,11 @@ ScrapeConfig monitoring/node-ports: this reads PodMonitors and ServiceMonitors a
   [ "$status" -eq 1 ]
   [ "$output" = 'PodMonitor kube-system/by-number scrapes kube-system DaemonSet/cilium-envoy tcp 9964, which has no rule' ]
   yq -i 'del(.metadata.labels)' "$COPY/render/fixture/added/podmonitors-scraping.yaml"
+  yq 'del(.metadata.namespace) | del(.metadata.labels)' "$(object Probe.monitoring.coreos.com_demo_hello.yaml)" > "$COPY/render/fixture/added/probe-unplaced.yaml"
   on_copy monitors
   [ "$status" -eq 1 ]
-  [ "$output" = 'PodMonitor/by-number has no namespace and no HelmRelease to take one from' ]
+  [ "$output" = 'PodMonitor/by-number has no namespace and no HelmRelease to take one from
+Probe/hello has no namespace and no HelmRelease to take one from' ]
 }
 
 @test "the copy of the render that the tests change holds everything the checks read" {
@@ -727,7 +1115,7 @@ kube-system Deployment/cilium-operator tcp 9234: no rule of the inventory admits
 kube-system Deployment/cilium-operator tcp 9963: no rule of the inventory admits it and the exceptions file does not list it under no-rule' ]
   on_copy rules
   [ "$status" -eq 1 ]
-  [ "$(grep -c 'a stale rule, or a listener to name there$' <<< "$output")" -eq 10 ]
+  [ "$(grep -c 'a stale rule, or a listener to name there$' <<< "$output")" -eq 14 ]
   on_copy monitors
   [ "$status" -eq 1 ]
   [ "$output" = 'the exceptions file does not exist' ]
@@ -767,7 +1155,7 @@ no-pod entry 1 has the unknown key port'
   malformed 'the exceptions file has no list no-rule'
   copy not-a-map
   yq -i '.["no-pod"] += ["apid"]' "$COPY/exceptions.yaml"
-  malformed 'no-pod entry 11 is not a map of rule, reason'
+  malformed 'no-pod entry 15 is not a map of rule, reason'
   copy not-lists
   echo '[]' > "$COPY/exceptions.yaml"
   malformed 'the exceptions file is not a map of the lists no-rule and no-pod'

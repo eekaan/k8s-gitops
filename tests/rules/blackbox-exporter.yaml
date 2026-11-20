@@ -1,0 +1,291 @@
+---
+# Unit tests of the blackbox-exporter application's own alerts, run by just rules-check with
+# promtool. The series are shaped as the blackbox exporter's HTTP prober writes them
+# (https://github.com/prometheus/blackbox_exporter#metrics: probe_success, probe_http_status_code,
+# which is 0 while no response came, and probe_ssl_earliest_cert_expiry, the expiry of the served
+# certificate as a Unix time) with the labels the Probes' scrapes give them: the job name the Probes
+# set, the instance, which is the target the exporter was asked to probe, the namespace the operator
+# adds to a static target (the Probe's own) and the hostname label the
+# Probes carry. Each group also holds series of another job in the state that would raise the alert,
+# which it does not: the alerts read the job the Probes of the public hostnames set and no other.
+# Each group's name is the title of its scenario in features/alerts.feature.
+rule_files:
+  - blackbox-exporter.rules.yaml
+evaluation_interval: 1m
+tests:
+  - name: The alert PublicEndpointDown fires after its time in the failing case and stays quiet in the healthy one
+    interval: 1m
+    input_series:
+      # hello answers 200 for 10 minutes and then nothing at all: the status code is 0 while no
+      # response came.
+      - series: >-
+          probe_success{job="public-endpoints", instance="https://gateway.example.svc.cluster.local/",
+          hostname="hello.example.com", namespace="demo"}
+        values: '1x10 0x80'
+      - series: >-
+          probe_http_status_code{job="public-endpoints", instance="https://gateway.example.svc.cluster.local/",
+          hostname="hello.example.com", namespace="demo"}
+        values: '200x10 0x80'
+      # The redirect is answered with a 301 throughout.
+      - series: >-
+          probe_success{job="public-endpoints", instance="http://gateway.example.svc.cluster.local/",
+          hostname="example.com", namespace="envoy-gateway-system"}
+        values: '1x90'
+      - series: >-
+          probe_http_status_code{job="public-endpoints", instance="http://gateway.example.svc.cluster.local/",
+          hostname="example.com", namespace="envoy-gateway-system"}
+        values: '301x90'
+      # A hostname that is answered, with a status the probe does not accept, is not down.
+      - series: >-
+          probe_success{job="public-endpoints", instance="https://gateway.example.svc.cluster.local/",
+          hostname="wrong.example.com", namespace="demo"}
+        values: '0x90'
+      - series: >-
+          probe_http_status_code{job="public-endpoints", instance="https://gateway.example.svc.cluster.local/",
+          hostname="wrong.example.com", namespace="demo"}
+        values: '503x90'
+      # A probe of another job, a Probe that sets no job name, gets no answer throughout.
+      - series: >-
+          probe_success{job="probe/demo/other", instance="https://other.example.svc.cluster.local/",
+          hostname="other.example.com", namespace="demo"}
+        values: '0x90'
+      - series: >-
+          probe_http_status_code{job="probe/demo/other", instance="https://other.example.svc.cluster.local/",
+          hostname="other.example.com", namespace="demo"}
+        values: '0x90'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: PublicEndpointDown
+        exp_alerts: []
+      # hello fails from minute 11, so the alert is pending until minute 16.
+      - eval_time: 15m
+        alertname: PublicEndpointDown
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: PublicEndpointDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: public-endpoints
+              instance: https://gateway.example.svc.cluster.local/
+              hostname: hello.example.com
+              namespace: demo
+            exp_annotations:
+              summary: A public hostname gets no answer through the Gateway
+              description: The probe of hello.example.com through the Gateway has had no answer for 5 minutes, so the connection, the TLS handshake or the request fails.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#publicendpointdown
+  - name: The alert PublicEndpointWrongStatus fires after its time in the failing case and stays quiet in the healthy one
+    interval: 1m
+    input_series:
+      # hello is answered with 200 for 10 minutes and then with 503, which Envoy sends for a route
+      # whose backend is gone.
+      - series: >-
+          probe_success{job="public-endpoints", instance="https://gateway.example.svc.cluster.local/",
+          hostname="hello.example.com", namespace="demo"}
+        values: '1x10 0x80'
+      - series: >-
+          probe_http_status_code{job="public-endpoints", instance="https://gateway.example.svc.cluster.local/",
+          hostname="hello.example.com", namespace="demo"}
+        values: '200x10 503x80'
+      # The redirect is answered with a 301 throughout.
+      - series: >-
+          probe_success{job="public-endpoints", instance="http://gateway.example.svc.cluster.local/",
+          hostname="example.com", namespace="envoy-gateway-system"}
+        values: '1x90'
+      - series: >-
+          probe_http_status_code{job="public-endpoints", instance="http://gateway.example.svc.cluster.local/",
+          hostname="example.com", namespace="envoy-gateway-system"}
+        values: '301x90'
+      # A hostname that gets no answer has no status, which is down and not a wrong status.
+      - series: >-
+          probe_success{job="public-endpoints", instance="https://gateway.example.svc.cluster.local/",
+          hostname="down.example.com", namespace="demo"}
+        values: '0x90'
+      - series: >-
+          probe_http_status_code{job="public-endpoints", instance="https://gateway.example.svc.cluster.local/",
+          hostname="down.example.com", namespace="demo"}
+        values: '0x90'
+      # A probe of another job, a Probe that sets no job name, is answered with 503 throughout.
+      - series: >-
+          probe_success{job="probe/demo/other", instance="https://other.example.svc.cluster.local/",
+          hostname="other.example.com", namespace="demo"}
+        values: '0x90'
+      - series: >-
+          probe_http_status_code{job="probe/demo/other", instance="https://other.example.svc.cluster.local/",
+          hostname="other.example.com", namespace="demo"}
+        values: '503x90'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: PublicEndpointWrongStatus
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: PublicEndpointWrongStatus
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: PublicEndpointWrongStatus
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: public-endpoints
+              instance: https://gateway.example.svc.cluster.local/
+              hostname: hello.example.com
+              namespace: demo
+            exp_annotations:
+              summary: A public hostname is answered with a status the probe does not accept
+              description: The probe of hello.example.com through the Gateway has been answered with a status it does not accept for 5 minutes, so the Gateway answers but not as the route should.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#publicendpointwrongstatus
+  - name: The alert PublicCertificateExpiring fires after its time in the failing case and stays quiet in the healthy one
+    interval: 1m
+    input_series:
+      # hello's certificate ends 14 days and 10 minutes after the start of the test: from minute 11
+      # less than 14 days remain.
+      - series: >-
+          probe_ssl_earliest_cert_expiry{job="public-endpoints", instance="https://gateway.example.svc.cluster.local/",
+          hostname="hello.example.com", namespace="demo"}
+        values: '1210200x90'
+      # A certificate with 60 days to run.
+      - series: >-
+          probe_ssl_earliest_cert_expiry{job="public-endpoints", instance="https://gateway.example.svc.cluster.local/",
+          hostname="long.example.com", namespace="demo"}
+        values: '5184000x90'
+      # A certificate that ends within 3 days is the critical alert's, not this one's.
+      - series: >-
+          probe_ssl_earliest_cert_expiry{job="public-endpoints", instance="https://gateway.example.svc.cluster.local/",
+          hostname="soon.example.com", namespace="demo"}
+        values: '172800x90'
+      # A certificate with 10 days to run that a probe of another job reads.
+      - series: >-
+          probe_ssl_earliest_cert_expiry{job="probe/demo/other", instance="https://other.example.svc.cluster.local/",
+          hostname="other.example.com", namespace="demo"}
+        values: '864000x90'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: PublicCertificateExpiring
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: PublicCertificateExpiring
+        exp_alerts: []
+      - eval_time: 21m
+        alertname: PublicCertificateExpiring
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: public-endpoints
+              instance: https://gateway.example.svc.cluster.local/
+              hostname: hello.example.com
+              namespace: demo
+            exp_annotations:
+              summary: A public certificate expires within 14 days
+              description: The certificate the Gateway serves for hello.example.com expires within 14 days and has not been renewed.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#publiccertificateexpiring
+  - name: The alert PublicCertificateExpiryImminent fires after its time in the failing case and stays quiet in the healthy one
+    interval: 1m
+    input_series:
+      # hello's certificate ends 3 days and 10 minutes after the start of the test: from minute 11
+      # less than 3 days remain.
+      - series: >-
+          probe_ssl_earliest_cert_expiry{job="public-endpoints", instance="https://gateway.example.svc.cluster.local/",
+          hostname="hello.example.com", namespace="demo"}
+        values: '259800x90'
+      # A certificate with 60 days to run, and one with 10, which only the warning is for.
+      - series: >-
+          probe_ssl_earliest_cert_expiry{job="public-endpoints", instance="https://gateway.example.svc.cluster.local/",
+          hostname="long.example.com", namespace="demo"}
+        values: '5184000x90'
+      - series: >-
+          probe_ssl_earliest_cert_expiry{job="public-endpoints", instance="https://gateway.example.svc.cluster.local/",
+          hostname="ten.example.com", namespace="demo"}
+        values: '864000x90'
+      # A certificate with one day to run that a probe of another job reads.
+      - series: >-
+          probe_ssl_earliest_cert_expiry{job="probe/demo/other", instance="https://other.example.svc.cluster.local/",
+          hostname="other.example.com", namespace="demo"}
+        values: '86400x90'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: PublicCertificateExpiryImminent
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: PublicCertificateExpiryImminent
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: PublicCertificateExpiryImminent
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: public-endpoints
+              instance: https://gateway.example.svc.cluster.local/
+              hostname: hello.example.com
+              namespace: demo
+            exp_annotations:
+              summary: A public certificate expires within 3 days
+              description: The certificate the Gateway serves for hello.example.com expires within 3 days and has not been renewed.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#publiccertificateexpiryimminent
+  - name: The alert ProbeNotRunning fires after its time in the failing case and stays quiet in the healthy one
+    interval: 1m
+    input_series:
+      # hello's probe is scraped through the exporter for 10 minutes, and then the scrape fails, as
+      # when the exporter is gone: up is 0 and the probe writes nothing.
+      - series: >-
+          up{job="public-endpoints", instance="https://gateway.example.svc.cluster.local/",
+          hostname="hello.example.com", namespace="demo"}
+        values: '1x10 0x80'
+      - series: >-
+          probe_success{job="public-endpoints", instance="https://gateway.example.svc.cluster.local/",
+          hostname="hello.example.com", namespace="demo"}
+        values: '1x10 stale'
+      # The redirect's probe is scraped throughout, and its target is down: that is
+      # PublicEndpointDown's, not this alert's.
+      - series: >-
+          up{job="public-endpoints", instance="http://gateway.example.svc.cluster.local/",
+          hostname="example.com", namespace="envoy-gateway-system"}
+        values: '1x90'
+      - series: >-
+          probe_success{job="public-endpoints", instance="http://gateway.example.svc.cluster.local/",
+          hostname="example.com", namespace="envoy-gateway-system"}
+        values: '0x90'
+      # The scrape of another job's probe, a Probe that sets no job name, fails throughout.
+      - series: >-
+          up{job="probe/demo/other", instance="https://other.example.svc.cluster.local/",
+          hostname="other.example.com", namespace="demo"}
+        values: '0x90'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: ProbeNotRunning
+        exp_alerts: []
+      # The scrape fails from minute 11, so the alert is pending until minute 21.
+      - eval_time: 20m
+        alertname: ProbeNotRunning
+        exp_alerts: []
+      - eval_time: 21m
+        alertname: ProbeNotRunning
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: public-endpoints
+              instance: https://gateway.example.svc.cluster.local/
+              hostname: hello.example.com
+              namespace: demo
+            exp_annotations:
+              summary: A probe of a public hostname writes no samples
+              description: The probe of hello.example.com has not been scraped through the exporter for 10 minutes, so the hostname is not being checked.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#probenotrunning
+  - name: The alert ProbeNotRunning stays quiet on a cluster that declares no Probe
+    interval: 1m
+    input_series:
+      # The exporter runs and its own metrics are scraped, and no Probe of the public hostnames is
+      # declared, so there is no scrape of the job public-endpoints at all.
+      - series: >-
+          up{job="blackbox-exporter", instance="192.0.2.1:9115"}
+        values: '1x90'
+      # A target of another job is down throughout, which is that job's alert to raise.
+      - series: >-
+          up{job="node-exporter", instance="192.0.2.2:9100"}
+        values: '0x90'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: ProbeNotRunning
+        exp_alerts: []
+      - eval_time: 90m
+        alertname: ProbeNotRunning
+        exp_alerts: []

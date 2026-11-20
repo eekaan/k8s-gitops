@@ -12,7 +12,7 @@
 
 server:
   # The Service, the StatefulSet and the ServiceMonitor are all named victoria-logs, which is what
-  # the collector sends to and an operator forwards a port to.
+  # vmauth sends to.
   fullnameOverride: victoria-logs
   # Two weeks covers looking back over a working week and the one before it, as Prometheus keeps its
   # metrics. Whole days older than that are dropped.
@@ -30,8 +30,17 @@ server:
     requests:
       cpu: 100m
       memory: 256Mi
+  # Prometheus presents the store's own credential, the username and password of the Secret
+  # victoria-logs-auth, which credential.yaml has External Secrets write.
   serviceMonitor:
     enabled: true
+    basicAuth:
+      username:
+        name: victoria-logs-auth
+        key: username
+      password:
+        name: victoria-logs-auth
+        key: password
   # The chart's pod context sets no seccomp profile; the runtime's default is what the restricted
   # Pod Security level requires. Its other defaults already meet the rest.
   podSecurityContext:

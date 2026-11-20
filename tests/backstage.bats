@@ -215,7 +215,7 @@ of_backstage() {
 }
 
 @test "Backstage is selected by overlay entries and builds nothing when it is not" {
-  local dependency dependencies=(cloudnative-pg plugin-barman-cloud prometheus-operator-crds external-secrets openbao-store gateway-public cilium)
+  local dependency dependencies=(cloudnative-pg plugin-barman-cloud prometheus-operator-crds external-secrets openbao-store gateway-public cilium blackbox-exporter)
   # The overlay selects it with two entries, its namespace directory and its ks.yaml, and builds the
   # namespace, the defaults every namespace directory holds, the namespace's default deny, and the
   # Kustomization.
@@ -460,10 +460,14 @@ entities() {
   [ "$(yq -N -o json -I0 'select(.kind == "NetworkPolicy" and .metadata.namespace == "backstage") | .spec' "$OVERLAY")" \
     = '{"podSelector":{},"policyTypes":["Ingress","Egress"]}' ]
   yq -o json -I0 '.spec.template.metadata.labels' "$DEPLOYMENT" >"$BATS_TEST_TMPDIR/labels.json"
-  [ -z "$(yq -N 'select(.kind == "CiliumNetworkPolicy" and (.spec.endpointSelector.matchExpressions // [] | length) > 0) | .metadata.name' "$BUILT")" ]
+  # A policy selects the pod by its labels and by the requirements of its matchExpressions, which
+  # the database's policies select by; an operator this test does not evaluate fails it.
+  [ -z "$(yq -N 'select(.kind == "CiliumNetworkPolicy") | .spec.endpointSelector.matchExpressions // [] | .[] | select(.operator != "Exists" and .operator != "DoesNotExist") | .key' "$BUILT")" ]
   [ "$(yq -N -o json -I0 'select(.kind == "CiliumNetworkPolicy")' "$BUILT" | jq -s -c --slurpfile labels "$BATS_TEST_TMPDIR/labels.json" '
-      [ .[] | select(.spec.endpointSelector.matchLabels | to_entries | all(.[]; $labels[0][.key] == .value)) | .spec.egress[]? ] | sort')" \
-    = '[{"toEndpoints":[{"matchLabels":{"cnpg.io/cluster":"backstage-db","cnpg.io/podRole":"instance"}}],"toPorts":[{"ports":[{"port":"5432","protocol":"TCP"}]}]},{"toEndpoints":[{"matchLabels":{"k8s:io.kubernetes.pod.namespace":"kube-system","k8s:k8s-app":"kube-dns"}}],"toPorts":[{"ports":[{"port":"53","protocol":"UDP"},{"port":"53","protocol":"TCP"}]}]}]' ]
+      [ .[] | select((.spec.endpointSelector.matchLabels // {} | to_entries | all(.[]; $labels[0][.key] == .value))
+          and (.spec.endpointSelector.matchExpressions // [] | all(.[]; . as $e | ($labels[0] | has($e.key)) == ($e.operator == "Exists"))))
+        | .spec.egress[]? ] | sort')" \
+    = '[{"toEndpoints":[{"matchExpressions":[{"key":"cnpg.io/cluster","operator":"Exists"}],"matchLabels":{"cnpg.io/podRole":"instance"}}],"toPorts":[{"ports":[{"port":"5432","protocol":"TCP"}]}]},{"toEndpoints":[{"matchLabels":{"k8s:io.kubernetes.pod.namespace":"kube-system","k8s:k8s-app":"kube-dns"}}],"toPorts":[{"ports":[{"port":"53","protocol":"UDP"},{"port":"53","protocol":"TCP"}]}]}]' ]
   # The application's three generated ConfigMaps are the tree's files as they are: Flux substitutes
   # none of them. The database component's ConfigMap of the dump job's scripts is not one of them.
   [ "$(yq -N 'select(.kind == "ConfigMap" and (.metadata.name | test("^backstage-(values|config|catalogue)-[a-z0-9]+$"))) | .metadata.name | sub("-[a-z0-9]+$"; "")' "$BUILT" | LC_ALL=C sort | paste -sd, -)" \
@@ -512,11 +516,14 @@ entities() {
   [ "$(yq '.spec.strategy.type' "$DEPLOYMENT")" = Recreate ]
   [ -z "$(yq -N 'select(.kind == "PodDisruptionBudget") | .metadata.name' "$BUILT" "$RENDERED")" ]
   # The database is the component's: the Kustomization takes it for the cluster backstage-db, which
-  # yields one Cluster of three instances and its PodMonitor, and Backstage reads its connection
-  # from the keys of the Secret the operator makes for it.
+  # yields one Cluster of three instances by that name, beside which a restore adds one of its own
+  # (docs/runbooks/postgres-restore.md), and its PodMonitor, and Backstage reads its connection from
+  # the keys of the Secret the operator makes for it.
   [ "$(yq '.spec.components | map(select(test("/components/cnpg-cluster$"))) | length' "$KS")" -eq 1 ]
   [ "$(yq '.spec.postBuild.substitute.CNPG_CLUSTER_NAME' "$KS")" = backstage-db ]
-  cluster="$(only "$BUILT" Cluster)"
+  cluster="$(yq '.spec.postBuild.substitute.CNPG_CLUSTER_NAME' "$KS")"
+  [ "$(NAME="$cluster" yq -N 'select(.kind == "Cluster" and .metadata.name == strenv(NAME)) | .metadata.name' "$BUILT" | grep -c .)" -eq 1 ] ||
+    { echo "$BUILT holds no one Cluster $cluster"; return 1; }
   [ "$cluster" = backstage-db ]
   [ "$(object "$BUILT" Cluster "$cluster" | yq '.metadata.namespace')" = backstage ]
   [ "$(object "$BUILT" Cluster "$cluster" | yq '.spec.instances')" -eq 3 ]

@@ -68,6 +68,18 @@ no-pod:
     reason: the kubelet, a service of Talos itself
   - rule: cilium-vxlan
     reason: the kernel's VXLAN device, which Cilium makes for its overlay
+  - rule: cilium-wireguard
+    reason: Cilium's WireGuard device, which the agent creates in the kernel and which listens on the
+      node's addresses without the agent's pod declaring the port
   - rule: cilium-health
     reason: Cilium's health checks between nodes, on a port the agent opens on its node without
       declaring it in its pod
+  - rule: linstor-satellite
+    reason: LINSTOR's satellites, which the Piraeus operator creates at run time on the host network
+      from its own template, so no pod of the render declares their port
+  - rule: drbd
+    reason: DRBD's replication, which the kernel module serves on a port of LINSTOR's range for each
+      volume a node holds
+  - rule: drbd-reactor
+    reason: the DRBD reactor's metrics, which it serves beside each satellite, in the pod the Piraeus
+      operator creates at run time on the host network

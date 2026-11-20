@@ -8,19 +8,41 @@ metadata:
 spec:
   path: ./apps/base/kromgo/kromgo/app
   targetNamespace: kromgo
+  # The component limits the route to its default of 300 requests a minute on each proxy: every
+  # badge request runs a query on Prometheus, and kromgo keeps no result and limits nothing itself.
+  components:
+    - ../../../../../components/ratelimit
+  postBuild:
+    substitute:
+      RATELIMIT_ROUTE: kromgo
   # The release's ServiceMonitor is of the Prometheus Operator's kind, which exists once
   # prometheus-operator-crds is Ready, and its route names the public Gateway. It queries the
   # stack's Prometheus by its Service at each request, not at start: a badge answers with an error
   # until the Prometheus does, so the stack's application is not waited for. Its
-  # CiliumNetworkPolicy is a kind Cilium's operator defines.
+  # CiliumNetworkPolicy is a kind Cilium's operator defines, its rate limit a kind
+  # envoy-gateway-crds defines, which gateway-public waits for through envoy-gateway, and its
+  # route's Probe is answered by the blackbox exporter.
   dependsOn:
     - name: prometheus-operator-crds
     - name: gateway-public
     - name: cilium
+    - name: blackbox-exporter
   # Ready once the release is, which is once both pods answer their readiness endpoint: kromgo
   # listens only after it has read its configuration and compiled every expression in it, so a
-  # configuration it refuses keeps this from Ready.
+  # configuration it refuses keeps this from Ready; and once the controller has accepted the rate
+  # limit at its generation, as it reports a policy it cannot translate not accepted
+  # (components/ratelimit).
   wait: true
+  healthCheckExprs:
+    - apiVersion: gateway.envoyproxy.io/v1alpha1
+      kind: BackendTrafficPolicy
+      current: >-
+        has(status.ancestors) && size(status.ancestors) > 0 && status.ancestors.all(a,
+        a.conditions.exists(c, c.type == 'Accepted' && c.status == 'True' && c.observedGeneration
+        == metadata.generation))
+      failed: >-
+        has(status.ancestors) && status.ancestors.exists(a, a.conditions.exists(c, c.type ==
+        'Accepted' && c.status == 'False' && c.observedGeneration == metadata.generation))
   sourceRef:
     kind: ExternalArtifact
     name: kromgo

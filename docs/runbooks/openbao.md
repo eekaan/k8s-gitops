@@ -1,8 +1,9 @@
 # OpenBao
 
 OpenBao holds the cluster's runtime secrets ([kubernetes.md](../kubernetes.md#openbao)). It unseals
-itself with the key in the Secret `openbao-seal-1`, and the operator keeps its recovery keys and a
-copy of that key in a file encrypted to the Talos age key
+itself with the seal keys its seal stanza names, each from the Secret of its id: the current key,
+`openbao-seal-1` today, and after a [rotation](#rotating) the key before it as well. The operator
+keeps its recovery keys and a copy of those seal keys in a file encrypted to the Talos age key
 ([ADR 0016](../adr/0016-openbao-unseals-itself-and-the-operator-keeps-the-recovery-keys.md)). This
 runbook covers the first initialisation, checking it, a first initialisation that failed, a member
 that does not rejoin, bringing the seal key back, restoring access with the recovery keys, listing
@@ -10,7 +11,9 @@ and checking the snapshots of the raft storage, restoring one, and rotating.
 
 Commands run through the cluster's kubeconfig, `talos/<cluster>/clusterconfig/kubeconfig`, which
 `just cluster-kubeconfig` fetches. The recipes read the Talos age key from `SOPS_AGE_KEY_FILE`, or
-`SOPS_AGE_KEY`, outside the repository; `<file>` is the custody file `just bao-recovery` writes.
+`SOPS_AGE_KEY`, outside the repository, and the ids of the seal keys from the seal stanza of the
+checkout they run from; `<file>` is the custody file `just bao-recovery` writes or, after a rotation
+of the seal key, the one `just bao-seal-keep` writes.
 
 ## First initialisation
 
@@ -18,9 +21,9 @@ After the merge, Flux does everything up to the recovery keys, in this order:
 
 1. Once `external-secrets`, `cert-manager`, `linstor-cluster` and `prometheus-operator-crds` are
    Ready, Flux applies `openbao`.
-2. External Secrets writes the Secret `openbao-seal-1` from its generator, once: the ExternalSecret
-   `openbao-seal-1` reports `SecretSynced`. cert-manager issues the CA `openbao-ca` and then the
-   listener's certificate `openbao-tls`: both Certificates report Ready.
+2. External Secrets writes the seal Secrets the stanza names, `openbao-seal-1` today, each from its
+   generator, once: each ExternalSecret of that name reports `SecretSynced`. cert-manager issues the
+   CA `openbao-ca` and then the listener's certificate `openbao-tls`: both Certificates report Ready.
 3. helm-controller installs the chart. In `openbao-0`, the init container `initialize-guard` finds
    no data of its own and neither `data-openbao-1` nor `data-openbao-2`, and decides to initialise;
    its log is empty, and it exits 0. The server then initialises OpenBao, revokes the root token it
@@ -39,9 +42,11 @@ After the merge, Flux does everything up to the recovery keys, in this order:
 Then the operator, right away, before anything else logs in as the role `operator`:
 
 7. `just bao-recovery <file>`, with `<file>` a new file outside the repository, beside the Talos age
-   key. It makes the recovery keys, writes them with the seal key to `<file>`, encrypted to the Talos
-   age key's recipient, opens the file again with the Talos age key, has OpenBao commit the keys,
-   and prints only where it wrote them. Keep the file where the Talos age key is kept; it holds the
+   key. It makes the recovery keys, writes them with the seal keys the servers mount to `<file>`,
+   encrypted to the Talos age key's recipient, opens the file again with the Talos age key, has
+   OpenBao commit the keys, and prints only where it wrote them. Before it asks OpenBao for anything
+   it checks that the servers run the seal stanza of the checkout, and reads the Secret of each key
+   it names. Keep the file where the Talos age key is kept; it holds the
    only copy of the recovery keys. If it refuses because OpenBao holds recovery keys already,
    someone else made them and holds them: the store is not trusted. Rebuild it as
    [a first initialisation that failed](#a-first-initialisation-that-failed) says, while it holds no
@@ -88,9 +93,10 @@ Each of these only reads:
   the other two: `Initialized true`, `Sealed false`, `Seal Type static`, `HA Enabled true`, one member
   `HA Mode active` and two `standby`; after step 7, `Total Recovery Shares 5` and `Threshold 3`.
 - `kubectl --namespace openbao get pvc`: three claims `data-openbao-N`, Bound.
-- `kubectl --namespace openbao get externalsecret,certificate`: `openbao-seal-1`, `openbao-ca` and
-  `openbao-tls` Ready.
-- `kubectl --namespace openbao get secret openbao-seal-1 --output jsonpath='{.immutable}'`: `true`.
+- `kubectl --namespace openbao get externalsecret,certificate`: the ExternalSecret of each seal key
+  the stanza names, `openbao-seal-1` today, `openbao-ca` and `openbao-tls` Ready.
+- `kubectl --namespace openbao get secret openbao-seal-1 --output jsonpath='{.immutable}'`, and the
+  same for each other seal key the stanza names: `true`.
 - `kubectl get clustersecretstore openbao`: Ready `True`.
 - `kubectl --namespace demo get externalsecret hello`: `SecretSynced` once step 8 is done. To compare
   the value the pods hold with the Secret's, printing a digest of each and neither value:
@@ -113,7 +119,7 @@ have joined, it is not safe: that store holds what nothing else does.
 
 1. Fix the cause, which the server's log names, through a pull request.
 2. Delete the pod and its claim, `kubectl --namespace openbao delete pod openbao-0` and
-   `kubectl --namespace openbao delete pvc data-openbao-0`. Keep the Secret `openbao-seal-1`, the
+   `kubectl --namespace openbao delete pvc data-openbao-0`. Keep the seal Secrets, the
    certificates and everything else. The StatefulSet makes a new claim, the guard finds no data and
    no other claim, and `openbao-0` initialises again.
 
@@ -156,20 +162,33 @@ pull request.
 
 ## Bringing the seal key back
 
-A member that restarts without the Secret `openbao-seal-1` does not start, as its volume cannot be
-mounted; one that starts with a different key logs that it cannot unseal. The storage stays sealed on
-the volumes either way, and comes back with the key.
+A member that restarts without one of the seal Secrets the stanza names, `openbao-seal-1` today and
+after a rotation the previous key's too, does not start, as its volume cannot be mounted; one that
+starts with a different key logs that it cannot unseal. The storage stays sealed on the volumes
+either way, and comes back with the key.
 
-1. `just bao-seal-restore <file>` writes the key from the file into the Secret, immutable, as
-   External Secrets made it, and prints no key. A Secret that holds the same key is left alone. One
-   that holds another key, which External Secrets makes only when both the Secret and the
-   ExternalSecret's record of its sync are gone, is kept: once the members fail to unseal with it,
+1. `just bao-seal-restore <file>` writes the keys from the file into the seal Secrets the stanza of
+   the checkout names, each immutable, as External Secrets made it, and prints no key: the current
+   key, which the file holds as its seal, and after a rotation the previous key, which the custody
+   file `just bao-seal-keep` wrote holds as its previous seal. A file whose seal is not the current
+   key, such as one written before the last rotation, is refused, saying which file to give. A Secret
+   that holds the file's key is left alone. One that holds another key, which External Secrets makes
+   only when both the Secret and the ExternalSecret's record of its sync are gone, is kept, and
+   nothing is written: once the members fail to unseal with it,
    `just bao-seal-restore <file> --replace` deletes it and writes the file's key. It first writes
-   the key it replaces to a new file, `<file>.replaced-<time>.age`, encrypted to the Talos age key
-   and opened again with it, in case that key, not the file's, sealed the storage; when it cannot,
+   the keys it replaces to a new file, `<file>.replaced-<time>.age`, encrypted to the Talos age key
+   and opened again with it, in case one of them, not the file's, sealed the storage; when it cannot,
    it deletes nothing. Keep that file with the other until the members unseal.
+   `just bao-seal-restore <file> --check` only compares, and writes nothing: it reads the seal stanza
+   the servers run from their ConfigMap `openbao-config`, which must name the keys the checkout names,
+   and checks that the file holds the current key, naming both mismatches in one run; only then does
+   it compare each Secret with the file, saying that the Secret holds the key in `<file>` and exiting
+   0, or failing naming a Secret that holds another key or does not exist. It fails, too, for a file
+   that holds no seal key and without the ConfigMap; with `--replace` as well it refuses.
+   `just cluster-last-copies` runs it before the cluster is taken down
+   ([rebuild.md](rebuild.md#taking-it-down)).
 2. Delete the members that do not start; each starts again and unseals. External Secrets leaves the
-   Secret alone: it has synced the ExternalSecret already, and an ExternalSecret made again finds an
+   Secrets alone: it has synced each ExternalSecret already, and an ExternalSecret made again finds an
    immutable Secret and keeps its key.
 
 Without the file, an etcd snapshot taken while the Secret existed holds it
@@ -334,9 +353,12 @@ a restore reads. Only a restore into a store that unseals with the seal key says
 
 The snapshots cover the loss of the three volumes, or of the cluster, while the operator's custody
 file is kept. Everything written after the snapshot restored is lost, up to six hours of it. They do
-not cover the loss of the seal key, which the file holds and the Secret `openbao-seal-1` did: a snapshot is
+not cover the loss of the seal keys, which the file holds and the seal Secrets did: a snapshot is
 ciphertext that opens only under the seal key its store had, and OpenBao refuses to restore it into a
-store whose seal differs; forcing it with `sys/storage/raft/snapshot-force` installs data no key opens.
+store whose seal holds no key of that id; forcing it with `sys/storage/raft/snapshot-force` installs
+data no key opens. A snapshot taken before the last rotation of the seal key needs the previous key,
+which the stanza keeps until the next rotation, and one taken before the rotation before that
+restores into the tree as it stands no more ([Rotating](#rotating)).
 Nor do they cover the loss of the Talos age key, which decrypts them. With the custody file lost
 and the Secret gone, the store is started again empty and every secret is written again
 ([kubernetes.md](../kubernetes.md#when-something-is-lost)).
@@ -356,20 +378,23 @@ operator's, so that `just bao-root` can run the restore:
    restored among them. `flux suspend kustomization openbao-snapshots`; if the CronJob already
    exists, also `kubectl --namespace openbao patch cronjob openbao-snapshots --patch
    '{"spec":{"suspend":true}}'`. Step 7 undoes both.
-2. **Put the seal key in place.** The Secret `openbao-seal-1` must hold the key the snapshot's store had,
-   which `just bao-seal-restore <file>` writes from the custody file (it leaves a Secret that holds the same
-   key alone, and replaces another only with `--replace`,
-   [above](#bringing-the-seal-key-back)).
-   - With the cluster running and only the volumes lost, the Secret is there; check it with
-     `just bao-seal-restore <file>`, which changes nothing when it matches.
-   - In a rebuilt cluster the Secret has to exist before the first member starts, or External Secrets makes a new
-     key. Once Flux has made the namespace `openbao`, and before it applies the application
-     (`flux get kustomization openbao` shows it waiting for its dependencies),
+2. **Put the seal keys in place.** The Secrets of every id the stanza names, `openbao-seal-1` today
+   and after a rotation the previous key's too, must hold the keys the snapshot's store had, which
+   `just bao-seal-restore <file>` writes from the custody file (it leaves a Secret that holds the
+   same key alone, and replaces another only with `--replace`,
+   [above](#bringing-the-seal-key-back)). After a rotation `<file>` is the custody file
+   `just bao-seal-keep` wrote, which holds both keys; the one written before the rotation is refused.
+   - With the cluster running and only the volumes lost, the Secrets are there; check them with
+     `just bao-seal-restore <file> --check`, which changes nothing.
+   - In a rebuilt cluster the Secrets have to exist before the first member starts, or External
+     Secrets makes new keys. Once Flux has made the namespace `openbao`, and before it applies the
+     application (`flux get kustomization openbao` shows it waiting for its dependencies),
      `flux suspend kustomization openbao`, then `just bao-seal-restore <file>`, then
-     `flux resume kustomization openbao`. The ExternalSecret `openbao-seal-1` finds the Secret and keeps its key.
+     `flux resume kustomization openbao`. The ExternalSecret of each id finds its Secret and keeps
+     its key.
 3. **Start the store empty.** With the cluster running, delete the three pods and the three claims, as
    [a first initialisation that failed](#a-first-initialisation-that-failed) says: the members start from nothing,
-   `openbao-0` initialises with the seal key in the Secret, and the others join it. In a rebuilt cluster the
+   `openbao-0` initialises with the seal keys in the Secrets, and the others join it. In a rebuilt cluster the
    members start empty by themselves. Wait until all three are Ready, as
    [first initialisation](#first-initialisation) steps 3 and 4 say.
 4. **Make recovery keys for the new store**: `just bao-recovery <new file>`, a new file beside the custody
@@ -439,20 +464,87 @@ operator's, so that `just bao-root` can run the restore:
   member reloads it within 30 seconds. To replace the CA, delete the Secret `openbao-ca`, then
   `openbao-tls`; cert-manager issues both again, and the store and the monitor read the new CA from
   the Secret.
-- **The seal key**, through a pull request: add a second generator and ExternalSecret,
-  `openbao-seal-2`, beside the first in `seal.yaml`, and mount it in `extraVolumes`; in the seal
-  stanza, make `openbao-seal-2` the current key and `openbao-seal-1` the previous key
-  (`previous_key_id`, `previous_key`). Each member unseals with either and seals the root key again
-  with the current one ([static seal](https://openbao.org/docs/configuration/seal/static/)). Once
-  every member has restarted on the new configuration, a second pull request removes the previous
-  key and `openbao-seal-1`. Keep a copy of the new key encrypted beside the recovery keys, without
-  printing it:
+- **The seal key**, one pull request per rotation, from the current key `openbao-seal-<n>` to a new
+  one, `openbao-seal-<n+1>`; the first rotation goes from `openbao-seal-1` to `openbao-seal-2`:
+  - In `seal.yaml`, a Password generator and an ExternalSecret `openbao-seal-<n+1>`, made as those
+    of `openbao-seal-<n>` beside them are, and those of `openbao-seal-<n-1>` removed, when there are.
+  - In `values.yaml`, `extraVolumes` mounts the Secret `openbao-seal-<n+1>` beside
+    `openbao-seal-<n>`, and no longer `openbao-seal-<n-1>`; in the seal stanza, `current_key_id` is
+    `openbao-seal-<n+1>` with `current_key` its file,
+    `file:///openbao/userconfig/openbao-seal-<n+1>/key`, and `previous_key_id` and `previous_key`
+    are those `openbao-seal-<n>` had as the current key.
 
-  ```sh
-  kubectl --namespace openbao get secret openbao-seal-2 --output json |
-    jq '{seal: {secret: .metadata.name, key_id: .metadata.name, key: (.data.key | @base64d)}}' |
-    age --encrypt --recipient "$(yq '.creation_rules[0].age' talos/.sops.yaml)" --output <new file>
-  ```
+  `tests/openbao.bats` holds the tree to that: every id the stanza names is read from the file of the
+  Secret of that id, which an ExternalSecret of that name makes once. The static seal seals with the
+  current key, stamping its id on what it seals, and opens a sealed value with the current or the
+  previous key by the id the value carries, and with no other
+  ([static seal](https://openbao.org/docs/configuration/seal/static/#key-rotation); `Encrypt` and
+  `Decrypt` in `wrappers/static/static.go` of go-kms-wrapping at the version OpenBao v2.7.2 pins).
+  OpenBao keeps the root key and the recovery key in its storage sealed so, and a member that takes
+  the lead and unseals seals both again, unchanged, with the current key when they carry another id
+  (`UpgradeKeys` in the pinned release's `internal/vault/seal_autoseal.go`, which `postUnseal` in
+  `internal/vault/core.go` runs). After the merge, in this order:
+  1. External Secrets writes the Secret `openbao-seal-<n+1>` from its generator: the ExternalSecret
+     of that name reports `SecretSynced`.
+  2. The members roll, one at a time, as the StatefulSet's pods mount the new Secret: each starts on
+     the new configuration, waits until the new Secret exists, and unseals with either key.
+     `kubectl --namespace openbao get pods` shows them replaced and Ready, and `bao status` in each
+     says `Sealed false`.
+  3. Once a member on the new configuration leads, it seals the recovery key and then the stored
+     root key again with the new key. Its log, `kubectl --namespace openbao logs <pod> --container
+     openbao`, says `upgrading recovery key` and then `upgrading stored keys`, with no
+     `post-unseal upgrade seal keys failed` after them, which is the sign that both are sealed
+     with the new key. A member on the new configuration that is still a standby may log
+     `upgrading recovery key` followed by that warning with `node is not the leader`, which is
+     harmless: a standby runs the same step read-only and cannot write, and the member that takes
+     the lead runs it again (`postUnseal` in the pinned release's `internal/vault/core.go`, which
+     `internal/vault/ha.go` runs on taking the lead and, read-only, on a standby). A pod from before
+     the rotation whose container restarts after that cannot start or unseal until the rollout
+     replaces it, as it mounts no Secret of the new id.
+  4. `just bao-seal-keep <file> <new file>`, with `<file>` the custody file of `openbao-seal-<n>`:
+     it writes `<new file>`, a new file beside the other, with the recovery keys of `<file>`, the
+     key of the Secret `openbao-seal-<n+1>` as its seal and that of `<file>`, which the Secret
+     `openbao-seal-<n>` must still hold, as its previous seal, and checks it with
+     `just bao-seal-restore <new file> --check`. It refuses, writing nothing, while the stanza names
+     no previous key, for a file of another key, and while the new Secret is missing. From then on
+     the recipes take `<new file>`. Keep `<file>` too, with the custody files before it: they
+     hold the keys before the previous one, which a copy of the storage from before the previous
+     rotation needs.
+
+  Never revert an applied rotation, with `git revert` or otherwise: once a member on the new
+  configuration has led, the stored keys are sealed with the new key, and a member started with the
+  stanza from before holds no key of that id and stays sealed. A failed upgrade of the release has
+  the same effect, as helm-controller rolls it back by itself (the root's release defaults,
+  [What the root sets](../kubernetes.md#what-the-root-sets)). Nothing is lost: the rollout stops at
+  the first member that stays sealed, the others keep the store, and the new key's Secret stays, as
+  External Secrets writes it with `creationPolicy: Orphan` and `deletionPolicy: Retain`. So the
+  way out is forward: after a revert, merge the rotation again; after a rollback, helm-controller
+  upgrades the release to the tree again, three times at most, and once
+  `kubectl --namespace openbao get helmrelease openbao` says it is Stalled, put right what failed
+  the upgrade and run `flux reconcile helmrelease openbao -n openbao --reset`, which resets its
+  failure count so that it upgrades again.
+
+  The previous key stays in the stanza until the next rotation, which is what lets a snapshot taken
+  before this rotation restore: its sealed checksums carry the id of the key that sealed them, and a
+  restore opens them with the seal of the store it goes into (`sealer` in the pinned release's
+  `internal/physical/raft/raft.go`, `handleStorageRaftSnapshotWrite` in
+  `internal/vault/logical_system_raft.go`). The bucket keeps the newest 56 snapshots, about 14
+  days of them ([kubernetes.md](../kubernetes.md#raft-snapshots)), and a snapshot taken before
+  step 3 of the previous rotation does not restore into the tree as it stands. So rotate again only
+  once the oldest snapshot `just openbao-snapshots` lists was taken after step 3 of the previous
+  rotation. The Secret of the key a rotation drops, `openbao-seal-<n-1>`, stays in the cluster,
+  orphaned and immutable, and nothing mounts or reads it; delete it once `bao-seal-keep` has passed,
+  `kubectl --namespace openbao delete secret openbao-seal-<n-1>`.
+
+  A rotation changes only what seals the root key. The root key and the keyring it protects stay as
+  they were, so a copy of the storage taken before the rotation, a volume or a snapshot, still opens
+  with the old key, and the root key it yields opens the store's data after the rotation too. A seal
+  key known to be exposed therefore also calls for a new root key, which `bao operator rotate-keys`
+  makes, authorised by a threshold of the recovery keys, after which OpenBao seals it with the seal
+  and stores it ([seal](https://openbao.org/docs/concepts/seal/#unseal-key)), and for a new key in
+  the keyring, `bao operator rotate`, which encrypts what is written from then on
+  ([key rotation](https://openbao.org/docs/internals/rotation/)). What the store held when that copy
+  was taken stays readable from it. Neither step has a recipe.
 
 - **The recovery keys** rotate with three of the current shares, through OpenBao's rotation with
   verification, which the role `operator` may run: `sys/rotate/recovery/init`, `update` with three

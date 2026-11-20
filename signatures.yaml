@@ -1,0 +1,219 @@
+---
+# Every source a chart, the cluster's artifact or the tools image comes from, and how it is signed.
+# scripts/signatures-check (just signatures-check, offline) holds the rows and what Flux builds to
+# each other, and just signatures-verify asks the registries, anonymously, whether each pin of the
+# tree is signed as its row says; docs/kubernetes.md, Signatures, says what each requires, and its
+# table is these rows.
+#
+# The sources are the url of every OCIRepository and HelmRepository Flux builds, the artifact the
+# FluxInstance syncs and the tools image scripts/tools-image publishes; a GitRepository holds no
+# chart and has no row. One row per source, the objects of one url sharing it, and no row a source
+# does not use: the synced artifact first, then the tools image, then every other source sorted by
+# source, byte by byte. A row has exactly the fields of its kind, each one line of text (a reason
+# may fold over lines):
+#   source    the url as the source object writes it, oci://... or https://...
+#   signed    keyless: signed keyless, by one identity:
+#               issuer   the OIDC issuer, as a pattern: ^, a literal with every dot escaped, $
+#               subject  the identity, as a pattern: ^, a literal with every dot escaped up to and
+#                        including the @ that begins its ref, the ref, which alone may hold a
+#                        bracket expression, a quantifier or a group with an alternation, and $,
+#                        the only $; no bare dot, backslash class, lazy quantifier or flag group
+#               from     the publisher's page that states the identity, or the tag whose
+#                        signature's certificate it was read from
+#             key: signed with a key:
+#               key      the path of the PEM public key under signatures/
+#               digest   sha512 where the publisher signs over SHA-512; SHA-256 when left out
+#               from     the publisher's page that gives the key, or where it was read
+#             unsigned: no signature where Flux looks for one:
+#               reason   why: what the publisher's page says about signing, or that it says nothing
+#   cluster   false, with a reason, on a keyless or key row: the source is verified before merge and
+#             not by Flux, and the reason says what the pinned source-controller cannot do or why
+#             nothing on the cluster pulls it. Every key row carries it, as no Secret of a key is
+#             built for a verify block.
+# Every OCIRepository whose row is keyless without cluster: false verifies exactly that issuer and
+# subject (provider cosign, one matchOIDCIdentity, no secretRef), and so does the FluxInstance's
+# patch of its sync source; no other source has a verify block.
+sources:
+  - source: oci://ghcr.io/eekaan/k8s-gitops/manifests
+    signed: keyless
+    issuer: '^https://token\.actions\.githubusercontent\.com$'
+    subject: '^https://github\.com/eekaan/k8s-gitops/\.github/workflows/publish\.yaml@refs/heads/main$'
+    from: docs/kubernetes.md, Publishing, the identity scripts/publish signs and verifies with
+  - source: oci://ghcr.io/eekaan/k8s-gitops/ci-tools
+    signed: keyless
+    issuer: '^https://token\.actions\.githubusercontent\.com$'
+    subject: '^https://github\.com/eekaan/k8s-gitops/\.github/workflows/tools-image\.yaml@refs/heads/main$'
+    from: README.md, The tools image, the identity scripts/tools-image signs and pins with
+    cluster: false
+    reason: nothing on the cluster pulls it; the checks run in it, and just tools-image-pin
+      verifies it before versions.yaml records it
+  - source: https://charts.fairwinds.com/stable
+    signed: unsigned
+    reason: a chart from a Helm repository, unsigned by its kind, as Flux verifies no signature of
+      a chart an https Helm repository serves
+  - source: https://crowdsecurity.github.io/helm-charts
+    signed: unsigned
+    reason: a chart from a Helm repository, unsigned by its kind, as Flux verifies no signature of
+      a chart an https Helm repository serves
+  - source: https://ctrliq.github.io/ascender-operator
+    signed: unsigned
+    reason: a chart from a Helm repository, unsigned by its kind, as Flux verifies no signature of
+      a chart an https Helm repository serves
+  - source: https://open-policy-agent.github.io/gatekeeper/charts
+    signed: unsigned
+    reason: a chart from a Helm repository, unsigned by its kind, as Flux verifies no signature of
+      a chart an https Helm repository serves
+  - source: oci://docker.io/envoyproxy/gateway-helm
+    signed: unsigned
+    reason: Envoy Gateway signs its image keyless and not its chart
+      (gateway.envoyproxy.io/docs/install/verify-images), and the chart has no signature
+  - source: oci://ghcr.io/bjw-s-labs/helm/app-template
+    signed: keyless
+    issuer: '^https://token\.actions\.githubusercontent\.com$'
+    subject: '^https://github\.com/bjw-s-labs/helm-charts/\.github/workflows/chart-release-steps\.yaml@refs/heads/main$'
+    from: the certificate of the signature of 5.3.0
+  - source: oci://ghcr.io/cloudnative-pg/charts/cloudnative-pg
+    signed: keyless
+    issuer: '^https://token\.actions\.githubusercontent\.com$'
+    subject: '^https://github\.com/cloudnative-pg/charts/\.github/workflows/release-publish\.yml@refs/heads/main$'
+    from: the certificate of the signature of 0.29.1
+  - source: oci://ghcr.io/cloudnative-pg/charts/plugin-barman-cloud
+    signed: keyless
+    issuer: '^https://token\.actions\.githubusercontent\.com$'
+    subject: '^https://github\.com/cloudnative-pg/charts/\.github/workflows/release-publish\.yml@refs/heads/main$'
+    from: the certificate of the signature of 0.9.0
+  - source: oci://ghcr.io/controlplaneio-fluxcd/charts/flux-instance
+    signed: keyless
+    issuer: '^https://token\.actions\.githubusercontent\.com$'
+    subject: '^https://github\.com/controlplaneio-fluxcd/charts/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$'
+    from: the certificate of the signature of 0.62.1
+  - source: oci://ghcr.io/controlplaneio-fluxcd/charts/flux-operator
+    signed: keyless
+    issuer: '^https://token\.actions\.githubusercontent\.com$'
+    subject: '^https://github\.com/controlplaneio-fluxcd/charts/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$'
+    from: the certificate of the signature of 0.62.1
+  - source: oci://ghcr.io/dexidp/helm-charts/dex
+    signed: unsigned
+    reason: no signature, and the publisher's chart repository says nothing about signing
+  - source: oci://ghcr.io/emberstack/helm-charts/reflector
+    signed: unsigned
+    reason: no signature, and the publisher's README says nothing about signing
+  - source: oci://ghcr.io/external-secrets/charts/external-secrets
+    signed: keyless
+    issuer: '^https://token\.actions\.githubusercontent\.com$'
+    subject: '^https://github\.com/external-secrets/external-secrets/\.github/workflows/helm\.yml@refs/heads/main$'
+    from: the certificate of the signature of 2.15.0
+  - source: oci://ghcr.io/falcosecurity/charts/falco
+    signed: keyless
+    issuer: '^https://token\.actions\.githubusercontent\.com$'
+    subject: '^https://github\.com/falcosecurity/charts/\.github/workflows/release\.yml@refs/heads/master$'
+    from: the certificate of the signature of 9.2.2
+  - source: oci://ghcr.io/grafana/helm-charts/grafana-operator
+    signed: unsigned
+    reason: no signature, and the publisher's page on installing with Helm says nothing about signing
+  - source: oci://ghcr.io/home-operations/charts-mirror/descheduler
+    signed: keyless
+    issuer: '^https://token\.actions\.githubusercontent\.com$'
+    subject: '^https://github\.com/home-operations/charts-mirror/\.github/workflows/app-builder\.yaml@refs/heads/main$'
+    from: the certificate of the signature of 0.37.0
+  - source: oci://ghcr.io/home-operations/charts-mirror/external-dns
+    signed: keyless
+    issuer: '^https://token\.actions\.githubusercontent\.com$'
+    subject: '^https://github\.com/home-operations/charts-mirror/\.github/workflows/app-builder\.yaml@refs/heads/main$'
+    from: the certificate of the signature of 1.23.0
+  - source: oci://ghcr.io/home-operations/charts-mirror/keda
+    signed: keyless
+    issuer: '^https://token\.actions\.githubusercontent\.com$'
+    subject: '^https://github\.com/home-operations/charts-mirror/\.github/workflows/app-builder\.yaml@refs/heads/main$'
+    from: the certificate of the signature of 2.21.0
+  - source: oci://ghcr.io/home-operations/charts-mirror/metrics-server
+    signed: keyless
+    issuer: '^https://token\.actions\.githubusercontent\.com$'
+    subject: '^https://github\.com/home-operations/charts-mirror/\.github/workflows/app-builder\.yaml@refs/heads/main$'
+    from: the certificate of the signature of 3.14.0
+  - source: oci://ghcr.io/home-operations/charts-mirror/volsync
+    signed: keyless
+    issuer: '^https://token\.actions\.githubusercontent\.com$'
+    subject: '^https://github\.com/home-operations/charts-mirror/\.github/workflows/app-builder\.yaml@refs/heads/main$'
+    from: the certificate of the signature of 0.17.0
+  - source: oci://ghcr.io/kguardian-dev/charts/kguardian
+    signed: keyless
+    issuer: '^https://token\.actions\.githubusercontent\.com$'
+    subject: '^https://github\.com/kguardian-dev/kguardian/\.github/workflows/charts-release\.yaml@refs/tags/chart/v[0-9]+\.[0-9]+\.[0-9]+$'
+    from: the certificate of the signature of 1.29.2
+  - source: oci://ghcr.io/kyverno/charts/kyverno
+    signed: unsigned
+    reason: no signature at the chart; Kyverno signs it keyless into another repository,
+      ghcr.io/kyverno/signatures (kyverno.io/docs/security), which an OCIRepository has no field
+      to read and which this check does not read either
+  - source: oci://ghcr.io/oauth2-proxy/charts/oauth2-proxy
+    signed: keyless
+    issuer: '^https://token\.actions\.githubusercontent\.com$'
+    subject: '^https://github\.com/oauth2-proxy/manifests/\.github/workflows/release\.yaml@refs/heads/main$'
+    from: the certificate of the signature of 10.7.4
+  - source: oci://ghcr.io/open-feature/charts/open-feature-operator
+    signed: key
+    key: signatures/open-feature-operator.pem
+    from: the transparency log entry of the signature of v0.9.4, whose key v0.9.3's shares; the publisher does not publish it
+    cluster: false
+    reason: no Secret of a key is built for a verify block; the pinned source-controller could
+      verify this signature, by an ECDSA P-256 key over SHA-256
+  - source: oci://ghcr.io/openbao/charts/openbao
+    signed: keyless
+    issuer: '^https://token\.actions\.githubusercontent\.com$'
+    subject: '^https://github\.com/openbao/openbao-helm/\.github/workflows/release-chart\.yml@refs/heads/main$'
+    from: the certificate of the signature of 0.30.7
+  - source: oci://ghcr.io/piraeusdatastore/piraeus-operator/piraeus
+    signed: unsigned
+    reason: no signature, and the publisher's chart README says nothing about signing
+  - source: oci://ghcr.io/postfinance/charts/kubelet-csr-approver
+    signed: unsigned
+    reason: no signature, and the publisher's README says nothing about signing
+  - source: oci://ghcr.io/prometheus-community/charts/kube-prometheus-stack
+    signed: unsigned
+    reason: the publisher signs its charts with Helm provenance, a PGP key (its repository's
+      README), which Flux does not verify, and not with cosign
+  - source: oci://ghcr.io/prometheus-community/charts/prometheus-blackbox-exporter
+    signed: unsigned
+    reason: the publisher signs its charts with Helm provenance, a PGP key (its repository's
+      README), which Flux does not verify, and not with cosign
+  - source: oci://ghcr.io/prometheus-community/charts/prometheus-operator-crds
+    signed: unsigned
+    reason: the publisher signs its charts with Helm provenance, a PGP key (its repository's
+      README), which Flux does not verify, and not with cosign
+  - source: oci://ghcr.io/spegel-org/helm-charts/spegel
+    signed: keyless
+    issuer: '^https://token\.actions\.githubusercontent\.com$'
+    subject: '^https://github\.com/spegel-org/spegel/\.github/workflows/release\.yaml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$'
+    from: the certificate of the signature of 0.8.1
+  - source: oci://ghcr.io/stakater/charts/reloader
+    signed: keyless
+    issuer: '^https://token\.actions\.githubusercontent\.com$'
+    subject: '^https://github\.com/stakater/Reloader/\.github/workflows/push-helm-chart\.yaml@refs/heads/master$'
+    from: the certificate of the signature of 2.2.20
+  - source: oci://ghcr.io/vectordotdev/helm-charts/vector
+    signed: unsigned
+    reason: no signature, and the publisher's page on installing with Helm says nothing about signing
+  - source: oci://ghcr.io/victoriametrics/helm-charts/victoria-logs-single
+    signed: keyless
+    issuer: '^https://token\.actions\.githubusercontent\.com$'
+    subject: '^https://github\.com/VictoriaMetrics/helm-charts/\.github/workflows/release\.yaml@refs/heads/master$'
+    from: the certificate of the signature of 0.13.13
+  - source: oci://gsoci.azurecr.io/charts/giantswarm/silence-operator
+    signed: keyless
+    issuer: '^https://oidc\.circleci\.com$'
+    subject: '^https://circleci\.com/api/v2/projects/c8f4d22e-ef11-47ef-ae72-71c531dbae88/pipeline-definitions/70bae409-80ea-5dae-b228-784922f660fa$'
+    from: the certificate of the signature of 0.22.0
+  - source: oci://quay.io/cilium/charts/cilium
+    signed: keyless
+    issuer: '^https://token\.actions\.githubusercontent\.com$'
+    subject: '^https://github\.com/cilium/cilium/\.github/workflows/release\.yaml@refs/heads/main$'
+    from: the certificate of the signature of 1.20.4
+  - source: oci://quay.io/jetstack/charts/cert-manager
+    signed: key
+    key: signatures/cert-manager.pem
+    digest: sha512
+    from: https://cert-manager.io/docs/installation/code-signing/
+    cluster: false
+    reason: signed over SHA-512, and the pinned source-controller builds a key's verifier for
+      SHA-256 alone, so a block would refuse the chart

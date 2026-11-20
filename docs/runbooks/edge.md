@@ -274,9 +274,12 @@ Meanwhile `just gateway-check` fails the dead edge's lines, passes the DNS lines
 hold both addresses, and skips `name hello`. An instance that is gone from the cloud is created
 again by `just infra-apply sto2/edge`, which creates what is missing and drops its recorded host
 keys; a floating IP made again has a new address, which reaches the records only once
-`just cluster-config` has written it to the cluster. A broken one is replaced by
-`just edge-rollout --replace --edge N` ([Replacing one edge](#replacing-one-edge)), which keeps its
-floating IP.
+`just cluster-config` has written it to the cluster and `gateway-public` has reconciled, which
+`flux reconcile kustomization gateway-public` makes it do at once: external-dns reads the addresses
+from the Gateway's annotation, which Flux substitutes from `cluster-config` only when
+`gateway-public` reconciles ([DNS records](../kubernetes.md#dns-records)). A broken one is replaced
+by `just edge-rollout --replace --edge N` ([Replacing one edge](#replacing-one-edge)), which keeps
+its floating IP.
 
 ## A worker that goes
 
@@ -344,6 +347,26 @@ reached through both edges:
 
 ## The way back
 
-- `just infra-destroy sto2/edge` destroys the stack once its name is typed back. The workers'
-  sessions stay down until an edge exists again, and no Service is reached from outside.
+- `just cluster-dns-remove` first, while the cluster runs, with `--check` before it: it takes out
+  of the zone every A record and TXT entry external-dns made for the routes' names, which point at
+  the edges' floating addresses, and leaves external-dns stopped
+  ([rebuild.md](rebuild.md#taking-it-down), step 3).
+- `just infra-destroy sto2/edge` destroys the stack once its name is typed back. Before it plans,
+  it lists the names the tree's routes publish and looks each up at the public resolver, and while
+  one resolves to an address of the stack's, or cannot be looked up, it plans and destroys nothing,
+  naming each by its label under the domain. The resolver answers from its cache for up to a
+  record's TTL, five minutes, so right after the removal the destroy can still refuse: run it again
+  once that time has passed. `just infra-destroy sto2/edge --check` says whether it would refuse,
+  planning nothing; `--ignore-dns` destroys the stack all the same, naming those names
+  ([infrastructure.md](../infrastructure.md#recipes)). The workers' sessions stay down until an
+  edge exists again, and no Service is reached from outside.
 - The stack does not touch the plumbing or cluster stacks, so destroying it leaves them as they are.
+  external-dns stays stopped, and `ExternalDNSSyncStale` fires
+  ([alerts.md](alerts.md#externaldnssyncstale)). It is started again, with the two `flux resume`
+  commands `just cluster-dns-remove` printed, only once the edges are built again
+  (`just infra-apply sto2/edge`), `just cluster-config` has written their addresses to the cluster,
+  and `flux reconcile kustomization gateway-public` has applied them to the Gateway and ended
+  Ready: external-dns reads the addresses from the Gateway's annotation
+  `external-dns.kubernetes.io/target`, which Flux substitutes from `cluster-config` only when
+  `gateway-public` reconciles ([DNS records](../kubernetes.md#dns-records)). Before the edge
+  stack's destroy, those commands start it again as they are.

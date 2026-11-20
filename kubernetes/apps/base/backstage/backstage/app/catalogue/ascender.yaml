@@ -1,0 +1,27 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/catalog-info.json
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: ascender
+  description: Ascender, a web interface, API and job runner for Ansible, at its own hostname behind its own login, with its database from the PostgreSQL component.
+  links:
+    - url: https://github.com/eekaan/k8s-gitops/blob/main/docs/kubernetes.md#ascender
+      title: Documentation
+    - url: https://github.com/eekaan/k8s-gitops/tree/main/kubernetes/apps/base/ascender/ascender
+      title: Manifests
+spec:
+  type: service
+  lifecycle: production
+  owner: group:default/operators
+  system: applications
+  dependsOn:
+    - component:default/ascender-operator
+    - component:default/blackbox-exporter
+    - component:default/cilium
+    - component:default/cloudnative-pg
+    - component:default/external-secrets
+    - resource:default/gateway-public
+    - resource:default/openbao-store
+    - component:default/plugin-barman-cloud
+    - resource:default/prometheus-operator-crds

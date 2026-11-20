@@ -18,6 +18,7 @@ spec:
   owner: group:default/operators
   system: applications
   dependsOn:
+    - component:default/blackbox-exporter
     - component:default/external-secrets
     - resource:default/gateway-public
     - resource:default/linstor-cluster

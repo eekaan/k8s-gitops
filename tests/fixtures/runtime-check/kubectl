@@ -1,0 +1,426 @@
+#!/usr/bin/env bash
+# A stand-in for kubectl against a running cluster, installed by tests/runtime-check.bats as
+# <tmp>/bin/kubectl. It finds its files from its own path, answers from <tmp>/state and keeps what a
+# run changes there:
+#   runtimeclasses      the RuntimeClasses the cluster has, one name a line
+#   namespace.json      the namespace runtime-check, while it exists; a test writes one to stand for
+#                       an earlier run's, or for one the recipe did not make; one without a uid has
+#                       uid-ns-0
+#   ns-appears          a namespace another party makes just after the next read finds none
+#   ns-replace          a namespace another party puts in place of the one there, and of its pods, at
+#                       the call ns-replace-at names: get-serviceaccount-answered (once the
+#                       ServiceAccount default is found), create-net or create-pods (as that create
+#                       is asked), get-pods (as the next read of the pods is asked) or
+#                       get-pods-answered (once it is answered), logs-<pod>-answered (once that
+#                       pod's log is read), delete-namespace (just before the next deletion) or
+#                       delete-namespace-answered (just after it), as when another checkout's run
+#                       deletes this run's namespace as an earlier run's and makes its own
+#   ns-replace-pods/    that party's own pods, each <name>.json, which take the place of the run's
+#   ns-delete           another party deletes the namespace there, and makes none in its place, at the
+#                       call ns-replace-at names: it goes at once, with its pods, or, with
+#                       ns-terminating, is terminating until that many reads have found it so
+#   ns-terminating      how many reads find a deleted namespace still terminating (0)
+#   ns-stuck            a deleted namespace never goes
+#   sa-reads            how many reads find no ServiceAccount default in a new namespace (0)
+#   pods/<name>.json    each pod created, as the recipe sent it, with the uid uid-<name>; a pod that
+#                       carries a uid of its own keeps it, and a create of a name there is refused
+#   scenario/<pod>      how the pod fares, one line: "exit <code>" (the default, 0), "running" (it
+#                       never ends), "waiting <reason> <message>" (its container never starts),
+#                       "rejected <reason> <message>" (the kubelet refuses the pod), "unschedulable
+#                       <message>" (no node takes it), "deadline" (its active deadline ended it) or
+#                       "gone [N]" (it runs for the first N reads of the pods, none by default, and is
+#                       then deleted)
+#   scenario/<pod>.log  what its container printed; the fixture <pod>.log beside this file unless
+#                       the test writes one
+#   first-output        seconds after the pod was created that its first line came (7)
+#   events.json         the namespace's events, a list ([])
+#   fail.<call>         that call fails with an error that names the API server's address; a call
+#                       is get-runtimeclass, get-namespace, create-namespace, create-policies,
+#                       get-serviceaccount, create-net, create-pods, get-pods, get-events, logs-<pod>
+#                       or delete-namespace
+#   refuse.<call>       the API server refuses that call, a create, as one the caller may not make
+#   lost.<call>         that call takes effect, and its answer is lost: it fails as the same error,
+#                       without the errors the API server answered it with
+#   then.<call>         the name of a file of this list, made once that call has taken effect, as when
+#                       a fault starts there (a create or a deletion)
+#   interrupt           INT or TERM, sent to the recipe's process once the call named in
+#                       interrupt-at has been answered
+# A pod with a node affinity on metadata.name runs on the node it names; any other on worker-1,
+# but for one without the affinity created after net, which runs on worker-2.
+# A create goes on past an object it cannot make, as kubectl does, and fails at the end. A delete
+# through --raw takes the DeleteOptions on standard input, and fails as the API server does when
+# their uid precondition is not the namespace's.
+# Every call goes to <tmp>/record/argv as "kubectl ARGS", the manifest a create reads from its
+# standard input to <tmp>/record/created, one JSON document a line, and what changes the cluster, in
+# order, to <tmp>/record/events.
+set -uo pipefail
+
+root=${0%/bin/*}
+state=$root/state
+record=$root/record
+fixtures=$(cat "$state/fixtures")
+printf '%s\n' "kubectl $*" >> "$record/argv"
+event() {
+  printf '%s\n' "$*" >> "$record/events"
+}
+
+namespace='' output='' file='' ignore=0 deadline='' container='' timestamps=0 wait=1 raw=''
+words=()
+for arg; do
+  case $arg in
+    --namespace=*) namespace=${arg#*=} ;;
+    --output=*) output=${arg#*=} ;;
+    --filename=*) file=${arg#*=} ;;
+    --request-timeout=*) deadline=${arg#*=} ;;
+    --ignore-not-found) ignore=1 ;;
+    --wait=false) wait=0 ;;
+    --container=*) container=${arg#*=} ;;
+    --timestamps) timestamps=1 ;;
+    --raw=*) raw=${arg#*=} ;;
+    -*) echo "fake kubectl: unexpected option $arg" >&2 && exit 1 ;;
+    *) words+=("$arg") ;;
+  esac
+done
+[[ $deadline == 30s ]] || { echo "fake kubectl: a call not bounded by --request-timeout=30s" >&2; exit 1; }
+
+# unreachable: fails as kubectl does when the API server does not answer.
+unreachable() {
+  echo "Unable to connect to the server: dial tcp 192.0.2.10:6443: i/o timeout" >&2
+  exit 1
+}
+
+# failing CALL: fails the call when the test asks it to.
+failing() {
+  [[ ! -e $state/fail.$1 ]] || unreachable
+}
+
+# refusing CALL: refuses the create when the test asks it to, as the API server refuses a caller
+# without the right to make what it asks for.
+refusing() {
+  [[ -e $state/refuse.$1 ]] || return 0
+  echo "Error from server (Forbidden): error when creating \"STDIN\": $2 is forbidden: User \"someone\" cannot create resource \"$2\"" >&2
+  exit 1
+}
+
+# answer CALL STATUS: ends the call with STATUS, or, when the test asks it to, as one whose answer was
+# lost.
+answer() {
+  if [[ -e $state/then.$1 ]]; then
+    : > "$state/$(< "$state/then.$1")"
+    rm -f "$state/then.$1"
+  fi
+  [[ ! -e $state/lost.$1 ]] || unreachable
+  exit "$2"
+}
+
+# interrupt_after CALL: interrupts the recipe when the test asks for it at CALL. The recipe is the
+# outermost process above this one whose first argument is the script: the subshells it runs
+# kubectl from carry its arguments too.
+interrupt_after() {
+  local pid argv stat target='' signal
+  [[ -e $state/interrupt && $(cat "$state/interrupt-at" 2> /dev/null) == "$1" ]] || return 0
+  signal=$(< "$state/interrupt")
+  rm -f "$state/interrupt"
+  pid=$PPID
+  while [[ -r /proc/$pid/cmdline ]]; do
+    mapfile -d '' -t argv < "/proc/$pid/cmdline"
+    [[ ${argv[1]-} == */runtime-check ]] || break
+    target=$pid
+    # The fields after the command's name: its state, then its parent's id.
+    stat=$(< "/proc/$pid/stat")
+    read -r _ pid _ <<< "${stat##*) }"
+  done
+  [[ -n $target ]] || { echo "fake kubectl: no recipe process to interrupt" >&2; exit 1; }
+  event "interrupted with $signal"
+  kill "-$signal" "$target"
+}
+
+not_found() {
+  ((ignore)) && exit 0
+  echo "Error from server (NotFound): $1 \"$2\" not found" >&2
+  exit 1
+}
+
+scenario() {
+  cat "$state/scenario/$1" 2> /dev/null || echo "exit 0"
+}
+
+# replace_at CALL: another party's namespace in place of the one there, and its pods in place of the
+# run's, or the one there deleted by another party, when the test asks for it at CALL.
+replace_at() {
+  [[ (-e $state/ns-replace || -e $state/ns-delete) && $(cat "$state/ns-replace-at" 2> /dev/null || echo get-pods) == "$1" ]] || return 0
+  if [[ -e $state/ns-delete ]]; then
+    rm -f "$state/ns-delete" "$state/ns-replace-at"
+    event "another party deleted namespace runtime-check"
+    if [[ -e $state/ns-terminating ]]; then
+      cp "$state/ns-terminating" "$state/ns-left"
+      : > "$state/namespace-deleted"
+    else
+      rm -f "$state/namespace.json" "$state/namespace-deleted" "$state/ns-left" "$state"/pods/*.json
+    fi
+    return 0
+  fi
+  mv "$state/ns-replace" "$state/namespace.json"
+  rm -f "$state/namespace-deleted" "$state/ns-left" "$state/ns-replace-at" "$state"/pods/*.json
+  if [[ -d $state/ns-replace-pods ]]; then
+    find "$state/ns-replace-pods" -name '*.json' -exec cp {} "$state/pods/" \;
+  fi
+  event "another party replaced namespace runtime-check"
+}
+
+# the_namespace: the namespace as the API returns it.
+the_namespace() {
+  jq '.metadata.uid //= "uid-ns-0"' "$state/namespace.json"
+}
+
+# pod_json NAME: the pod as the API returns it: its manifest, the time it was made, its node and its
+# status as its scenario has it.
+created_at=2026-11-19T12:00:00Z
+pod_json() {
+  local name=$1 how node
+  how=$(scenario "$name")
+  node=$(jq -r '[.spec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[]?.matchFields[]?
+      | select(.key == "metadata.name" and .operator == "In") | .values[]] | first // ""' "$state/pods/$name.json")
+  if [[ -z $node ]]; then
+    node=worker-1
+    [[ $name == net || ! -e $state/pods/net.json ]] || node=worker-2
+  fi
+  [[ $how != unschedulable* ]] || node=''
+  jq --arg created "$created_at" --arg node "$node" --arg how "$how" '
+    ($how | split(" ")) as $w | ($w[2:] | join(" ")) as $message
+    | (.spec.containers[0].name) as $container
+    | .metadata += {creationTimestamp: $created, uid: (.metadata.uid // ("uid-" + .metadata.name))}
+    | (if $node != "" then .spec.nodeName = $node else . end)
+    | .status = (
+        if $w[0] == "exit" then
+          ($w[1] | tonumber) as $code
+          | {phase: (if $code == 0 then "Succeeded" else "Failed" end),
+             conditions: [{type: "PodScheduled", status: "True"}],
+             containerStatuses: [{name: $container, state: {terminated: {exitCode: $code, reason: (if $code == 0 then "Completed" else "Error" end)}}}]}
+        elif $w[0] == "running" then
+          {phase: "Running", conditions: [{type: "PodScheduled", status: "True"}],
+           containerStatuses: [{name: $container, state: {running: {startedAt: $created}}}]}
+        elif $w[0] == "waiting" then
+          {phase: "Pending", conditions: [{type: "PodScheduled", status: "True"}],
+           containerStatuses: [{name: $container, state: {waiting: {reason: $w[1], message: $message}}}]}
+        elif $w[0] == "gone" then
+          {phase: "Running", conditions: [{type: "PodScheduled", status: "True"}],
+           containerStatuses: [{name: $container, state: {running: {startedAt: $created}}}]}
+        elif $w[0] == "rejected" then
+          {phase: "Failed", reason: $w[1], message: $message}
+        elif $w[0] == "unschedulable" then
+          {phase: "Pending", conditions: [{type: "PodScheduled", status: "False", reason: "Unschedulable", message: ($w[1:] | join(" "))}]}
+        elif $w[0] == "deadline" then
+          {phase: "Failed", reason: "DeadlineExceeded", message: "Pod was active on the node longer than the specified deadline",
+           conditions: [{type: "PodScheduled", status: "True"}],
+           containerStatuses: [{name: $container, state: {terminated: {exitCode: 137, reason: "Error"}}}]}
+        else error("unknown scenario \($how)") end)' "$state/pods/$name.json"
+}
+
+case "${words[0]-} ${words[1]-}" in
+  "get runtimeclass")
+    failing get-runtimeclass
+    [[ $output == json && ${#words[@]} -eq 3 ]] || { echo "fake kubectl: unexpected $*" >&2; exit 1; }
+    grep -qxF -- "${words[2]}" "$state/runtimeclasses" || not_found runtimeclasses.node.k8s.io "${words[2]}"
+    jq -n --arg name "${words[2]}" '{apiVersion: "node.k8s.io/v1", kind: "RuntimeClass", metadata: {name: $name}, handler: $name}'
+    ;;
+  "get namespace")
+    failing get-namespace
+    [[ ${words[2]-} == runtime-check && $output == json && ${#words[@]} -eq 3 ]] || { echo "fake kubectl: unexpected $*" >&2; exit 1; }
+    if [[ ! -e $state/namespace.json && -e $state/ns-appears ]]; then
+      mv "$state/ns-appears" "$state/namespace.json"
+      event "another party created namespace runtime-check"
+      not_found namespaces runtime-check
+    fi
+    [[ -e $state/namespace.json ]] || not_found namespaces runtime-check
+    if [[ -e $state/namespace-deleted ]]; then
+      left=$(cat "$state/ns-left" 2> /dev/null || echo 0)
+      if [[ ! -e $state/ns-stuck ]] && ((left <= 0)); then
+        rm -f "$state/namespace.json" "$state/namespace-deleted" "$state/ns-left" "$state"/pods/*.json
+        event "namespace runtime-check gone"
+        not_found namespaces runtime-check
+      fi
+      echo $((left - 1)) > "$state/ns-left"
+      the_namespace | jq '.status.phase = "Terminating"'
+    else
+      the_namespace
+    fi
+    ;;
+  "delete namespace")
+    failing delete-namespace
+    replace_at delete-namespace
+    [[ ${words[2]-} == runtime-check && ${#words[@]} -eq 3 && $wait == 0 ]] || { echo "fake kubectl: unexpected $*" >&2; exit 1; }
+    [[ -e $state/namespace.json ]] || not_found namespaces runtime-check
+    if [[ ! -e $state/namespace-deleted ]]; then
+      cat "$state/ns-terminating" 2> /dev/null > "$state/ns-left" || echo 0 > "$state/ns-left"
+      : > "$state/namespace-deleted"
+    fi
+    event "deleted namespace runtime-check"
+    echo 'namespace "runtime-check" deleted'
+    ;;
+  "delete ")
+    failing delete-namespace
+    replace_at delete-namespace
+    [[ $raw == /api/v1/namespaces/runtime-check && $file == - && ${#words[@]} -eq 1 ]] || { echo "fake kubectl: unexpected $*" >&2; exit 1; }
+    options=$(cat)
+    [[ $(jq -r '.kind' <<< "$options") == DeleteOptions ]] || { echo "fake kubectl: no DeleteOptions to delete with" >&2; exit 1; }
+    if [[ ! -e $state/namespace.json ]]; then
+      echo 'Error from server (NotFound): namespaces "runtime-check" not found' >&2
+      exit 1
+    fi
+    uid=$(the_namespace | jq -r .metadata.uid)
+    precondition=$(jq -r '.preconditions.uid // ""' <<< "$options")
+    if [[ -n $precondition && $precondition != "$uid" ]]; then
+      echo "Error from server (Conflict): Operation cannot be fulfilled on namespaces \"runtime-check\": Precondition failed: UID in precondition: $precondition, UID in object meta: $uid" >&2
+      exit 1
+    fi
+    if [[ ! -e $state/namespace-deleted ]]; then
+      cat "$state/ns-terminating" 2> /dev/null > "$state/ns-left" || echo 0 > "$state/ns-left"
+      : > "$state/namespace-deleted"
+    fi
+    event "deleted namespace runtime-check"
+    the_namespace | jq -c '.status.phase = "Terminating"'
+    replace_at delete-namespace-answered
+    answer delete-namespace 0
+    ;;
+  "create "*)
+    [[ ${#words[@]} -eq 1 && $file == - && ($output == name || $output == json) ]] || { echo "fake kubectl: unexpected $*" >&2; exit 1; }
+    manifest=$(cat)
+    jq -c . <<< "$manifest" >> "$record/created"
+    kinds=$(jq -r '[.items[]?.kind // .kind] | join(" ")' <<< "$manifest")
+    case $kinds in
+      Namespace | "Namespace NetworkPolicy CiliumNetworkPolicy") call=create-namespace resource=namespaces ;;
+      "NetworkPolicy CiliumNetworkPolicy") call=create-policies resource=networkpolicies.networking.k8s.io ;;
+      Pod) call=create-net resource=pods ;;
+      "Pod Pod") call=create-pods resource=pods ;;
+      *) echo "fake kubectl: unexpected objects to create: $kinds" >&2 && exit 1 ;;
+    esac
+    failing "$call"
+    refusing "$call" "$resource"
+    replace_at "$call"
+    # show KIND NAME OBJECT: what kubectl prints of an object it made.
+    show() {
+      if [[ $output == json ]]; then
+        jq . <<< "$3"
+      else
+        echo "$1/$2"
+      fi
+    }
+    status=0 refusals=''
+    while IFS= read -r object; do
+      kind=$(jq -r .kind <<< "$object")
+      name=$(jq -r .metadata.name <<< "$object")
+      if [[ $kind == Namespace ]]; then
+        if [[ -e $state/namespace.json ]]; then
+          refusals+="Error from server (AlreadyExists): error when creating \"STDIN\": namespaces \"$name\" already exists"$'\n'
+          status=1
+          continue
+        fi
+        made=$(($(cat "$state/ns-made" 2> /dev/null || echo 0) + 1))
+        echo "$made" > "$state/ns-made"
+        object=$(jq -c --arg uid "uid-ns-$made" '.metadata.uid = $uid | .status.phase = "Active"' <<< "$object")
+        printf '%s\n' "$object" > "$state/namespace.json"
+        cat "$state/sa-reads" 2> /dev/null > "$state/sa-left" || echo 0 > "$state/sa-left"
+        event "created namespace $name"
+        show namespace "$name" "$object"
+        continue
+      fi
+      [[ $(jq -r .metadata.namespace <<< "$object") == runtime-check ]] || { echo "fake kubectl: $kind/$name is not in runtime-check" >&2; exit 1; }
+      if [[ ! -e $state/namespace.json || -e $state/namespace-deleted ]]; then
+        refusals+="Error from server (NotFound): error when creating \"STDIN\": namespaces \"runtime-check\" not found"$'\n'
+        status=1
+        continue
+      fi
+      case $kind in
+        Pod)
+          if [[ -e $state/pods/$name.json ]]; then
+            refusals+="Error from server (AlreadyExists): error when creating \"STDIN\": pods \"$name\" already exists"$'\n'
+            status=1
+            continue
+          fi
+          object=$(jq -c '.metadata.uid //= "uid-" + .metadata.name' <<< "$object")
+          printf '%s\n' "$object" > "$state/pods/$name.json"
+          event "created pod $name"
+          show pod "$name" "$object"
+          ;;
+        NetworkPolicy)
+          event "created networkpolicy $name"
+          show networkpolicy.networking.k8s.io "$name" "$object"
+          ;;
+        CiliumNetworkPolicy)
+          event "created ciliumnetworkpolicy $name"
+          show ciliumnetworkpolicy.cilium.io "$name" "$object"
+          ;;
+      esac
+    done < <(jq -c '.items[]? // .' <<< "$manifest")
+    interrupt_after "$call"
+    [[ -e $state/lost.$call ]] || printf '%s' "$refusals" >&2
+    answer "$call" "$status"
+    ;;
+  "get serviceaccount")
+    failing get-serviceaccount
+    [[ $namespace == runtime-check && ${words[2]-} == default && $output == json ]] || { echo "fake kubectl: unexpected $*" >&2; exit 1; }
+    [[ -e $state/namespace.json ]] || not_found serviceaccounts default
+    left=$(cat "$state/sa-left" 2> /dev/null || echo 0)
+    if ((left > 0)); then
+      echo $((left - 1)) > "$state/sa-left"
+      not_found serviceaccounts default
+    fi
+    jq -n '{kind: "ServiceAccount", metadata: {namespace: "runtime-check", name: "default"}}'
+    replace_at get-serviceaccount-answered
+    ;;
+  "get pods")
+    failing get-pods
+    [[ $namespace == runtime-check && $output == json && ${#words[@]} -eq 2 ]] || { echo "fake kubectl: unexpected $*" >&2; exit 1; }
+    replace_at get-pods
+    for pod in "$state"/pods/*.json; do
+      [[ -e $pod ]] || continue
+      name=${pod##*/}
+      name=${name%.json}
+      how=$(scenario "$name")
+      if [[ $how == gone* ]]; then
+        listed=$(cat "$state/scenario/$name.listed" 2> /dev/null || echo 0)
+        limit=${how#gone}
+        limit=${limit// /}
+        ((listed < ${limit:-0})) || continue
+        echo $((listed + 1)) > "$state/scenario/$name.listed"
+      fi
+      pod_json "$name"
+    done | jq -s '{apiVersion: "v1", kind: "List", items: (sort_by(.metadata.name))}'
+    replace_at get-pods-answered
+    interrupt_after get-pods
+    ;;
+  "get events")
+    failing get-events
+    [[ $namespace == runtime-check && $output == json && ${#words[@]} -eq 2 ]] || { echo "fake kubectl: unexpected $*" >&2; exit 1; }
+    jq '{apiVersion: "v1", kind: "List", items: .}' "$state/events.json" 2> /dev/null || jq -n '{apiVersion: "v1", kind: "List", items: []}'
+    ;;
+  "logs pod/"*)
+    name=${words[1]#pod/}
+    failing "logs-$name"
+    [[ $namespace == runtime-check && -e $state/pods/$name.json && $container == "$(jq -r '.spec.containers[0].name' "$state/pods/$name.json")" ]] ||
+      not_found pods "$name"
+    case $(scenario "$name") in
+      exit* | running | deadline) ;;
+      gone*) not_found pods "$name" ;;
+      *)
+        echo "Error from server (BadRequest): container \"$container\" in pod \"$name\" is waiting to start: trying and failing to pull image" >&2
+        exit 1
+        ;;
+    esac
+    log=$state/scenario/$name.log
+    [[ -e $log ]] || log=$fixtures/$name.log
+    if ((timestamps)); then
+      seconds=$(cat "$state/first-output" 2> /dev/null || echo 7)
+      at=$(date -u -d "$created_at + $seconds seconds" +%Y-%m-%dT%H:%M:%S)
+      sed "s/^/$at.123456789Z /" "$log"
+    else
+      cat "$log"
+    fi
+    replace_at "logs-$name-answered"
+    ;;
+  *)
+    echo "fake kubectl: unexpected kubectl $*" >&2
+    exit 1
+    ;;
+esac

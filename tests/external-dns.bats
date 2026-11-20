@@ -1,6 +1,10 @@
 #!/usr/bin/env bats
-# Proves features/dns.feature, except the scenario about just gateway-check, which
-# tests/gateway-check.bats proves; each test carries its scenario's title.
+# Proves the scenarios of features/dns.feature about what the tree makes and lists: the scenario
+# about just gateway-check is proved by tests/gateway-check.bats, those about destroying the edge
+# stack by tests/edge-scripts.bats, those of just cluster-dns-remove by
+# tests/cluster-dns-remove.bats and the one about the runbooks by tests/rebuild.bats; each test
+# carries its scenario's title, but the last, which holds the Deployment the tests of
+# cluster-dns-remove run against to what the chart renders.
 # Needs helm, kustomize, flux, yq and jq on PATH (the versions pinned for the repository). The chart
 # is pulled once per run from its public registry; building and rendering are offline, with the
 # placeholders of the cluster's example key lists. The cluster-config scenarios run the copy of the
@@ -10,6 +14,8 @@
 # it back afterwards, so two builds at once could leave the rewritten file behind; the chart's
 # directory is found whole only when no other test is pulling it.
 export BATS_NO_PARALLELIZE_WITHIN_FILE=true
+
+bats_require_minimum_version 1.5.0
 
 load fixtures/edge-stack
 # tree_without, a copy of the tree whose overlay leaves applications out.
@@ -165,6 +171,24 @@ render() {
 # arg PREFIX: the arguments that start with PREFIX, one per line.
 arg() {
   grep -F -- "$1" <<<"$ARGS" || true
+}
+
+# add_route NAME SPEC [APP]: in the copy TREE, an HTTPRoute NAME of the application APP, a directory
+# under kubernetes/apps/base, the demo application hello-route without it, whose spec is SPEC (a flow
+# mapping), listed in that application's kustomization.
+add_route() {
+  local app="$TREE/kubernetes/apps/base/${3:-demo/hello-route}/app"
+  printf -- '---\napiVersion: gateway.networking.k8s.io/v1\nkind: HTTPRoute\nmetadata:\n  name: %s\nspec: %s\n' "$1" "$2" >"$app/route-$1.yaml"
+  FILE="route-$1.yaml" yq -i '.resources += [strenv(FILE)]' "$app/kustomization.yaml"
+}
+
+# published DIR: dns_published_names example.net, from scripts/lib/dns.sh of the tree in DIR, its
+# standard error apart.
+published() {
+  # shellcheck disable=SC2016 # $1 is the inner shell's.
+  run --separate-stderr bash -c '. "$1/scripts/lib/dns.sh" && dns_published_names example.net' _ "$1"
+  echo "$output"
+  echo "$stderr"
 }
 
 @test "A route on the public Gateway is published at both edge routers' public addresses" {
@@ -481,7 +505,10 @@ edge_copy() {
   [ "$status" -eq 0 ]
   # Without the Gateway, the applications whose routes name it and CrowdSec, whose agent reads its
   # proxies, nothing but external-dns needs the Gateway, so it is the one refused, naming it.
-  tree_without gateway-public hello-route n8n kromgo open-webui hello-sso dex oauth2-proxy backstage crowdsec crowdsec-gateway-logs victoria-logs-route
+  # Robot Framework's suite of Ascender's sign-in page, robot-ascender, names ascender and goes with
+  # it.
+  tree_without gateway-public hello-route n8n kromgo open-webui hello-sso dex oauth2-proxy backstage crowdsec crowdsec-gateway-logs victoria-logs-route ascender robot-ascender \
+    locust-route
   run "$REPO/scripts/kubernetes-check" "$TREE"
   echo "$output"
   [ "$status" -ne 0 ]
@@ -513,4 +540,64 @@ edge_copy() {
   [ "$status" -ne 0 ]
   [[ $output == *EDGE_PUBLIC_ADDRESS_1* && $output == *EDGE_PUBLIC_ADDRESS_2* && $output == *sto2/edge* ]]
   [ "$(grep -cE '203\.0\.113\.[0-9]+' <<<"$output")" -eq 0 ]
+}
+
+@test "The names the routes publish are listed offline from the tree's builds, without a wildcard" {
+  local names
+  # The names of the tree's routes on the Gateway, sorted byte by byte, as the listing sorts them.
+  names="$(printf '%s.example.net\n' ascender auth backstage dex hello-sso hello kromgo locust logs n8n open-webui)"
+  # The tree as it is, with no cluster to reach: KUBECONFIG names no file.
+  [ ! -e "$KUBECONFIG" ]
+  published "$REPO"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$names" ]
+
+  # Routes that make no record of the cluster's: on another Gateway, wildcard included; on a Gateway
+  # named public in the route's own namespace, as a parent without a namespace is; under another
+  # domain; and on the http listener without hostnames, as the redirect is. And one that does: in the
+  # Gateway's own namespace, whose parent names no namespace.
+  tree_without
+  cp -R "$REPO/scripts" "$TREE/scripts"
+  # shellcheck disable=SC2016 # Flux substitutes ${CLUSTER_DOMAIN} when the copy is built.
+  add_route internal '{parentRefs: [{name: internal, namespace: envoy-gateway-system}], hostnames: ["internal.${CLUSTER_DOMAIN}", "*.${CLUSTER_DOMAIN}"]}'
+  # shellcheck disable=SC2016
+  add_route elsewhere '{parentRefs: [{name: public}], hostnames: ["elsewhere.${CLUSTER_DOMAIN}"]}'
+  add_route outside '{parentRefs: [{name: public, namespace: envoy-gateway-system, sectionName: https}], hostnames: [outside.example.org]}'
+  add_route plain '{parentRefs: [{name: public, namespace: envoy-gateway-system, sectionName: http}]}'
+  # shellcheck disable=SC2016
+  add_route own '{parentRefs: [{name: public, sectionName: https}], hostnames: ["own.${CLUSTER_DOMAIN}"]}' envoy-gateway-system/gateway-public
+  published "$TREE"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf '%s\n' "$names" own.example.net)" ]
+
+  # A route without hostnames on the https listener, alone or beside the http one, and one with a
+  # wildcard, would publish the listener's wildcard: each fails the listing, naming the route.
+  tree_without
+  cp -R "$REPO/scripts" "$TREE/scripts"
+  add_route no-host '{parentRefs: [{name: public, namespace: envoy-gateway-system, sectionName: https}]}'
+  add_route both-listeners '{parentRefs: [{name: public, namespace: envoy-gateway-system, sectionName: http}, {name: public, namespace: envoy-gateway-system, sectionName: https}]}'
+  published "$TREE"
+  [ "$status" -ne 0 ]
+  [ -z "$output" ]
+  [[ $stderr == *"the HTTPRoute demo/no-host on the Gateway public names no hostname"* ]]
+  [[ $stderr == *"the HTTPRoute demo/both-listeners on the Gateway public names no hostname"* ]]
+
+  tree_without
+  cp -R "$REPO/scripts" "$TREE/scripts"
+  # shellcheck disable=SC2016
+  add_route wildcard '{parentRefs: [{name: public, namespace: envoy-gateway-system}], hostnames: ["*.${CLUSTER_DOMAIN}"]}'
+  published "$TREE"
+  [ "$status" -ne 0 ]
+  [ -z "$output" ]
+  [[ $stderr == *"the HTTPRoute demo/wildcard on the Gateway public names a wildcard"* ]]
+}
+
+@test "the Deployment the removal's tests run against is the one the pinned chart renders with the tree's values" {
+  # What just cluster-dns-remove reads of the Deployment and copies into its Jobs: the selector and
+  # the pod's spec, its arguments among them. A chart of another version renders them again, and
+  # tests/fixtures/cluster-dns-remove/deployment.yaml and the arguments the recipe drops are read again
+  # with it.
+  render
+  [ "$(yq -o json -I0 'select(.kind == "Deployment") | {"selector": .spec.selector, "pod": .spec.template.spec}' "$RENDERED" | jq -S -c .)" \
+    = "$(yq -o json -I0 '{"selector": .spec.selector, "pod": .spec.template.spec}' "$BATS_TEST_DIRNAME/fixtures/cluster-dns-remove/deployment.yaml" | jq -S -c .)" ]
 }

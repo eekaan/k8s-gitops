@@ -23,6 +23,11 @@ Feature: Nodes firewall themselves
     When every node's configuration is rendered
     Then every node's rules for UDP 8472 and TCP 4240 accept exactly the six nodes' own addresses, each as a single address, and not the node network
 
+  Scenario: Every node admits Cilium's WireGuard port from the nodes' own addresses alone
+    Given every node's machine configuration rendered offline from the fixture, and the inventory
+    When each node's rules are read
+    Then each of the six nodes has exactly one rule admitting UDP 51871, named cilium-wireguard, accepting exactly the six nodes' own addresses, each as a single address, and nothing else, the load balancer's and the floating addresses not among them, and no other rule admits that port
+
   Scenario: The Talos API and the Kubernetes API accept the operator allowlist, the nodes, the load balancer and the CI host, and nobody else
     Given fixture node data with an operator allowlist of two networks, the load balancer's address and pool on the node network, and the CI host's address there
     When every node's configuration is rendered
@@ -74,9 +79,9 @@ Feature: Nodes firewall themselves
     Then no container or init container of it declares a host port, which Cilium would serve before the node's firewall sees the packet; one that does fails, named with its workload, and the host ports the render does declare, all in templates on the host's network, are the ones the test holds
 
   Scenario: No monitor scrapes a port that has no rule
-    Given the render's PodMonitors, ServiceMonitors and Services, and the ports node-firewall-exceptions.yaml lists under no-rule
-    When each monitor is matched with the pods and the Services it selects
-    Then no PodMonitor scrapes such a port of a pod it selects, by its name or its number, and no ServiceMonitor scrapes a port of a Service that leads to it; what the test cannot decide counts against the monitor: a selector of an operator it does not know selects, an endpoint that names no port or rewrites the address it scrapes reaches every port, and a Service without a selector leads to every pod; and a Probe, a ScrapeConfig or a Prometheus with scrape configurations of its own fails until the test reads it
+    Given the render's PodMonitors, ServiceMonitors, Probes and Services, its Gateway and EnvoyProxies, the configuration and the namespace of Envoy Gateway's controller, and the ports node-firewall-exceptions.yaml lists under no-rule
+    When each monitor is matched with the pods and the Services it selects, and each Probe with the one shape the tree's Probes have
+    Then no PodMonitor scrapes such a port of a pod it selects, by its name or its number, and no ServiceMonitor scrapes a port of a Service that leads to it; what the test cannot decide counts against the monitor: a selector of an operator it does not know selects, an endpoint that names no port or rewrites the address it scrapes, by name, by a labelmap or by a target label built from its regex's groups, reaches every port, and a Service without a selector leads to every pod; a Probe is accepted in the one shape the tree's Probes have alone, as the test does not follow where a name leads: its prober the blackbox exporter's Service, by the name and port the render gives it, which selects the exporter's pods, none on the host network and none resolving names their own way, as the Prometheus that resolves the prober's name does not either; each target the public Gateway's proxies' Service, by the name tests/probes.bats derives, over http or https on a port of the Gateway's listeners, while no EnvoyProxy and no default of the controller patches the proxies' pods, which Envoy Gateway builds off the host network, or their Service, names the Service or merges the Gateways, the render holds no Service of that name, and their namespace enforces a Pod Security level that refuses it; no endpoints written by hand for either Service; its spec, its prober, its targets and its labels holding nothing more, its module one tests/probes.bats pins whole and its relabelings the tree's one; every other Probe is refused, saying how it leaves the shape, the kubelet's Service the Prometheus Operator makes at run time, headless Services over host-network or static pods, an ExternalName, a labelmap and a target label built from the regex's groups among them; and a ScrapeConfig, or a Prometheus with scrape configurations of its own or a scrape class with relabelings, fails until the test reads it
 
   Scenario: No rule admits a pod's own address to a node's Talos API, and each node holds its floating address itself
     Given fixture node data with each node's floating address and the pod range
@@ -86,7 +91,7 @@ Feature: Nodes firewall themselves
   Scenario: The account of what a rollout proves names every port the firewall admits
     Given the inventory in talos/firewall.yaml and the section of docs/cluster.md on what the rollout's checks prove and what to watch afterwards
     When the section is read
-    Then every port and every port range of the inventory's thirteen rules is in it as a whole word
+    Then every port and every port range of the inventory's seventeen rules is in it as a whole word
 
   Scenario: The first rollout applies to one node in a self-reverting mode and stops unless the checks pass
     Given a cluster whose configuration changes a worker and a control plane

@@ -1,0 +1,146 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/yannh/kubernetes-json-schema/master/master-standalone-strict/deployment-apps-v1.json
+# vmauth, VictoriaMetrics' authenticating proxy, in front of the log store: every client of the
+# store reaches it here with a credential of its own, and vmauth forwards to the store only the
+# paths auth.yml gives that client, with the store's own credential (docs/kubernetes.md, Who may
+# call the log store).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vmauth
+spec:
+  # Every client reaches the store only through vmauth, so a second replica keeps serving while the
+  # other is replaced by a rollout, a restart after a rotation or a drain. It does nothing for the
+  # store, of which there is one.
+  replicas: 2
+  # A new pod is available before an old one goes.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vmauth
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: vmauth
+    spec:
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          nodeTaintsPolicy: Honor
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: vmauth
+      # It calls no API.
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: vmauth
+          # The default variant, on Alpine, whose busybox wget the checks on the cluster use; the
+          # registry also holds -scratch, -enterprise and release candidate tags of each release.
+          # renovate: datasource=docker depName=docker.io/victoriametrics/vmauth
+          image: docker.io/victoriametrics/vmauth:v1.156.0@sha256:e4b739ed468de88906550911c03fee2b0da89785679343a006639b8f471df051
+          args:
+            - -auth.config=/etc/vmauth/auth.yml
+            # What it proxies, on one port; its own endpoints, /health, /metrics, /flags,
+            # /debug/pprof and /-/reload, on another, which the Service does not serve, so that
+            # nothing a client sends reaches them (app/vmauth/main.go in VictoriaMetrics v1.156.0).
+            - -httpListenAddr=:8427
+            - -httpInternalListenAddr=:8426
+            # The keyed endpoints of the internal listener, each key a file of the Secret
+            # vmauth-keys, which vmauth reads again while it runs. /metrics and /health stay open
+            # there, for Prometheus and the kubelet.
+            - -flagsAuthKey=file:///etc/vmauth-keys/flags
+            - -pprofAuthKey=file:///etc/vmauth-keys/pprof
+            - -reloadAuthKey=file:///etc/vmauth-keys/reload
+            # Kubernetes takes a pod out of the Service's ready endpoints as soon as its deletion
+            # starts, and sends TERM at the same time; vmauth keeps serving on 8427 for 5 seconds
+            # after TERM, so a connection sent before every node has the change still finds it,
+            # and then has 7 seconds for the requests it holds, both well inside the 30 seconds of
+            # grace. The delay keeps /health of the internal listener at 200, so the probes do not
+            # see it.
+            - -http.shutdownDelay=5s
+            - -loggerFormat=json
+          ports:
+            - name: http
+              containerPort: 8427
+            - name: internal
+              containerPort: 8426
+          # /health answers without a credential; a pod joins the Service within 5 seconds of
+          # answering it, and one that stops answering leaves it after three failures.
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: internal
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: internal
+          # Each placeholder of auth.yml, from its Secret's key: without the Secret the pod does
+          # not start, as a variable vmauth lacks would leave the placeholder itself as the
+          # password. vmauth reads them once, when it starts.
+          env:
+            - name: VECTOR_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: vmauth-vector
+                  key: password
+            - name: GRAFANA_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: vmauth-grafana
+                  key: password
+            - name: LOGS_ROUTE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: vmauth-logs-route
+                  key: password
+            - name: OPERATOR_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: vmauth-operator
+                  key: password
+            - name: STORE_AUTHORIZATION
+              valueFrom:
+                secretKeyRef:
+                  name: victoria-logs-auth
+                  key: authorization
+          # In a local run of the image, read-only, offline and as this user, the container wrote
+          # nothing and took about 12 MiB serving 200 requests; the requests and the limit are not
+          # measured on the cluster. What it calls is in docs/kubernetes.md, Who may call the log
+          # store.
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: config
+              mountPath: /etc/vmauth
+              readOnly: true
+            - name: keys
+              mountPath: /etc/vmauth-keys
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: vmauth-config
+        - name: keys
+          secret:
+            secretName: vmauth-keys

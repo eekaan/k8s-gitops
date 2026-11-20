@@ -21,6 +21,11 @@ Feature: OpenBao
     When the seal stanza, the mounts and the objects that make the seal Secret are read
     Then OpenBao unseals with the static seal from a file of a Secret mounted into its servers only, an External Secrets generator makes that Secret once and never again, leaves it in place when it is deleted and cannot change its key, and no file in the repository holds a Secret of that name or a key in the seal stanza
 
+  Scenario: Every seal key the stanza names is read from the Secret of its own id, which an ExternalSecret makes once
+    Given the openbao application built as Flux applies it and its rendered chart, and a copy of its values.yaml and seal.yaml rotated as the runbook rotates the seal key, to the current key openbao-seal-2 and the previous key openbao-seal-1
+    When the seal stanza, extraVolumes, the servers' mounts and the ExternalSecrets and generators are read, with the ids the recipes read from values.yaml, and the recipes read stanzas with two seal "static" blocks, with no current id, with an id that is no Secret's name, and with one id as both the current and the previous
+    Then for the current id and any previous id the stanza reads the key from file:///openbao/userconfig/<id>/key, extraVolumes mounts the Secret <id>, which the chart mounts at /openbao/userconfig/<id>, and an ExternalSecret <id> writes that Secret once from a Password generator <id> of 32 hex-encoded characters, in the tree and in the rotated copy, and the ids the recipes read are the rendered stanza's and those of the ConfigMap the servers run; each of the other stanzas is refused, naming why
+
   Scenario: No root token and no recovery material is stored by anything the build renders
     Given the openbao application built as Flux applies it and its rendered chart
     When every object, the server configuration and the initial configuration are read
@@ -111,6 +116,26 @@ Feature: OpenBao
     When bao-seal-restore runs, and runs with --replace
     Then a missing Secret is made immutable from the file's key, one holding the same key is left alone, one holding another key is kept unless --replace is given, a key it replaces is first kept in a new file beside the custody file, encrypted to and opened with the operator's age key, never over another file, nothing is deleted when it cannot be kept, as when no hard link to that file can be made, which ln's own error says, and no key is printed or passed on a command line
 
+  Scenario: bao-seal-restore --check compares the Secret's seal key with the custody file and writes nothing
+    Given a fake cluster whose seal Secret holds the file's key, holds another key, or does not exist, and a custody file that holds no seal key
+    When bao-seal-restore runs with --check, and with --check and --replace together
+    Then it exits 0 saying that the Secret holds the key in the file only when it does, and otherwise exits non-zero naming the Secret that holds another key, the Secret that does not exist or the file that holds no seal key, it refuses --check with --replace before it reads anything, and in no case does it create, delete or write anything, ask the cluster for more than the ConfigMap the servers run and the Secret, or print a key or pass one on a command line
+
+  Scenario: bao-seal-restore --check refuses a custody file older than the store's seal key, and says which file to give
+    Given a checkout and a fake cluster after the documented seal-key rotation, the current key openbao-seal-2 and the previous key openbao-seal-1, and the custody file written before it, which holds openbao-seal-1 as its seal key
+    When bao-seal-restore runs with --check, then again while the servers still run the stanza from before the rotation, with that file and with a file of the current key, while the servers run the rotated stanza without its previous key, and while the servers' ConfigMap is missing
+    Then it exits non-zero saying that the file holds openbao-seal-1 while the store's current key is openbao-seal-2, and to give the custody file bao-seal-keep wrote or write it with bao-seal-keep; it names the servers' seal keys and the checkout's when they differ, in the previous key alone too, and in the same run as the file; it fails without the ConfigMap; and it compares no Secret, writes nothing, asks the cluster for nothing but that ConfigMap, and prints no key
+
+  Scenario: After a seal-key rotation, bao-seal-keep writes the custody file of the current and the previous key and checks it
+    Given a checkout and a fake cluster after the documented seal-key rotation, whose Secrets openbao-seal-2 and openbao-seal-1 hold the current and the previous key, and the custody file written before it
+    When bao-seal-keep writes a new custody file from that file, and runs where the stanza names no previous key, over the file it wrote, with a file whose seal key is not the previous key, with a file that holds no recovery keys, while the previous key's Secret holds another key, while the current key's Secret is missing or holds no key of 64 hexadecimal digits, with a new file inside the repository, and while the servers still run the stanza from before the rotation
+    Then the new file, readable by its owner alone and with no partial file left beside it, opens with the Talos age key to the old file's recovery keys, the current key's Secret as its seal and the old file's seal as its previous_seal, the old file is left as it was, the run ends with bao-seal-restore's check of the new file and fails when that check fails, keeping the file it wrote, each refusal names why and writes nothing, kubectl reads the two Secrets and the ConfigMap only, the one script run by its path is bao-seal-restore, every output redirection of the script goes to /dev/null or a file descriptor and the one file it has a tool write is age's encrypted partial file, and no key is printed, passed on a command line or written unencrypted
+
+  Scenario: After a seal-key rotation, bao-seal-restore, bao-recovery and bao-root work with the store's current and previous keys
+    Given a checkout after the documented seal-key rotation, the custody file bao-seal-keep wrote and the one written before the rotation
+    When bao-seal-restore runs with the new file on a rebuilt cluster without either Secret and then on the rotated cluster, with and without --check, with the old file, and with a file of the current key whose previous_seal is missing or of another key, bao-recovery runs on the rotated cluster, without the current key's Secret, with a key in it that is not 64 hexadecimal digits, and while the servers still run the stanza from before the rotation, and bao-root runs a command with the new file
+    Then on the rebuilt cluster both Secrets are made immutable from the new file's keys, on the rotated cluster both are left alone and the check passes, the old file is refused saying which file to give, a file without the previous key is refused naming its Secret, and nothing is written or read, bao-recovery writes the current key's Secret as the seal and the previous key's as the previous_seal, having read both before it asks OpenBao for shares, and without that Secret, with a malformed key in it or with the servers on another stanza it sends OpenBao no request of the recovery keys' rotation and writes no file, and bao-root runs the command with a token made from the new file's recovery keys
+
   Scenario: Seeding writes the master to the custody file, checks it opens, and only then writes the store's key
     Given a fake cluster and a fake OpenBao that hold no key volsync and answer the operator's token as OpenBao does, the cluster's S3 key in the environment, and the Talos age key's recipient
     When bao-seed-volsync writes its custody file outside the repository, again, and again when the recipient is one the operator's age key does not open, the file opens to something else than was written, or no hard link to the file can be made
@@ -148,13 +173,13 @@ Feature: OpenBao
 
   Scenario: A custody file is read only where no one but the operator can have written it
     Given the custody file of a seeding, a fake OpenBao that holds no key volsync, and the custody file of the recovery keys
-    When bao-seed-volsync goes on from the file while it is writable by its group or others, owned by another user, in a directory writable by its group or another user's, under a directory writable by others with and without the sticky bit, or given as a symbolic link, writes a new file into a directory its group can write, and bao-volsync-password, bao-root and bao-seal-restore read a file writable by its group or a symbolic link
+    When bao-seed-volsync goes on from the file while it is writable by its group or others, owned by another user, in a directory writable by its group or another user's, under a directory writable by others with and without the sticky bit, or given as a symbolic link, writes a new file into a directory its group can write, bao-volsync-password, bao-root, bao-seal-restore and bao-seal-keep read a file writable by its group or a symbolic link, and bao-seal-keep writes its new file into a directory its group can write
     Then each refuses before it reaches the cluster or OpenBao, naming the file or directory and why, nothing is written to the store or the shared directory and no command runs, and the file under a directory others can write but whose sticky bit is set is read and seeds the store
 
   Scenario: A recipe refuses to run while the shell traces its commands
     Given the environment the cluster recipes load, the custody files and a fake cluster
-    When each of bao-put, bao-recovery, bao-root, bao-seal-restore, bao-seed-volsync and bao-volsync-password runs with SHELLOPTS=xtrace, with SHELLOPTS=xtrace and the tests' trace directory named, with a BASH_ENV that sets -x, and under bash -x
-    Then each refuses, saying the shell traces each command, before it reads a secret, opens a custody file or reaches the cluster or OpenBao, no secret of the environment, the custody files or standard input is printed, and the tests' own trace into a file of theirs still lets a recipe run
+    When each of bao-put, bao-recovery, bao-root, bao-seal-restore, bao-seal-keep, bao-seed-volsync and bao-volsync-password runs with SHELLOPTS=xtrace, with SHELLOPTS=xtrace and the tests' trace directory named, with a BASH_ENV that sets -x, and under bash -x
+    Then each refuses, saying the shell traces each command, before it reads a secret, opens a custody file, writes one or reaches the cluster or OpenBao, no secret of the environment, the custody files or standard input is printed, and the tests' own trace into a file of theirs still lets a recipe run
 
   Scenario: What the recipes print of OpenBao's and kubectl's errors holds no control character and no address
     Given a fake OpenBao whose error text holds terminal escape sequences, and a fake kubectl that cannot reach the API server and names its address with control characters

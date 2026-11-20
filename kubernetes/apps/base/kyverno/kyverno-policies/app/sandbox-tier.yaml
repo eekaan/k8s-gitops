@@ -1,0 +1,58 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/policies.kyverno.io/validatingpolicy_v1.json
+# A pod in a namespace labelled k8s-gitops/sandbox runs with the isolation the label names: userns
+# sets hostUsers to false, gvisor sets runtimeClassName to gvisor and kata sets it to kata; any other
+# value refuses every pod. The same rule as just pod-security-check, which refuses a pod template of
+# the render that lacks its namespace's tier, a namespace labelled with any other value, and the
+# VolSync and CloudNativePG resources whose operators make pods there. Gatekeeper holds no twin of
+# it: this rule is Kyverno's alone, and the one of its rules that refuses (docs/kubernetes.md, The
+# sandbox tier rule).
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
+metadata:
+  name: sandbox-tier
+  annotations:
+    k8s-gitops/offline-check: scripts/pod-security-check (sandbox tiers)
+spec:
+  # A refusal. A policy that fails to evaluate is let through, and so is every pod while no Kyverno
+  # pod answers.
+  validationActions:
+    - Deny
+  failurePolicy: Ignore
+  # The pod is the one object every controller's pods end in, as for the other rules; the pod
+  # controllers are not matched, and the offline check is what stops a Deployment before merge.
+  autogen:
+    podControllers:
+      controllers: []
+  matchConstraints:
+    # Only a namespace that carries the label, whatever its value.
+    namespaceSelector:
+      matchExpressions:
+        - key: k8s-gitops/sandbox
+          operator: Exists
+    # A pod's runtimeClassName and hostUsers cannot change once it exists, so an update cannot
+    # change the verdict, and evaluating one could only block a pod that predates the label.
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: [v1]
+        operations: [CREATE]
+        resources: [pods]
+  variables:
+    - name: tier
+      expression: >-
+        namespaceObject.?metadata.?labels[?'k8s-gitops/sandbox'].orValue('')
+  # The first refuses a value that is no tier; each other is held only by a pod of its own tier, so
+  # a refused pod carries one message.
+  validations:
+    - expression: >-
+        variables.tier in ['userns', 'gvisor', 'kata']
+      message: the namespace's k8s-gitops/sandbox label is userns, gvisor or kata
+    - expression: >-
+        variables.tier != 'userns' || object.spec.?hostUsers.orValue(true) == false
+      message: a pod in a namespace of the userns sandbox tier sets hostUsers to false
+    - expression: >-
+        variables.tier != 'gvisor' || object.spec.?runtimeClassName.orValue('') == 'gvisor'
+      message: a pod in a namespace of the gvisor sandbox tier sets runtimeClassName to gvisor
+    - expression: >-
+        variables.tier != 'kata' || object.spec.?runtimeClassName.orValue('') == 'kata'
+      message: a pod in a namespace of the kata sandbox tier sets runtimeClassName to kata

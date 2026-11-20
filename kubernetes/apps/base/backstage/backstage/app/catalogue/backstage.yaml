@@ -16,6 +16,7 @@ spec:
   owner: group:default/operators
   system: applications
   dependsOn:
+    - component:default/blackbox-exporter
     - component:default/cilium
     - component:default/cloudnative-pg
     - component:default/external-secrets

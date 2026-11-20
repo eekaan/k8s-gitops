@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# Runs the bats test files given, one bats run each, in the order given, leaving out the tests tagged
+# hermetic, which run just ci and need a container runtime, and those tagged namespace, which need
+# unprivileged user namespaces. After each file it prints on standard output how long the file took,
+# in wall time rounded to whole seconds, its bats run's start and the file's setup_file included:
+#   test: tests/<name>.bats took <N>s
+# scripts/test-times reads these lines into tests/times.tsv. Every file runs, also after one fails;
+# the script then ends with status 1 and, on standard error, a line naming each file that failed.
+# A file whose tests the tags all leave out prints its empty plan, 1..0, and passes.
+# Usage: scripts/test-run FILE...
+set -uo pipefail
+
+if (($# == 0)); then
+  echo "test-run: usage: test-run FILE..." >&2
+  exit 2
+fi
+
+# A file's tests run side by side, a file whose tests share state excepted, and the files one after
+# another: bats runs files side by side only through GNU parallel, which is not pinned, and hands
+# even one file to it when --jobs comes without --no-parallelize-across-files. Side by side within a
+# file, bats takes turns with flock or shlock; without either, one by one.
+jobs=()
+cpus=$(getconf _NPROCESSORS_ONLN)
+if ((cpus > 1)) && { command -v flock || command -v shlock; } > /dev/null; then
+  jobs=(--jobs "$cpus" --no-parallelize-across-files)
+fi
+
+# microseconds: the time now, in microseconds; EPOCHREALTIME's separator follows the locale.
+microseconds() {
+  local now=$EPOCHREALTIME
+  printf '%s' "${now/[.,]/}"
+}
+
+failed=()
+for file in "$@"; do
+  started=$(microseconds)
+  # Without --allow-empty-suite, bats fails a run in which the tags leave no test.
+  if ! bats "${jobs[@]}" --allow-empty-suite --filter-tags '!hermetic,!namespace' "$file"; then
+    failed+=("$file")
+  fi
+  ended=$(microseconds)
+  echo "test: $file took $(((ended - started + 500000) / 1000000))s"
+done
+
+if ((${#failed[@]})); then
+  echo "test: failed: ${failed[*]}" >&2
+  exit 1
+fi

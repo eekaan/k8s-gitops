@@ -1,0 +1,20 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/gateway.envoyproxy.io/httproutefilter_v1alpha1.json
+# The route's credential to vmauth: Envoy Gateway puts the key credential of the Secret
+# vmauth-logs-route, the Basic value of vmauth's user logs-route, in the header Authorization of each
+# request the route sends on, in place of any the client sent. Envoy Gateway runs this after the
+# sign-in's external authorisation, so it has the last word on the header
+# (internal/xds/translator/httpfilters.go in Envoy Gateway v1.10.0). Without the Secret or its key
+# the filter is invalid, and the rule answers 500 and sends nothing on
+# (internal/gatewayapi/filters.go); a Secret made again reaches the proxies by itself, as Envoy
+# Gateway follows every Secret a filter names.
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: HTTPRouteFilter
+metadata:
+  name: ${SSO_ROUTE}
+spec:
+  credentialInjection:
+    overwrite: true
+    credential:
+      valueRef:
+        name: vmauth-logs-route

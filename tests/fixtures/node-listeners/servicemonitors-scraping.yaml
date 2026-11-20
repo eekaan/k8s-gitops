@@ -198,6 +198,47 @@ spec:
           targetLabel: __address__
           replacement: $1:9963
 ---
+# Relabelings that write a label they do not name, as the PodMonitors of the same names do.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: labelmapped
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      fixture: operator-other-port
+  endpoints:
+    - port: web
+      relabelings:
+        - action: replace
+          sourceLabels:
+            - __meta_kubernetes_pod_host_ip
+          targetLabel: __tmp_address
+          replacement: $1:9963
+        - action: labelmap
+          regex: __tmp_(address)
+          replacement: __${1}__
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: templated
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      fixture: operator-other-port
+  endpoints:
+    - port: web
+      relabelings:
+        - action: replace
+          sourceLabels:
+            - __meta_kubernetes_pod_host_ip
+          regex: (.+)
+          targetLabel: __${2}address__
+          replacement: $1:9963
+---
 # A Service without a selector leads where its endpoints say, which the check does not read: it
 # counts for every pod that has the port's number.
 apiVersion: v1

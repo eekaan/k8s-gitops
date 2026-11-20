@@ -1,0 +1,50 @@
+---
+# Probes in the one shape the check accepts, beside the tree's own: the public Gateway's proxies'
+# Service over https and over http on the port each scheme implies, and on each port of the
+# Gateway's listeners named, with two targets each, and another module of the three
+# tests/probes.bats pins whole.
+apiVersion: monitoring.coreos.com/v1
+kind: Probe
+metadata:
+  name: implied-ports
+  namespace: monitoring
+spec:
+  jobName: public-endpoints
+  module: public_https
+  prober:
+    url: blackbox-exporter.monitoring.svc.cluster.local:9115
+  targets:
+    staticConfig:
+      static:
+        - https://envoy-envoy-gateway-system-public-5ea56ca9.envoy-gateway-system.svc.cluster.local/
+        - http://envoy-envoy-gateway-system-public-5ea56ca9.envoy-gateway-system.svc.cluster.local/healthz
+      labels:
+        hostname: probed.example
+      relabelingConfigs:
+        - action: replace
+          sourceLabels:
+            - hostname
+          targetLabel: __param_hostname
+---
+apiVersion: monitoring.coreos.com/v1
+kind: Probe
+metadata:
+  name: named-ports
+  namespace: monitoring
+spec:
+  jobName: public-endpoints
+  module: public_http_redirect
+  prober:
+    url: blackbox-exporter.monitoring.svc.cluster.local:9115
+  targets:
+    staticConfig:
+      static:
+        - https://envoy-envoy-gateway-system-public-5ea56ca9.envoy-gateway-system.svc.cluster.local:443/
+        - http://envoy-envoy-gateway-system-public-5ea56ca9.envoy-gateway-system.svc.cluster.local:80
+      labels:
+        hostname: probed.example
+      relabelingConfigs:
+        - action: replace
+          sourceLabels:
+            - hostname
+          targetLabel: __param_hostname

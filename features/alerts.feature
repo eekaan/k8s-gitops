@@ -89,9 +89,39 @@ Feature: Alerts
 
   @by:rules-check
   Scenario: The alert LogCollectorSendFailing fires after its time in the failing case and stays quiet in the healthy one
-    Given a collector whose sink reports errors, and one whose sink reports none
+    Given a collector whose requests to the store are accepted and then refused at the connection, and one whose requests are accepted throughout
     When the rule is evaluated over time
     Then the alert fires after its time for the first and never for the second
+
+  @by:rules-check
+  Scenario: The alert LogCollectorSendFailing fires while the store answers every insert with 429
+    Given a collector whose requests to the store are accepted and then answered with 429, retried and answered with 429 again, and one whose requests are accepted throughout
+    When the rule is evaluated over time
+    Then the alert fires after its time for the first and never for the second
+
+  @by:rules-check
+  Scenario: The alert LogCollectorSendFailing fires while the store answers every insert with a server error
+    Given a collector whose requests to the store are accepted and then answered with 503, retried and answered with 503 again, and one whose requests are accepted throughout
+    When the rule is evaluated over time
+    Then the alert fires after its time for the first and never for the second
+
+  @by:rules-check
+  Scenario: The alert LogCollectorSendFailing fires while every request to the store times out
+    Given a collector whose requests to the store are accepted and then get no answer until they time out, and are retried, and one whose requests are accepted throughout
+    When the rule is evaluated over time
+    Then the alert fires after its time for the first and never for the second
+
+  @by:rules-check
+  Scenario: The alert LogCollectorSendFailing stays quiet while the store accepts the collector's requests after retries
+    Given a collector some of whose requests the store answers with 429 or 503, at a steady share for an hour, each retried until it is accepted
+    When the rule is evaluated over time
+    Then the alert does not fire
+
+  @by:rules-check
+  Scenario: The alert LogCollectorSendFailing stays quiet on a collector with nothing to send
+    Given a collector whose sources stop producing lines, so that it sends no request and its counters stop moving and are no longer exported
+    When the rule is evaluated over time
+    Then the alert does not fire
 
   @by:rules-check
   Scenario: The alert CertManagerCertificateNotReady fires after its time in the failing case and stays quiet in the healthy one
@@ -226,7 +256,7 @@ Feature: Alerts
   Scenario: The storage layer is scraped
     Given the linstor-monitoring application, enabled in the cluster's overlay after the monitoring definitions, and the Piraeus operator at the version whose templates the monitors' selectors were read from
     When it is built as Flux applies it and the monitors are matched against the labels and ports the operator gives the LINSTOR controller and the satellites
-    Then a ServiceMonitor selects the controller's metrics port, which serves LINSTOR's own state, and a PodMonitor selects the satellites' DRBD reactor port, which serves each DRBD resource's state, and the monitors carry the node that runs a satellite
+    Then a ServiceMonitor selects the controller's metrics port, which serves LINSTOR's own state and is scraped over plain HTTP on the port that keeps serving it while the API takes client certificates on its HTTPS port, and a PodMonitor selects the satellites' DRBD reactor port, which serves each DRBD resource's state and is scraped at its node's address, as the satellites run on their node's network, which the nodes' firewall admits on every node from the nodes and the pods, and the monitors carry the node that runs a satellite
 
   @by:rules-check
   Scenario: The alert DrbdReplicaNotUpToDate fires after its time in the failing case and stays quiet in the healthy one
@@ -334,3 +364,69 @@ Feature: Alerts
     Given CrowdSec's local API whose target answers its scrape for ten minutes, then fails it for twenty, then answers again for ten, and then has no series for twenty
     When the rule is evaluated over time
     Then the alert is quiet while the target answers, fires once the scrape has failed for its time, is quiet again once it answers, and fires once the series has been gone for its time
+
+  @by:rules-check
+  Scenario: The alert RestoreDrillStale fires after its time in the failing case and stays quiet in the healthy one
+    Given the check CronJob of an application's restore drill whose last success is older than 36 hours, one that has never succeeded and is older than that, one that succeeded within 36 hours, one that has not yet had its first success and is younger than that, and CronJobs of other names that are as old
+    When the rule is evaluated over time
+    Then the alert fires after its time for the first two, naming the application and its namespace, and never for the others
+
+  @by:rules-check
+  Scenario: The alert RestoreDrillJobFailing fires after its time in the failing case and stays quiet in the healthy one
+    Given the check CronJob of an application's restore drill whose latest scheduled run ended without success, one that was scheduled and never succeeded, one whose latest run succeeded, one not yet scheduled, and CronJobs of other names whose latest run failed
+    When the rule is evaluated over time
+    Then the alert fires after its time for the first two, naming the application and its namespace, and never for the others
+
+  @by:rules-check
+  Scenario: The alert PublicEndpointDown fires after its time in the failing case and stays quiet in the healthy one
+    Given a probe of a public hostname that gets no answer, and one that is answered as expected
+    When the rule is evaluated over time
+    Then the alert fires after its time for the hostname that gets no answer and never for the one answered as expected, nor for one answered with a status it does not accept, nor for a probe of another job that gets no answer
+
+  @by:rules-check
+  Scenario: The alert PublicEndpointWrongStatus fires after its time in the failing case and stays quiet in the healthy one
+    Given a probe of a public hostname that is answered with a status the probe does not accept, and one that is answered as expected
+    When the rule is evaluated over time
+    Then the alert fires after its time for the hostname answered with the wrong status and never for the one answered as expected, nor for one that gets no answer, nor for a probe of another job answered with such a status
+
+  @by:rules-check
+  Scenario: The alert PublicCertificateExpiring fires after its time in the failing case and stays quiet in the healthy one
+    Given a public hostname whose certificate expires within 14 days but not within 3, and one whose certificate has longer to run
+    When the rule is evaluated over time
+    Then the alert fires after its time for the hostname whose certificate is within 14 days of its end and never for the other, nor for one within 3 days, nor for such a certificate that a probe of another job reads
+
+  @by:rules-check
+  Scenario: The alert PublicCertificateExpiryImminent fires after its time in the failing case and stays quiet in the healthy one
+    Given a public hostname whose certificate expires within 3 days, and one whose certificate has longer to run
+    When the rule is evaluated over time
+    Then the alert fires after its time for the hostname whose certificate is within 3 days of its end and never for the other, nor for such a certificate that a probe of another job reads
+
+  @by:rules-check
+  Scenario: The alert ProbeNotRunning fires after its time in the failing case and stays quiet in the healthy one
+    Given a declared probe whose scrape through the exporter starts to fail, as when the exporter is gone, and one that is scraped throughout while its target is down
+    When the rule is evaluated over time
+    Then the alert fires after its time for the probe that is not scraped, naming its hostname, and never for the one that is, nor for a probe of another job that is not scraped
+
+  @by:rules-check
+  Scenario: The alert ProbeNotRunning stays quiet on a cluster that declares no Probe
+    Given the exporter running, its own metrics scraped, no Probe of the public hostnames declared, and a target of another job down
+    When the rule is evaluated over time
+    Then the alert never fires
+
+  @by:rules-check
+  Scenario: The alert EscapeCanaryStale fires after its time in the failing case and stays quiet in the healthy one
+    Given a CronJob of the escape canary whose last success is older than 3 hours, one that has never succeeded and was created more than 3 hours ago, one that succeeded within the hour, one younger than 3 hours with no success yet, and a CronJob of another namespace as old as the first
+    When the rule is evaluated over time
+    Then the alert fires after its time for the first two, naming the CronJob, and never for the others
+
+  @by:rules-check
+  Scenario: The alert EscapeCanaryUnexpectedResult fires after its time in the failing case and stays quiet in the healthy one
+    Given a CronJob of the escape canary that owns a Job failed because a pod exited non-zero, started after the CronJob's last success, one that has never succeeded and owns such a Job, one whose such Job started before its last success, and a Job of another namespace failed the same way
+    When the rule is evaluated over time
+    Then the alert fires after its time for the first two, naming the CronJob, and never for the others
+
+  @by:rules-check
+  Scenario: The alert EscapeCanaryUnexpectedResult stays quiet while a run fails at its deadline, and clears once a run succeeds
+    Given a CronJob of the escape canary whose Job failed at its deadline, and one whose Job failed because a pod exited non-zero and whose next run then succeeds
+    When the rule is evaluated over time
+    Then the alert never fires for the first, fires after its time for the second and clears once its later run succeeds

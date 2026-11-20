@@ -16,8 +16,11 @@
 # renovate.json5 holds them inline instead. Each preset's lists are appended to the configuration's
 # own and its other values replace them; Renovate instead deep-merges objects and lets the
 # repository's own configuration win. The two agree while renovate.json5 sets none of the keys the
-# presets set, which holds today. The presets hold only the keys the merge below handles; any other
-# key fails the run rather than being left out of the extraction.
+# presets set and no two presets set the same object. That holds today, and the merge assumes it
+# rather than checks it (tests/logs.bats holds customDatasources to managers.json5). The merge below
+# handles the lists packageRules and customManagers and the objects flux, kubernetes and
+# customDatasources, which managers.json5 alone sets; the presets hold only those keys, and any
+# other key fails the run rather than being left out of the extraction.
 set -euo pipefail
 export LC_ALL=C
 
@@ -50,7 +53,7 @@ mapfile -t presets < <(jq -r '.extends[] | select(startswith("local>")) | sub(".
 config=$(jq '.extends |= map(select(startswith("local>") | not))' <<< "$config")
 for preset in "${presets[@]}"; do
   config=$(jq --argjson preset "$(json "$preset")" '
-    ($preset | del(."$schema", .description) | keys - ["packageRules", "customManagers", "flux", "kubernetes"]) as $other
+    ($preset | del(."$schema", .description) | keys - ["packageRules", "customManagers", "flux", "kubernetes", "customDatasources"]) as $other
     | if ($other | length) > 0 then error("the preset " + $other[0] + " is not one the merge handles") else . end
     | reduce ($preset | del(."$schema", .description) | to_entries[]) as $e
         (.; .[$e.key] = (if (.[$e.key] | type) == "array" then .[$e.key] + $e.value else $e.value end))

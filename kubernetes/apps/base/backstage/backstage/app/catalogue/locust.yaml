@@ -1,0 +1,19 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/catalog-info.json
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: locust
+  description: Locust, a load-testing tool, as a master and two workers that load the demo's hello; its interface is behind the sign-in at locust-route, and its policies hold the load in once the cluster enforces them, not while it audits.
+  links:
+    - url: https://github.com/eekaan/k8s-gitops/blob/main/docs/kubernetes.md#locust
+      title: Documentation
+    - url: https://github.com/eekaan/k8s-gitops/tree/main/kubernetes/apps/base/locust/locust
+      title: Manifests
+spec:
+  type: service
+  lifecycle: experimental
+  owner: group:default/operators
+  system: applications
+  dependsOn:
+    - component:default/cilium

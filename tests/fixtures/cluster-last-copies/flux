@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# A stand-in for the flux CLI, installed by tests/cluster-last-copies.bats as <tmp>/bin/flux, that
+# suspends and resumes Kustomizations as the pinned CLI does, by spec.suspend, and keeps which are
+# suspended as <tmp>/state/suspended.<namespace>.<name>. It finds its files from its own path:
+#   <tmp>/state/resume-fails.<namespace>.<name>   resuming that Kustomization fails, with an error
+#                                                 that names the API server's address
+# It records "flux ARGS" in <tmp>/record/argv, and each suspension and resumption, in order, in
+# <tmp>/record/events.
+set -uo pipefail
+
+root=${0%/bin/*}
+state=$root/state
+record=$root/record
+printf '%s\n' "flux $*" >> "$record/argv"
+
+verb=${1-} kind=${2-} name=${3-}
+namespace=flux-system
+shift 3 || true
+while (($#)); do
+  case $1 in
+    --namespace | -n) namespace=$2 && shift ;;
+    --namespace=*) namespace=${1#*=} ;;
+    --wait=false) ;;
+    *) echo "fake flux: unexpected argument $1" >&2 && exit 1 ;;
+  esac
+  shift
+done
+[[ $kind == kustomization && -n $name ]] || { echo "fake flux: unexpected flux $verb $kind $name" >&2; exit 1; }
+case $verb in
+  suspend)
+    : > "$state/suspended.$namespace.$name"
+    printf '%s\n' "suspended $namespace/$name" >> "$record/events"
+    echo "► suspending kustomization $name in $namespace namespace" >&2
+    ;;
+  resume)
+    if [[ -e $state/resume-fails.$namespace.$name ]]; then
+      echo "✗ Get \"https://192.0.2.10:6443/apis/kustomize.toolkit.fluxcd.io/v1/namespaces/$namespace/kustomizations/$name\": dial tcp 192.0.2.10:6443: connect: connection refused" >&2
+      exit 1
+    fi
+    rm -f "$state/suspended.$namespace.$name"
+    printf '%s\n' "resumed $namespace/$name" >> "$record/events"
+    echo "► resuming kustomization $name in $namespace namespace" >&2
+    ;;
+  *)
+    echo "fake flux: unexpected flux $verb" >&2
+    exit 1
+    ;;
+esac

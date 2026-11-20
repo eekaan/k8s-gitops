@@ -16,3 +16,9 @@ spec:
   ref:
     # renovate: datasource=docker depName=ghcr.io/oauth2-proxy/charts/oauth2-proxy
     tag: 10.7.4
+  # Go regular expressions, kept to syntax POSIX extended expressions read the same way (no \d).
+  verify:
+    provider: cosign
+    matchOIDCIdentity:
+      - issuer: '^https://token\.actions\.githubusercontent\.com$'
+        subject: '^https://github\.com/oauth2-proxy/manifests/\.github/workflows/release\.yaml@refs/heads/main$'

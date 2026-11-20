@@ -1,0 +1,531 @@
+#!/usr/bin/env bash
+# Takes and checks, before a cluster is taken down, a last copy of everything the rebuild restores
+# from, after comparing every custody file the restores need with what the running cluster holds
+# (docs/runbooks/rebuild.md). It destroys nothing and changes nothing but what the copies below
+# make, in this order:
+#   1. Preconditions, each that is missing named before anything runs: the kubeconfig, the Talos age
+#      key, the Flux age key, what openbao-snapshot-check, postgres-dump-check and
+#      bao-volsync-password need (the bucket prefix, the state key, the cluster's S3 key, the object
+#      storage's settings, the tools, a container runtime and the dump step's image), and each of the
+#      three custody files there and where only this user can have written it (bao_custody_trusted
+#      in scripts/lib/openbao.sh), each named by its role.
+#   2. Custody, reading only: the Talos age key is the key talos/.sops.yaml encrypts to and the Flux
+#      age key the one .sops.yaml encrypts to; the OpenBao custody file holds the keys the Secrets of
+#      the seal stanza's current key and previous key, when it names one, hold (bao-seal-restore
+#      --check, which says why it refuses a file older than the current key); for every
+#      ReplicationSource, the password the volume backups' custody file derives for its application
+#      hashes as its Secret's does (bao-volsync-password, as docs/runbooks/volume-backups.md compares
+#      them); the PostgreSQL backups' custody file holds the customer key of every database's backup
+#      Secret, compared by digest. Every Cluster has a primary, an archiver plugin and its dump
+#      CronJob, and every ReplicationSource the labels of the Kustomization that owns it, which is not
+#      suspended already, as the run resumes what it suspends. No copy is taken until each of these
+#      holds.
+#   3. The plan, each copy by namespace and name. --check stops here, having changed nothing.
+#   4. The secret store: a Job from the CronJob openbao-snapshots, waited for until it is complete,
+#      then openbao-snapshot-check latest, whose snapshot must be named for a time no earlier than
+#      the run's start, to the second.
+#   5. Every database, every Cluster of the cluster: a Job from its dump CronJob, waited for (it waits
+#      its stagger first), then postgres-dump-check latest, whose dump must be named so too; on its
+#      primary, psql in the postgres container, as the superuser through the socket, switches the WAL
+#      and names the newest complete segment, and pg_stat_archiver is read until the archiver has
+#      archived it; its ObjectStore holds a recovery window for it. No base backup.
+#   6. Every backed-up volume, every ReplicationSource: the Kustomization that owns it suspended with
+#      the flux CLI, so that its next apply does not take the trigger away; once no backup of it runs,
+#      spec.trigger.manual set to last-<start> with a merge patch, and the ReplicationSource read until
+#      status.lastManualSync is that tag and its mover's result Successful; the Kustomization resumed.
+#      A backup that ran when the trigger was set would end with the tag and data from before it
+#      (VolSync's docs/usage/triggers.rst), so the trigger waits for it. Kustomize-controller drops
+#      the trigger at its next apply, as the patch's manager is kubectl's, and the schedule takes over.
+#   7. The summary: one line per copy, the snapshot's name, each database's dump and the segment and
+#      time its WAL is archived through, each volume's backup time.
+# A Job is named last-<start>-<its CronJob's name cut to 47 characters>, at most 63 characters, the
+# most its pods' job-name label takes. Every wait is bounded by LAST_COPIES_TIMEOUT seconds (3600)
+# and fails naming the copy when it runs out, and every kubectl call the run makes itself but exec by
+# 30 seconds; psql in a pod is bounded by neither, nor are the reads of the seal Secrets that
+# bao-seal-restore makes. A copy that fails, a check that fails or a copy not taken by this run fails
+# the run with the copy's name and the reason, and no later copy is taken.
+# Every Kustomization the run suspended is resumed on every exit, and one that cannot be is named
+# last, with the command that resumes it.
+# Nothing of a key, a password, an address, the endpoint or a bucket's name is printed or passed as
+# an argument: the custody files open into memory, digests are compared and never printed, and
+# kubectl's and flux's errors are shown as scripts/lib/errors.sh shows them. The recipes it runs keep
+# to the same.
+# bao-seal-restore and bao-volsync-password work on lab-sto2 alone, so the run refuses another
+# cluster.
+# Usage: scripts/cluster-last-copies <openbao file> <volsync file> <postgres file> [cluster] [--check]
+set -euo pipefail
+
+here=$(dirname "$0")
+# shellcheck source=scripts/lib/openbao.sh
+. "$here/lib/openbao.sh"
+# shellcheck source=scripts/lib/postgres-dumps.sh
+. "$here/lib/postgres-dumps.sh"
+
+usage() {
+  infra_error "usage: cluster-last-copies <openbao file> <volsync file> <postgres file> [cluster] [--check]; the files are the custody files bao-recovery (after a rotation of the seal key, bao-seal-keep), bao-seed-volsync and bao-seed-postgres wrote"
+  exit 2
+}
+
+check=0
+positional=()
+for arg; do
+  case $arg in
+    --check) check=1 ;;
+    -*) usage ;;
+    *) positional+=("$arg") ;;
+  esac
+done
+((${#positional[@]} == 3 || ${#positional[@]} == 4)) || usage
+openbao_file=${positional[0]} volsync_file=${positional[1]} postgres_file=${positional[2]}
+
+# The run's start, which every copy must be newer than, and which names its Jobs and its trigger.
+start=$(date -u +%s)
+start_name=$(date -u -d "@$start" +%Y%m%dT%H%M%SZ)
+tag=last-$start
+poll=5
+
+# shellcheck source=scripts/cluster-env
+. "$here/cluster-env" "${positional[3]-}"
+start_errors_log "$cluster_dir/clusterconfig/${0##*/}.errors.log"
+
+suspended=()
+# finish STATUS: resumes every Kustomization the run suspended and has not resumed, names the step a
+# failure was in, then each Kustomization that could not be resumed, and exits.
+finish() {
+  local status=$1 kustomization
+  local -a left=()
+  trap '' INT TERM HUP
+  for kustomization in "${suspended[@]}"; do
+    quiet_flux resume kustomization "${kustomization#*/}" --namespace "${kustomization%%/*}" --wait=false ||
+      left+=("$kustomization")
+  done
+  suspended=()
+  ((${#left[@]} == 0 || status != 0)) || status=1
+  failed_step "$status"
+  for kustomization in "${left[@]}"; do
+    infra_error "the Kustomization $kustomization is still suspended; resume it: flux resume kustomization ${kustomization#*/} --namespace ${kustomization%%/*}"
+  done
+  exit "$status"
+}
+trap 'finish $?' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+
+# kube ARG...: kubectl ARG..., its standard output in last_output; when it fails, its errors shown as
+# report_errors shows them, without an address. Every call but exec ends within 30 seconds; kubectl
+# gives the stream of an exec no deadline, so the flag would not bound it. Returns kubectl's status.
+kube() {
+  local status=0
+  if [[ $1 == exec ]]; then
+    run_keeping_errors kubectl "$@" || status=$?
+  else
+    run_keeping_errors kubectl "$@" --request-timeout=30s || status=$?
+  fi
+  ((status == 0)) || report_errors kubectl
+  return "$status"
+}
+
+# quiet_flux ARG...: the flux CLI with ARG..., printing nothing when it succeeds and its errors as
+# kube shows kubectl's when it fails. Returns its status.
+quiet_flux() {
+  local status=0
+  run_keeping_errors flux "$@" || status=$?
+  ((status == 0)) || report_errors flux
+  return "$status"
+}
+
+# copy_failed COPY REASON: fails the run, naming COPY and REASON.
+copy_failed() {
+  infra_error "$1: $2"
+  exit 1
+}
+
+# custody_ready ROLE FILE: whether FILE, the custody file of ROLE, is there and where only this user
+# can have written it; names it by ROLE when not.
+custody_ready() {
+  if [[ ! -e $2 && ! -L $2 ]]; then
+    infra_error "$1, $2, does not exist"
+    return 1
+  fi
+  if ! bao_custody_trusted "$2"; then
+    infra_error "$1, $2, is not read: it is not where only this user can have written it"
+    return 1
+  fi
+}
+
+# opened ROLE FILE WHAT FILTER: sets opened to FILE opened with the Talos age key, when it opens and
+# the jq FILTER, given the cluster as $cluster, accepts it; otherwise names FILE by ROLE, says it does
+# not open or holds no WHAT, and fails.
+opened() {
+  opened=
+  if ! opened=$(bao_decrypt "$2" 2> /dev/null); then
+    opened=
+    infra_error "$1, $2, does not open with the Talos age key"
+    return 1
+  fi
+  if ! printf '%s' "$opened" | jq -e --arg cluster "$cluster" "$4" > /dev/null 2>&1; then
+    opened=
+    infra_error "$1, $2, holds no $3 for $cluster"
+    return 1
+  fi
+}
+
+# digest: the SHA-256 of standard input, as sha256sum prints it.
+digest() {
+  sha256sum
+}
+
+# job_name CRONJOB: the run's Job from CRONJOB.
+job_name() {
+  printf 'last-%s-%s' "$start" "${1:0:47}"
+}
+
+# deadline_passed DEADLINE: whether SECONDS has reached DEADLINE.
+deadline_passed() {
+  ((SECONDS >= $1))
+}
+
+# run_job NAMESPACE CRONJOB COPY: creates the run's Job from the CronJob and waits until it is
+# complete; fails naming COPY when it cannot be made, fails, or the wait runs out.
+run_job() {
+  local ns=$1 cronjob=$2 copy=$3 job deadline condition
+  job=$(job_name "$cronjob")
+  step="creating the Job $ns/$job from the CronJob $ns/$cronjob"
+  kube create job "$job" --from="cronjob/$cronjob" --namespace "$ns" || copy_failed "$copy" "the Job $ns/$job could not be created"
+  step="waiting for the Job $ns/$job"
+  deadline=$((SECONDS + 10#$timeout))
+  while :; do
+    kube get job "$job" --namespace "$ns" --output json || copy_failed "$copy" "the Job $ns/$job cannot be read"
+    condition=$(jq -r '[.status.conditions // [] | .[] | select(.status == "True") | .type]
+      | if index("Complete") then "complete" elif index("Failed") then "failed" else "running" end' <<< "$last_output")
+    case $condition in
+      complete) return 0 ;;
+      failed) copy_failed "$copy" "the Job $ns/$job failed" ;;
+    esac
+    ! deadline_passed "$deadline" || copy_failed "$copy" "the Job $ns/$job did not complete within $timeout seconds"
+    sleep "$poll"
+  done
+}
+
+# taken_now COPY NAME KIND: fails naming COPY unless NAME, the newest KIND's, is named for a time no
+# earlier than the run's start, to the second. The start is this machine's clock and the name the
+# pod's, so the two clocks are taken to agree.
+taken_now() {
+  local LC_ALL=C
+  if [[ ! $2 =~ ^[0-9]{8}T[0-9]{6}Z\. || ${2%%.*} < $start_name ]]; then
+    copy_failed "$1" "the newest $3, ${2:-none}, was not taken by this run"
+  fi
+}
+
+# psql_on NAMESPACE POD SQL: runs SQL with psql in the postgres container of POD, which reaches the
+# server through its socket as the superuser; its rows in last_output, without headers or alignment.
+psql_on() {
+  kube exec "$2" --namespace "$1" --container postgres -- psql --no-psqlrc --quiet --tuples-only --no-align \
+    --field-separator ' ' --command "$3"
+}
+
+# archived_through ARCHIVED SEGMENT: whether ARCHIVED, the last file the archiver archived, is
+# SEGMENT or a later one. A segment's name is its timeline and number in fixed-width hexadecimal, so
+# names compare as the segments follow one another; a backup history or partial file starts with the
+# segment it is of, and a timeline's history file names no segment.
+archived_through() {
+  local LC_ALL=C first=${1:0:24}
+  [[ $first =~ ^[0-9A-F]{24}$ ]] && [[ ! $first < $2 ]]
+}
+
+step="checking what the last copies need"
+complete=1
+require_commands kubectl flux jq yq age age-keygen rclone tar gzip sha256sum base64 cut stat bash || complete=0
+require_kubeconfig || complete=0
+if ! require_age_key; then
+  infra_error "the Talos age key is missing: it opens the custody files and the copies"
+  complete=0
+fi
+if [[ -z ${FLUX_AGE_KEY:-} ]] && [[ -z ${FLUX_AGE_KEY_FILE:-} || ! -f $FLUX_AGE_KEY_FILE ]]; then
+  infra_error "the Flux age key is missing: FLUX_AGE_KEY_FILE names no file"
+  complete=0
+fi
+require_env BACKUP_BUCKET_PREFIX AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY CLUSTER_S3_ACCESS_KEY_ID \
+  CLUSTER_S3_SECRET_ACCESS_KEY || complete=0
+if [[ -n ${BACKUP_BUCKET_PREFIX:-} ]]; then
+  s3_bucket_name_ok BACKUP_BUCKET_PREFIX prefix || complete=0
+fi
+s3_read_backend || complete=0
+# postgres-dump-check reads each dump with pg_restore from the image of the dump step, run by docker,
+# podman or CONTAINER_RUNTIME's.
+if [[ -n ${CONTAINER_RUNTIME-} ]]; then
+  require_commands "$CONTAINER_RUNTIME" || complete=0
+elif ! type -P docker > /dev/null && ! type -P podman > /dev/null; then
+  infra_error "neither docker nor podman is on PATH; postgres-dump-check reads each dump with pg_restore from the PostgreSQL image of the dump step"
+  complete=0
+fi
+image=$(yq '.spec.jobTemplate.spec.template.spec.initContainers[] | select(.name == "dump") | .image' \
+  "$infra_root/kubernetes/components/cnpg-cluster/cronjob.yaml" 2> /dev/null) || image=
+if [[ $image != *@sha256:* ]]; then
+  infra_error "kubernetes/components/cnpg-cluster/cronjob.yaml names no image of the dump step by its digest, which postgres-dump-check runs pg_restore from"
+  complete=0
+fi
+timeout=${LAST_COPIES_TIMEOUT:-3600}
+require_seconds LAST_COPIES_TIMEOUT "$timeout" || complete=0
+if [[ $cluster != lab-sto2 ]]; then
+  infra_error "bao-seal-restore and bao-volsync-password compare the custody files with lab-sto2 alone, so those of $cluster cannot be compared; give no cluster, or lab-sto2"
+  complete=0
+fi
+custody_ready "the OpenBao custody file" "$openbao_file" || complete=0
+custody_ready "the volume backups' custody file" "$volsync_file" || complete=0
+custody_ready "the PostgreSQL backups' custody file" "$postgres_file" || complete=0
+# The seal keys the OpenBao custody file must hold, by the ids of the checkout's seal stanza.
+bao_seal_ids || complete=0
+((complete))
+
+step="reading what $cluster holds"
+kube get clusters.postgresql.cnpg.io --all-namespaces --output json
+# namespace, name, primary, the archiver's ObjectStore and server name; - where one is missing.
+mapfile -t databases < <(jq -r '.items | sort_by(.metadata.namespace, .metadata.name)[]
+  | ((.spec.plugins // []) | map(select(.isWALArchiver == true)) | first // {}) as $archiver
+  | [.metadata.namespace, .metadata.name, (.status.currentPrimary // "" | if . == "" then "-" else . end),
+    ($archiver.parameters.barmanObjectName // "-"), ($archiver.parameters.serverName // .metadata.name)] | @tsv' <<< "$last_output")
+kube get replicationsources.volsync.backube --all-namespaces --output json
+# namespace, name, the repository's Secret, and the owning Kustomization's name and namespace.
+mapfile -t volumes < <(jq -r '.items | sort_by(.metadata.namespace, .metadata.name)[]
+  | [.metadata.namespace, .metadata.name, (.spec.restic.repository // "-"),
+    (.metadata.labels["kustomize.toolkit.fluxcd.io/name"] // "-"),
+    (.metadata.labels["kustomize.toolkit.fluxcd.io/namespace"] // "-")] | @tsv' <<< "$last_output")
+kube get cronjobs.batch --all-namespaces --output json
+cronjobs=$(jq -r '.items[] | .metadata.namespace + "/" + .metadata.name' <<< "$last_output")
+kube get kustomizations.kustomize.toolkit.fluxcd.io --all-namespaces --output json
+suspended_before=$(jq -r '.items[] | select(.spec.suspend == true) | .metadata.namespace + "/" + .metadata.name' <<< "$last_output")
+
+step="comparing the custody files with what $cluster holds"
+agrees=1
+# The Talos age key opens the custody files, the dumps, the snapshots and the secrets bundle, and the
+# Flux age key the SOPS files Flux applies: after the destroy, the operator's are their only copies.
+if [[ -n ${SOPS_AGE_KEY:-} ]]; then
+  talos_recipients=$(printf '%s\n' "$SOPS_AGE_KEY" | age-keygen -y 2> /dev/null) || talos_recipients=
+else
+  talos_recipients=$(age-keygen -y "$SOPS_AGE_KEY_FILE" 2> /dev/null) || talos_recipients=
+fi
+recipient=$(sops_recipient)
+if [[ -z $recipient ]] || is_placeholder "$recipient" || ! grep -qxF -- "$recipient" <<< "$talos_recipients"; then
+  infra_error "the Talos age key is not the key talos/.sops.yaml encrypts to"
+  agrees=0
+fi
+require_flux_age_key || agrees=0
+
+# Any file that holds a seal key goes to bao-seal-restore, which compares its ids with the stanza's
+# and says why it refuses one, such as a file older than the current key.
+if opened "the OpenBao custody file" "$openbao_file" "seal key" \
+  '(.seal.key_id | type == "string" and length > 0)
+    and (.seal.key | type == "string" and test("^[0-9a-f]{64}$"))'; then
+  opened=
+  if ! "$here/bao-seal-restore" "$openbao_file" --check; then
+    if [[ -n $bao_seal_previous ]]; then
+      infra_error "the OpenBao custody file, $openbao_file, does not hold the seal keys the Secrets $bao_namespace/$bao_seal_current and $bao_namespace/$bao_seal_previous hold"
+    else
+      infra_error "the OpenBao custody file, $openbao_file, does not hold the seal key the Secret $bao_namespace/$bao_seal_current holds"
+    fi
+    agrees=0
+  fi
+else
+  agrees=0
+fi
+
+# shellcheck disable=SC2016 # $cluster is a jq variable.
+if opened "the volume backups' custody file" "$volsync_file" "volume backups' master" \
+  '.cluster == $cluster and (.volsync.master // "" | test("^[0-9a-f]{64}$"))'; then
+  opened=
+  for volume in "${volumes[@]}"; do
+    IFS=$'\t' read -r ns name repository _ _ <<< "$volume"
+    if [[ $repository == - ]] || ! kube get secret "$repository" --namespace "$ns" --output json; then
+      infra_error "the Secret of the volume backups of $ns/$name cannot be read"
+      agrees=0
+      continue
+    fi
+    stored=$(jq -j '.data.RESTIC_PASSWORD // "" | @base64d' <<< "$last_output" | digest)
+    last_output=
+    # shellcheck disable=SC2016 # the inner bash expands RESTIC_PASSWORD, which bao-volsync-password sets.
+    derived=$("$here/bao-volsync-password" "$volsync_file" "$name" bash -c 'printf %s "$RESTIC_PASSWORD" | sha256sum') || derived=
+    if [[ -z $derived || $derived != "$stored" ]]; then
+      infra_error "the volume backups' custody file, $volsync_file, does not hold the master the Secret $ns/$repository's password is derived from"
+      agrees=0
+    fi
+  done
+else
+  agrees=0
+fi
+
+# shellcheck disable=SC2016 # $cluster is a jq variable.
+if opened "the PostgreSQL backups' custody file" "$postgres_file" "customer key" \
+  '.cluster == $cluster and (.postgres.sse_c_key // "" | test("^[A-Za-z0-9+/]{43}=$"))'; then
+  customer_key=$(printf '%s' "$opened" | jq -j '.postgres.sse_c_key' | digest)
+  opened=
+  for database in "${databases[@]}"; do
+    IFS=$'\t' read -r ns name _ store _ <<< "$database"
+    if [[ $store == - ]] || ! kube get objectstores.barmancloud.cnpg.io "$store" --namespace "$ns" --output json; then
+      infra_error "the ObjectStore of $ns/$name cannot be read"
+      agrees=0
+      continue
+    fi
+    reference=$(jq -r '.spec.configuration.s3Credentials.sseCustomerKey // {} | (.name // "-") + "\t" + (.key // "-")' <<< "$last_output")
+    IFS=$'\t' read -r secret key <<< "$reference"
+    if [[ $secret == - ]] || ! kube get secret "$secret" --namespace "$ns" --output json; then
+      infra_error "the Secret that holds the customer key of $ns/$name cannot be read"
+      agrees=0
+      continue
+    fi
+    if [[ $(jq -j --arg key "$key" '.data[$key] // "" | @base64d' <<< "$last_output" | digest) != "$customer_key" ]]; then
+      infra_error "the PostgreSQL backups' custody file, $postgres_file, does not hold the customer key the Secret $ns/$secret holds"
+      agrees=0
+    fi
+    last_output=
+  done
+else
+  agrees=0
+fi
+
+# What each copy needs of the cluster.
+grep -qxF openbao/openbao-snapshots <<< "$cronjobs" || {
+  infra_error "openbao/openbao-snapshots: the CronJob that snapshots the secret store does not exist"
+  agrees=0
+}
+for database in "${databases[@]}"; do
+  IFS=$'\t' read -r ns name primary store _ <<< "$database"
+  if [[ ! $ns =~ $pg_label_re || ! $name =~ $pg_label_re ]]; then
+    infra_error "$ns/$name: not a namespace and name of the form the dump recipes take"
+    agrees=0
+    continue
+  fi
+  [[ $primary != - ]] || { infra_error "$ns/$name: its status names no primary" && agrees=0; }
+  [[ $store != - ]] || { infra_error "$ns/$name: it archives through no plugin" && agrees=0; }
+  grep -qxF "$ns/$name-pgdump" <<< "$cronjobs" || { infra_error "$ns/$name: its dump CronJob $ns/$name-pgdump does not exist" && agrees=0; }
+done
+for volume in "${volumes[@]}"; do
+  IFS=$'\t' read -r ns name _ owner owner_ns <<< "$volume"
+  if [[ $owner == - || $owner_ns == - ]]; then
+    infra_error "$ns/$name: no Kustomization's labels are on it, so its trigger cannot be held"
+    agrees=0
+  elif grep -qxF -- "$owner_ns/$owner" <<< "$suspended_before"; then
+    # The run resumes what it suspends, which would end a hold the operator set, and the patches
+    # by hand that hold keeps.
+    infra_error "$ns/$name: the Kustomization $owner_ns/$owner that owns it is suspended already, and the run would resume it; end what it is suspended for and resume it first"
+    agrees=0
+  fi
+done
+((agrees))
+
+step="printing the plan"
+infra_say "the last copies of $cluster, in this order:"
+echo "  openbao/openbao-snapshots: a snapshot, by a Job from the CronJob openbao/openbao-snapshots"
+for database in "${databases[@]}"; do
+  IFS=$'\t' read -r ns name primary _ _ <<< "$database"
+  echo "  $ns/$name: a dump, by a Job from the CronJob $ns/$name-pgdump, and its WAL archived through a segment switched on $ns/$primary"
+done
+for volume in "${volumes[@]}"; do
+  IFS=$'\t' read -r ns name _ owner owner_ns <<< "$volume"
+  echo "  $ns/$name: a backup of its volume, by its manual trigger, with the Kustomization $owner_ns/$owner suspended meanwhile"
+done
+if ((check)); then
+  infra_say "--check takes none of them"
+  exit 0
+fi
+
+summary=()
+copy=openbao/openbao-snapshots
+run_job openbao openbao-snapshots "$copy"
+step="checking the newest snapshot of the secret store"
+checked=$("$here/openbao-snapshot-check" latest "$cluster") || copy_failed "$copy" "its snapshot does not pass openbao-snapshot-check"
+printf '%s\n' "$checked"
+snapshot=$(sed -n 's/^snapshot: //p' <<< "$checked")
+taken_now "$copy" "$snapshot" snapshot
+summary+=("  $copy: snapshot $snapshot")
+
+for database in "${databases[@]}"; do
+  IFS=$'\t' read -r ns name primary store server <<< "$database"
+  copy=$ns/$name
+  run_job "$ns" "$name-pgdump" "$copy"
+  step="checking the newest dump of $copy"
+  checked=$("$here/postgres-dump-check" "$ns" "$name" latest "$cluster") || copy_failed "$copy" "its dump does not pass postgres-dump-check"
+  printf '%s\n' "$checked"
+  dump=$(sed -n 's/^dump: //p' <<< "$checked")
+  taken_now "$copy" "$dump" dump
+  # pg_switch_wal returns the end of the switch record, inside the segment the switch completes, or,
+  # when nothing was written since the last switch, the start of the segment in use, which it leaves
+  # as it is. One byte before either is in the newest complete segment, the one to wait for.
+  step="switching the WAL on $ns/$primary"
+  psql_on "$ns" "$primary" "select pg_walfile_name(pg_switch_wal() - 1::numeric), to_char(now() at time zone 'utc', 'YYYY-MM-DD HH24:MI:SS')" ||
+    copy_failed "$copy" "psql in $ns/$primary could not switch the WAL"
+  read -r segment day time <<< "$last_output"
+  if [[ ! $segment =~ ^[0-9A-F]{24}$ || ! "$day $time" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}\ [0-9]{2}:[0-9]{2}:[0-9]{2}$ ]]; then
+    copy_failed "$copy" "the switch in $ns/$primary named no WAL segment and time"
+  fi
+  step="waiting until the archiver of $copy has archived $segment"
+  deadline=$((SECONDS + 10#$timeout))
+  while :; do
+    psql_on "$ns" "$primary" "select last_archived_wal from pg_stat_archiver" ||
+      copy_failed "$copy" "psql in $ns/$primary could not read pg_stat_archiver"
+    archived=${last_output//[[:space:]]/}
+    ! archived_through "$archived" "$segment" || break
+    ! deadline_passed "$deadline" || copy_failed "$copy" "the archiver did not reach $segment within $timeout seconds; it last archived ${archived:-nothing}"
+    sleep "$poll"
+  done
+  step="reading the recovery window of $copy"
+  kube get objectstores.barmancloud.cnpg.io "$store" --namespace "$ns" --output json ||
+    copy_failed "$copy" "the ObjectStore $ns/$store cannot be read"
+  if ! jq -e --arg server "$server" '.status.serverRecoveryWindow[$server] // {} | .firstRecoverabilityPoint and .lastSuccessfulBackupTime' \
+    <<< "$last_output" > /dev/null; then
+    copy_failed "$copy" "the ObjectStore $ns/$store holds no recovery window of $server with a first recoverability point and a last successful backup"
+  fi
+  summary+=("  $copy: dump $dump; WAL archived through $segment, which holds every transaction committed before $day $time UTC")
+done
+
+for volume in "${volumes[@]}"; do
+  IFS=$'\t' read -r ns name _ owner owner_ns <<< "$volume"
+  copy=$ns/$name
+  step="suspending the Kustomization $owner_ns/$owner"
+  quiet_flux suspend kustomization "$owner" --namespace "$owner_ns" || copy_failed "$copy" "the Kustomization $owner_ns/$owner could not be suspended"
+  suspended=("$owner_ns/$owner")
+  step="waiting until no backup of $copy runs"
+  deadline=$((SECONDS + 10#$timeout))
+  while :; do
+    kube get replicationsources.volsync.backube "$name" --namespace "$ns" --output json ||
+      copy_failed "$copy" "the ReplicationSource cannot be read"
+    [[ -n $(jq -r '.status.lastSyncStartTime // ""' <<< "$last_output") ]] || break
+    ! deadline_passed "$deadline" || copy_failed "$copy" "a backup of it that began before the trigger did not end within $timeout seconds"
+    sleep "$poll"
+  done
+  mover=$(jq -c '.status.latestMoverStatus // {}' <<< "$last_output")
+  step="triggering a backup of $copy"
+  kube patch replicationsources.volsync.backube "$name" --namespace "$ns" --type merge \
+    --patch "$(jq -cn --arg tag "$tag" '{spec: {trigger: {manual: $tag}}}')" || copy_failed "$copy" "its manual trigger could not be set"
+  step="waiting for the backup of $copy"
+  deadline=$((SECONDS + 10#$timeout))
+  while :; do
+    kube get replicationsources.volsync.backube "$name" --namespace "$ns" --output json ||
+      copy_failed "$copy" "the ReplicationSource cannot be read"
+    if [[ $(jq -r '.status.lastManualSync // ""' <<< "$last_output") == "$tag" ]]; then
+      result=$(jq -r '.status.latestMoverStatus.result // "with no result"' <<< "$last_output")
+      [[ $result == Successful ]] || copy_failed "$copy" "its backup ended $result"
+      synced=$(jq -r '.status.lastSyncTime // ""' <<< "$last_output")
+      break
+    fi
+    # A mover that fails is started again, so a result that turned Failed since the trigger is the
+    # end of this backup. VolSync's status holds only the result and the log's tail, so a failure
+    # that reads as the status before the trigger did is not told from it, and the wait runs out.
+    if [[ $(jq -r '.status.latestMoverStatus.result // ""' <<< "$last_output") == Failed &&
+      $(jq -c '.status.latestMoverStatus // {}' <<< "$last_output") != "$mover" ]]; then
+      copy_failed "$copy" "its backup ended Failed"
+    fi
+    ! deadline_passed "$deadline" || copy_failed "$copy" "its backup did not complete within $timeout seconds"
+    sleep "$poll"
+  done
+  step="resuming the Kustomization $owner_ns/$owner"
+  quiet_flux resume kustomization "$owner" --namespace "$owner_ns" --wait=false ||
+    copy_failed "$copy" "the Kustomization $owner_ns/$owner could not be resumed"
+  suspended=()
+  summary+=("  $copy: volume backed up at $synced")
+done
+
+step="printing the summary"
+infra_say "the last copies of $cluster, each taken since $(date -u -d "@$start" '+%Y-%m-%d %H:%M:%S') UTC:"
+printf '%s\n' "${summary[@]}"

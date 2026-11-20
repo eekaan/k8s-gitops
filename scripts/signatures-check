@@ -1,0 +1,695 @@
+#!/usr/bin/env bash
+# Holds every source a chart, the cluster's artifact or the tools image comes from to its row of
+# signatures.yaml (docs/kubernetes.md, Signatures), and the rows to the verify blocks Flux applies.
+#
+# The sources are read from what Flux builds, as scripts/kubernetes-check keeps it in
+# KUBERNETES_CHECK_BUILT (every application, enabled or not, and each cluster directory); the check
+# runs it first and stops when it fails. They are the url of every OCIRepository and HelmRepository,
+# the artifact a FluxInstance syncs, read from the values its HelmRelease builds into a ConfigMap,
+# and the tools image, by the name scripts/tools-image publishes. A GitRepository is passed over: it
+# holds no chart. The check fails, naming the source, and for an object its kind, namespace, name and
+# file:
+#   - a source without a row, a row no source uses, a source listed twice, and rows out of order:
+#     the synced artifact first, then the tools image, then every other source sorted byte by byte;
+#   - a row whose fields are not exactly those of its kind, or one that is not one line of text (a
+#     reason may fold over lines);
+#   - a HelmRepository whose row is not unsigned, a HelmRepository of type oci or not on https, and
+#     any other kind of source.toolkit.fluxcd.io; an OCIRepository whose ref is neither a tag nor a
+#     digest;
+#   - a key that is not a file under signatures/ holding one PEM public key, a key row without
+#     cluster: false, and a file under signatures/ that no row names;
+#   - an issuer that is not ^, a literal with every dot escaped, and $; a subject that is not ^, such
+#     a literal up to and including the @ that begins its ref, a ref of literals, escaped dots,
+#     bracket expressions, quantifiers and groups that alone hold alternations, and $, its only $.
+#     That is syntax Go's regular expressions, which Flux and cosign compile and match unanchored,
+#     and POSIX extended ones, which bash's tests match with, read alike;
+#   - an OCIRepository whose row is keyless without cluster: false and whose spec.verify, as Flux
+#     builds it after substitution, is not exactly provider cosign and one matchOIDCIdentity of the
+#     row's issuer and subject, and any other OCIRepository with a verify block; the same of the
+#     verify block the FluxInstance's values patch onto its sync source, and more than one patch
+#     whose target selects the sync source as kustomize selects, by patterns of kind and name; a
+#     keyless row of a source nothing on the cluster pulls, the tools image, without cluster: false.
+# It reports every failure, then exits non-zero; when every rule holds it prints one line. It
+# fetches nothing.
+#
+#   verify  Runs the rules above first and stops when they fail. Then, for each row, against the
+#           pins of the tree (an OCIRepository's tag or digest, the sync source's ref, the digest
+#           versions.yaml records under ci_tools_image), probes the registry's /v2/ with curl, then
+#           runs cosign verify: a keyless row with its issuer and subject as the two
+#           regular-expression flags and nothing else, as Flux matches them; a key row with its key,
+#           the transparency log not consulted, as source-controller does not for a key, and its
+#           digest algorithm; an unsigned OCI row as a lookup that passes only with cosign's own
+#           outcome "no signatures found" (exit 10). Only exit 0 verifies. A Helm repository's row
+#           fetches nothing. A registry that does not answer in time, answers 429 or 5xx, or cannot
+#           be resolved fails its source, and cosign is not run for it. Every other outcome fails
+#           with a reason of this check's own, from cosign's exit code and the time it took, never
+#           from what it printed. Every row is checked, each cosign call bounded by its --timeout,
+#           SIGNATURES_VERIFY_TIMEOUT seconds (120 when unset); then the run exits non-zero if any
+#           row failed. It prints one line per row, pass, FAIL or skip, the source and why, and
+#           nothing else: what cosign and curl print can name addresses and paths.
+#
+# cosign runs through run_tool (scripts/lib/tools.sh), so with none of the caller's secrets, and in
+# a home, a Docker configuration with no login in it and a TUF root of the run's own, without
+# REGISTRY_AUTH_FILE or podman's places and without any variable the pinned cosign's env lists;
+# verify is the one subcommand it runs.
+#
+# Usage: scripts/signatures-check [verify] [DIR]   (DIR holds kubernetes/, signatures.yaml,
+#        signatures/, versions.yaml and scripts/tools-image; defaults to this repository)
+set -euo pipefail
+# Text is matched, sorted and shown byte by byte, whatever the caller's locale.
+export LC_ALL=C
+shopt -s nullglob
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/tools.sh
+. "$here/lib/tools.sh"
+# shellcheck source=scripts/lib/tree-paths.sh
+. "$here/lib/tree-paths.sh"
+
+mode=check
+if [[ ${1-} == verify ]]; then
+  mode=verify
+  shift
+fi
+if (($# > 1)) || [[ ${1-} == -* ]]; then
+  echo "usage: scripts/signatures-check [verify] [DIR]" >&2
+  exit 2
+fi
+dir="$(cd "${1:-$here/..}" && pwd)"
+
+# Every variable the pinned cosign's env lists (cosign env): those that change where or how a
+# signature is read, or what is trusted, COSIGN_REPOSITORY, COSIGN_EXPERIMENTAL,
+# COSIGN_MAX_ATTACHMENT_SIZE, the SIGSTORE_* files, TUF_MIRROR, TUF_ROOT and TUF_ROOT_JSON, and the
+# rest, the tokens and settings of signing and of pushing, which a verification needs none of.
+cosign_variables=(
+  ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_ID_TOKEN_REQUEST_URL BUILDKITE_AGENT_ACCESS_TOKEN
+  BUILDKITE_AGENT_ENDPOINT BUILDKITE_AGENT_LOG_LEVEL BUILDKITE_JOB_ID COSIGN_DOCKER_MEDIA_TYPES
+  COSIGN_EXPERIMENTAL COSIGN_MAX_ATTACHMENT_SIZE COSIGN_PASSWORD COSIGN_PKCS11_IGNORE_CERTIFICATE
+  COSIGN_PKCS11_MODULE_PATH COSIGN_PKCS11_PIN COSIGN_REPOSITORY GITHUB_HOST GITHUB_TOKEN GITLAB_HOST
+  GITLAB_TOKEN GOOGLE_SERVICE_ACCOUNT_NAME SIGSTORE_CT_LOG_PUBLIC_KEY_FILE SIGSTORE_ID_TOKEN
+  SIGSTORE_REKOR_PUBLIC_KEY SIGSTORE_ROOT_FILE SIGSTORE_TSA_CERTIFICATE_FILE SOURCE_DATE_EPOCH
+  SPIFFE_ENDPOINT_SOCKET TUF_MIRROR TUF_ROOT TUF_ROOT_JSON
+)
+
+tools=(yq jq kustomize flux)
+[[ $mode == check ]] || tools+=(cosign curl)
+for tool in "${tools[@]}"; do
+  type -P "$tool" > /dev/null || { echo "signatures-check: $tool not found on PATH"; exit 1; }
+done
+timeout=${SIGNATURES_VERIFY_TIMEOUT:-120}
+if [[ ! $timeout =~ ^[1-9][0-9]{0,3}$ ]]; then
+  echo "signatures-check: SIGNATURES_VERIFY_TIMEOUT is a whole number of seconds, 1 to 9999"
+  exit 1
+fi
+
+failures=0
+fail() {
+  echo "signatures-check: $*" >&2
+  failures=$((failures + 1))
+}
+
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+
+# What Flux builds, as the offline check builds it. On a tree that fails its rules the objects are
+# not the ones the cluster would get, so no source is read.
+mkdir "$tmp/built"
+if ! log="$(KUBERNETES_CHECK_BUILT="$tmp/built" run_tool "$here/kubernetes-check" "$dir" 2>&1)"; then
+  printf '%s\n' "$log" | grep -v '^built ' >&2
+  echo "signatures-check: scripts/kubernetes-check fails on this tree, so no source was read" >&2
+  exit 1
+fi
+
+# Every document of every build, one JSON object a line, with the application directory it comes
+# from, empty for a cluster directory or root.
+: > "$tmp/docs.jsonl"
+if [[ -f $tmp/built/builds ]]; then
+  while IFS= read -r -d '' file && IFS= read -r -d '' label && IFS= read -r -d '' app_dir; do
+    [[ $file =~ ^[0-9]+\.yaml$ && -f $tmp/built/$file ]] || { fail "kubernetes-check kept a build this check cannot read: $file"; continue; }
+    yq -N -o json -I0 'select(. != null)' "$tmp/built/$file" |
+      jq -c --arg label "$label" --arg app "$app_dir" '{label: $label, app: $app, doc: .}' >> "$tmp/docs.jsonl"
+  done < "$tmp/built/builds"
+fi
+
+# file_of APP_DIR KIND NAME: the file of the application's app/ that holds an object of exactly that
+# kind and name (jq compares them as values), or the application's ks.yaml when none does.
+file_of() {
+  local file
+  if [[ -n $1 && -d $dir/$1/app ]]; then
+    while IFS= read -r -d '' file; do
+      if [[ $(yq -o json -I0 '.' "$file" 2> /dev/null |
+        jq -s --arg kind "$2" --arg name "$3" '[.[] | select(type == "object" and .kind == $kind and .metadata.name == $name)] | length' 2> /dev/null) =~ ^[1-9] ]]; then
+        echo "${file#"$dir"/}"
+        return
+      fi
+    done < <(find "$dir/$1/app" -type f \( -name '*.yaml' -o -name '*.yml' \) -print0 | sort -z)
+  fi
+  echo "${1:+$1/ks.yaml}"
+}
+
+# Records of fields separated by the unit separator, which, unlike a tab, read keeps an empty field
+# between, each field cleaned of it and of line breaks.
+sep=$'\x1f'
+# The sources, one record each of sources.txt: the source, what a message calls it, what it is
+# (OCIRepository, HelmRepository, sync or tools), its pin (- for none) and its verify block as JSON,
+# null for none, or unread for a sync source whose patch the check cannot read. An object of a kind
+# with no rule fails here.
+: > "$tmp/sources.txt"
+add_source() {
+  local IFS=$sep
+  printf '%s\n' "$*" >> "$tmp/sources.txt"
+}
+while IFS=$sep read -r kind namespace name url ref type verify app; do
+  [[ $kind != GitRepository ]] || continue
+  where="$kind $namespace/$name, $(file_of "$app" "$kind" "$name")"
+  case $kind in
+    OCIRepository)
+      pin=$(jq -r 'if has("semver") or has("semverFilter") then "" else .digest // .tag // "" end' <<< "$ref")
+      if [[ -z $pin ]]; then
+        fail "$url ($where): its ref is neither a tag nor a digest, so nothing pins what is verified"
+        continue
+      fi
+      add_source "$url" "$where" "$kind" "$pin" "$verify"
+      ;;
+    HelmRepository)
+      if [[ $type == oci ]]; then
+        fail "$url ($where): a HelmRepository of type oci, which the check has no rule for; an OCIRepository holds such a chart"
+      elif [[ $url != https://* ]]; then
+        fail "$url ($where): a HelmRepository not on https, which the check has no rule for"
+      else
+        add_source "$url" "$where" "$kind" - "$verify"
+      fi
+      ;;
+    *) fail "${url:-no url} ($where): a $kind, a source kind the check has no rule for" ;;
+  esac
+done < <(jq -r 'select((.doc.apiVersion // "" | tostring) | test("^source\\.toolkit\\.fluxcd\\.io/")) | .app as $app | .doc
+  | [.kind, (.metadata.namespace // "default"), .metadata.name, (.spec.url // ""), (.spec.ref // {} | tojson),
+     (.spec.type // ""), (.spec.verify // null | tojson), $app] | map(tostring | gsub("[\u001f\n]"; "?")) | join("\u001f")' "$tmp/docs.jsonl")
+
+# The sync sources: each HelmRelease whose values, those of its ConfigMaps and then its own over them,
+# set instance.sync, from which the flux-instance chart renders the FluxInstance and its sync source,
+# named after sync.name or the instance's namespace.
+releases=0
+while IFS= read -r release; do
+  releases=$((releases + 1))
+  values="$tmp/values.$releases"
+  mkdir "$values"
+  index=0
+  while IFS= read -r from; do
+    index=$((index + 1))
+    jq -r --argjson from "$from" --arg app "$(jq -r .app <<< "$release")" 'select(.app == $app and .doc.kind == "ConfigMap"
+      and .doc.metadata.name == $from.name) | .doc.data[$from.key] // empty' "$tmp/docs.jsonl" > "$values/$(printf '%03d' "$index").yaml"
+  done < <(jq -c '.from[]' <<< "$release")
+  jq '.own' <<< "$release" > "$values/own.json"
+  # shellcheck disable=SC2016 # $item is a yq variable.
+  if ! merged=$(yq ea -o json -I0 '. as $item ireduce ({}; . * ($item // {}))' "$values"/*.yaml "$values/own.json" 2> /dev/null); then
+    fail "$(jq -r .label <<< "$release"): the values of a HelmRelease do not read as YAML"
+    continue
+  fi
+  sync=$(jq -c '.instance.sync // empty' <<< "$merged")
+  [[ -n $sync ]] || continue
+  app=$(jq -r .app <<< "$release")
+  url=$(jq -r '.url // ""' <<< "$sync")
+  ref=$(jq -r '.ref // ""' <<< "$sync")
+  where="the sync source of ${app:-$(jq -r .label <<< "$release")}"
+  case $(jq -r '.kind // ""' <<< "$sync") in
+    GitRepository) continue ;;
+    OCIRepository) ;;
+    *)
+      fail "${url:-no url} ($where): a sync source of kind $(jq -r '.kind // "none"' <<< "$sync"), which the check has no rule for"
+      continue
+      ;;
+  esac
+  if [[ -z $url || -z $ref ]]; then
+    fail "${url:-no url} ($where): no url or no ref, so nothing pins what is verified"
+    continue
+  fi
+  # The patches that select the sync source, as kustomize selects them: a target's kind and name are
+  # anchored regular expressions, and one left out or empty selects any; a pattern jq cannot read
+  # counts as selecting.
+  name=$(jq -r --arg default "$(jq -r .namespace <<< "$release")" '.name // $default' <<< "$sync")
+  patches=$(jq -c --arg name "$name" 'def selects($value): . == null or . == "" or (tostring as $pattern | try ($value | test("\\A(?:" + $pattern + ")\\z")) catch true);
+    [.instance.kustomize.patches // [] | .[] | select((.target.kind | selects("OCIRepository")) and (.target.name | selects($name))) | .patch]' <<< "$merged")
+  verify=null
+  # A patch the check cannot read fails once, and the sync source is still recorded, as unread, so
+  # that the rows' order and the use of its row are judged as for any other.
+  # shellcheck disable=SC2016 # $ops is a yq variable.
+  if [[ $(jq length <<< "$patches") -gt 1 ]]; then
+    fail "$url ($where): more than one patch of the FluxInstance's values selects the sync source; the check reads one, which adds /spec/verify"
+    add_source "$url" "$where" sync "$ref" unread
+    continue
+  elif [[ $(jq length <<< "$patches") -eq 1 ]] && ! verify=$(jq -r '.[0] | tostring' <<< "$patches" | yq -o json -I0 '
+    if tag == "!!seq" then
+      ([.[] | select(((.path // "") | tostring) == "" or ((.path // "") | tostring) == "/spec"
+          or ((.path // "") | tostring) == "/spec/" or ((.path // "") | tostring) == "/spec/verify"
+          or ((.path // "") | tostring | test("^/spec/verify/")))] as $ops
+       | if ($ops | length) == 0 then null
+         elif ($ops | length) == 1 and $ops[0].op == "add" and $ops[0].path == "/spec/verify" then $ops[0].value
+         else error("not one add of /spec/verify") end)
+    else error("not a JSON patch") end' 2> /dev/null); then
+    fail "$url ($where): its patch is not a JSON patch whose one operation on the verification adds /spec/verify, which is all the check reads"
+    add_source "$url" "$where" sync "$ref" unread
+    continue
+  fi
+  add_source "$url" "$where" sync "$ref" "$(jq -c . <<< "${verify:-null}")"
+done < <(jq -c --slurp '. as $docs | $docs[] | select(.doc.kind == "HelmRelease") | {app, label,
+    namespace: (.doc.spec.targetNamespace // .doc.metadata.namespace // "default"), own: (.doc.spec.values // {}),
+    from: [(.doc.spec.valuesFrom // [])[] | select(.kind == "ConfigMap") | {name, key: (.valuesKey // "values.yaml")}]}' "$tmp/docs.jsonl")
+
+# The tools image, by the name scripts/tools-image publishes, and the digest versions.yaml records.
+tools_where="the tools image scripts/tools-image publishes"
+tools_script="$dir/scripts/tools-image"
+repository_line=$(grep -E '^repository=' "$tools_script" 2> /dev/null || true)
+image_line=$(grep -E '^image=' "$tools_script" 2> /dev/null || true)
+image=${image_line#image=}
+# shellcheck disable=SC2016 # The script's own text, $repository unexpanded.
+image=${image//'$repository'/${repository_line#repository=}}
+if [[ $repository_line == *$'\n'* || $image_line == *$'\n'* || ! $image =~ ^[a-z0-9.-]+(:[0-9]+)?(/[a-z0-9._-]+)+$ ]]; then
+  fail "scripts/tools-image: names no image the check can read, on one line repository= and one line image="
+else
+  recorded=$(grep -E '^ci_tools_image:' "$dir/versions.yaml" 2> /dev/null || true)
+  recorded=${recorded#ci_tools_image:}
+  recorded=${recorded# }
+  if [[ -z $recorded || $recorded == *$'\n'* ]]; then
+    fail "oci://$image ($tools_where): versions.yaml must set ci_tools_image on one line"
+  elif [[ $recorded == '""' ]]; then
+    add_source "oci://$image" "$tools_where" tools - null
+  elif [[ $recorded =~ ^(.+)@(sha256:[0-9a-f]{64})$ && ${BASH_REMATCH[1]} == "$image" ]]; then
+    add_source "oci://$image" "$tools_where" tools "${BASH_REMATCH[2]}" null
+  else
+    fail "oci://$image ($tools_where): versions.yaml records $(tree_paths_show "$recorded") under ci_tools_image, not $image by its digest"
+  fi
+fi
+
+# The rows.
+file="$dir/signatures.yaml"
+if [[ ! -f $file || -L $file ]]; then
+  echo "signatures-check: signatures.yaml: not found, or not a regular file" >&2
+  exit 1
+fi
+odd=0
+tree_paths_odd "$file" || odd=$?
+if ((odd != 1)); then
+  echo "signatures-check: signatures.yaml: does not read as YAML, or holds a key twice, an anchor, an alias, a merge key or a tag outside YAML's core schema" >&2
+  exit 1
+fi
+if ! rows=$(yq -o json -I0 'if tag == "!!map" and (keys | length) == 1 and has("sources") and (.sources | tag) == "!!seq"
+    then .sources[] else error("form") end' "$file" 2> /dev/null); then
+  echo "signatures-check: signatures.yaml: must be one mapping with one key, sources, a list of rows" >&2
+  exit 1
+fi
+# Each field's line, and the line each row starts on, to tell a field written on one line from one
+# that runs on.
+row_count=$(yq '.sources | length' "$file")
+# shellcheck disable=SC2016 # $k is a yq variable.
+yq -o json -I0 '[.sources[] | {"line": line, "fields": [(select(tag == "!!map") | keys[]) as $k | {"key": $k, "line": ($k | line),
+  "tag": (.[$k] | tag)}]}]' "$file" > "$tmp/lines.json"
+total_lines=$(wc -l < "$file")
+
+# literal_re: a literal of a pattern, its dots escaped. ref_*: the ref of a subject, parsed from
+# ref_text at ref_at.
+literal_re='^([-A-Za-z0-9/:_%~=,]|\\\.)+$'
+# A bracket expression: letters, digits, _ and /, and ranges within the digits, the lower or the
+# upper case letters, after an optional ^.
+bracket_re='^\[\^?([0-9]-[0-9]|[a-z]-[a-z]|[A-Z]-[A-Z]|[A-Za-z0-9_/])+\]'
+ref_text='' ref_at=0
+ref_char() {
+  printf '%s' "${ref_text:ref_at:1}"
+}
+# ref_sequence DEPTH: one or more atoms, each with at most one quantifier; a | or ) ends it inside a
+# group only.
+ref_sequence() {
+  local depth=$1 atoms=0 char
+  while ((ref_at < ${#ref_text})); do
+    char=$(ref_char)
+    if [[ $char == ')' || $char == '|' ]]; then
+      ((depth > 0)) || return 1
+      break
+    fi
+    ref_atom "$depth" || return 1
+    ref_quantifier || return 1
+    atoms=$((atoms + 1))
+  done
+  ((atoms > 0))
+}
+# ref_atom DEPTH: a literal character, an escaped dot, a bracket expression or a group.
+ref_atom() {
+  local char rest bracket body
+  char=$(ref_char)
+  rest=${ref_text:ref_at}
+  case $char in
+    \\)
+      [[ ${rest:1:1} == . ]] || return 1
+      ref_at=$((ref_at + 2))
+      ;;
+    '[')
+      [[ $rest =~ $bracket_re ]] || return 1
+      bracket=${BASH_REMATCH[0]}
+      # A range goes up, as Go and POSIX both refuse one that goes down.
+      body=$bracket
+      while [[ $body =~ ([0-9a-zA-Z])-([0-9a-zA-Z]) ]]; do
+        [[ ! ${BASH_REMATCH[1]} > ${BASH_REMATCH[2]} ]] || return 1
+        body=${body/"${BASH_REMATCH[0]}"/}
+      done
+      ref_at=$((ref_at + ${#bracket}))
+      ;;
+    '(')
+      [[ ${rest:1:1} != '?' ]] || return 1
+      ref_at=$((ref_at + 1))
+      ref_sequence $(($1 + 1)) || return 1
+      while [[ $(ref_char) == '|' ]]; do
+        ref_at=$((ref_at + 1))
+        ref_sequence $(($1 + 1)) || return 1
+      done
+      [[ $(ref_char) == ')' ]] || return 1
+      ref_at=$((ref_at + 1))
+      ;;
+    [-A-Za-z0-9/:_%~=,@]) ref_at=$((ref_at + 1)) ;;
+    *) return 1 ;;
+  esac
+}
+# ref_quantifier: *, +, ? or {n}, {n,}, {n,m} with m at most 255, as POSIX allows, and n no more
+# than m; neither lazy nor followed by another quantifier.
+ref_quantifier() {
+  local rest=${ref_text:ref_at}
+  if [[ $rest =~ ^([*+?]|\{([0-9]{1,3})(,([0-9]{0,3}))?\}) ]]; then
+    if [[ -n ${BASH_REMATCH[4]} ]]; then
+      ((10#${BASH_REMATCH[2]} <= 10#${BASH_REMATCH[4]} && 10#${BASH_REMATCH[4]} <= 255)) || return 1
+    elif [[ -n ${BASH_REMATCH[2]} ]]; then
+      ((10#${BASH_REMATCH[2]} <= 255)) || return 1
+    fi
+    ref_at=$((ref_at + ${#BASH_REMATCH[0]}))
+    [[ ${ref_text:ref_at:1} != [*+?\{] ]] || return 1
+  fi
+}
+# identity_refused FIELD PATTERN: why PATTERN is no issuer or subject of the grammar, or nothing.
+identity_refused() {
+  local field=$1 pattern=$2 body head
+  if [[ $pattern != ^* || $pattern != *'$' || ${#pattern} -lt 3 ]]; then
+    echo "$field is not anchored with ^ at its start and \$ at its end"
+    return
+  fi
+  body=${pattern:1:${#pattern}-2}
+  if [[ $body == *'$'* ]]; then
+    echo "$field holds a \$ before its end"
+    return
+  fi
+  if [[ $field == issuer ]]; then
+    [[ $body =~ $literal_re ]] || echo "issuer is not a literal with every dot escaped"
+    return
+  fi
+  head=${body%%@*}
+  if [[ ! $head =~ $literal_re ]]; then
+    echo "subject is not a literal with every dot escaped up to the @ that begins its ref"
+    return
+  fi
+  [[ $body == *@* ]] || return 0
+  ref_text=${body#*@} ref_at=0
+  if ! ref_sequence 0 || ((ref_at != ${#ref_text})); then
+    echo "subject's ref is not of literals, escaped dots, bracket expressions, quantifiers that are not lazy, and groups that alone hold alternations, with no bare dot, backslash class or flag group"
+  fi
+}
+
+# pem_refused PATH: why the key file at PATH, under DIR, is not one PEM public key, or nothing.
+pem_refused() {
+  local path=$dir/$1 body
+  if [[ -L $path || ! -f $path ]]; then
+    echo "is not a regular file"
+    return
+  fi
+  if ! grep -qx -- '-----BEGIN PUBLIC KEY-----' "$path" || [[ $(grep -c -- '^-----' "$path") -ne 2 ]] ||
+    [[ $(sed -n '1p' "$path") != '-----BEGIN PUBLIC KEY-----' || $(sed -n '$p' "$path") != '-----END PUBLIC KEY-----' ]] ||
+    grep -qv -- '^\(-----\(BEGIN\|END\) PUBLIC KEY-----\|[A-Za-z0-9+/=]\{1,76\}\)$' "$path"; then
+    echo "does not hold one PEM public key and nothing else"
+    return
+  fi
+  body=$(sed '1d;$d' "$path" | tr -d '\n')
+  base64 -d <<< "$body" > /dev/null 2>&1 || echo "does not hold one PEM public key and nothing else"
+}
+
+declare -A row_of=() keys_named=()
+declare -a order=()
+index=-1
+while IFS= read -r row; do
+  index=$((index + 1))
+  if [[ $(jq -r type <<< "$row") != object ]]; then
+    fail "signatures.yaml: row $((index + 1)) is not a mapping"
+    continue
+  fi
+  source=$(jq -r 'if (.source | type) == "string" then .source else "" end' <<< "$row")
+  if [[ ! $source =~ ^(oci|https)://[A-Za-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9._-]+)*$ ]]; then
+    fail "signatures.yaml: row $((index + 1)): its source is not oci:// or https:// and a registry or host, and a path"
+    continue
+  fi
+  what="signatures.yaml: the row of $source"
+  if [[ -n ${row_of[$source]+set} ]]; then
+    fail "$what: listed twice"
+    continue
+  fi
+  row_of[$source]=$row
+  order+=("$source")
+  signed=$(jq -r '.signed // "" | tostring' <<< "$row")
+  case $signed in
+    keyless) fields=(source signed issuer subject from) ;;
+    key) fields=(source signed key from cluster reason) ;;
+    unsigned) fields=(source signed reason) ;;
+    *)
+      fail "$what: signed must be keyless, key or unsigned"
+      continue
+      ;;
+  esac
+  optional=()
+  [[ $signed != keyless ]] || optional=(cluster reason)
+  [[ $signed != key ]] || optional=(digest)
+  for field in "${fields[@]}"; do
+    jq -e --arg field "$field" 'has($field)' <<< "$row" > /dev/null || fail "$what: $field is missing"
+  done
+  while IFS= read -r field; do
+    [[ " ${fields[*]} ${optional[*]} " == *" $field "* ]] || fail "$what: $field is an unknown field of a $signed row"
+  done < <(jq -r 'keys[]' <<< "$row")
+  # Each field one line of text: a string with no line break, cluster the boolean false; and every
+  # field but a reason written on one line, nothing but blank and comment lines after it.
+  row_lines=$(jq -c --argjson i "$index" '.[$i]' "$tmp/lines.json")
+  next_line=$(jq -r --argjson i "$index" --argjson last "$((total_lines + 1))" '.[$i + 1].line // $last' "$tmp/lines.json")
+  while IFS=$sep read -r field line tag until; do
+    if [[ $field == cluster ]]; then
+      [[ $tag == '!!bool' && $(jq -r '.cluster' <<< "$row") == false ]] || fail "$what: cluster is false, or left out"
+      continue
+    fi
+    if [[ $tag != '!!str' ]] || jq -e --arg field "$field" '.[$field] | test("[\n\r]") or (gsub("\\s"; "") == "")' <<< "$row" > /dev/null; then
+      fail "$what: $field is not one line of text"
+      continue
+    fi
+    [[ $field != reason ]] || continue
+    if ((until > line + 1)) && sed -n "$((line + 1)),$((until - 1))p" "$file" | grep -qvE '^[[:space:]]*(#.*)?$'; then
+      fail "$what: $field is not one line of text: it runs on over the next line"
+    fi
+  done < <(jq -r --argjson next "$next_line" '.fields | sort_by(.line) | . as $f | to_entries[]
+    | [.value.key, .value.line, .value.tag, ($f[.key + 1].line // $next)] | map(tostring) | join("\u001f")' <<< "$row_lines")
+  if [[ $signed == keyless ]]; then
+    for field in issuer subject; do
+      value=$(jq -r --arg field "$field" '.[$field] // "" | tostring' <<< "$row")
+      why=$(identity_refused "$field" "$value")
+      [[ -z $why ]] || fail "$what: $why"
+    done
+    if jq -e 'has("cluster") != has("reason")' <<< "$row" > /dev/null; then
+      fail "$what: cluster: false and its reason go together"
+    fi
+  fi
+  if [[ $signed == key ]]; then
+    key=$(jq -r '.key // "" | tostring' <<< "$row")
+    if [[ ! $key =~ ^signatures/[A-Za-z0-9_][A-Za-z0-9._-]*$ ]]; then
+      fail "$what: key is not the path of a file directly under signatures/; a URL, a KMS or a Kubernetes reference is none"
+    else
+      keys_named[$key]=1
+      why=$(pem_refused "$key")
+      [[ -z $why ]] || fail "$what: key $key $why"
+    fi
+    if jq -e 'has("digest") and .digest != "sha512"' <<< "$row" > /dev/null; then
+      fail "$what: digest is sha512, or left out for SHA-256"
+    fi
+    if ! jq -e '.cluster == false' <<< "$row" > /dev/null; then
+      fail "$what: a key row takes cluster: false with its reason, as the cluster verifies no key's signature here"
+    fi
+  fi
+done <<< "$rows"
+((row_count > 0)) || fail "signatures.yaml: lists no row"
+
+# Every file under signatures/ is a key a row names.
+if [[ -d $dir/signatures ]]; then
+  while IFS= read -r -d '' path; do
+    path=${path#"$dir"/}
+    if [[ -L $dir/$path || ! -f $dir/$path ]]; then
+      fail "$path: not a regular file; signatures/ holds the keys the rows name"
+    elif [[ -z ${keys_named[$path]+set} ]]; then
+      fail "$path: no row names it"
+    fi
+  done < <(find "$dir/signatures" -mindepth 1 \( -type f -o -type l \) -print0 | sort -z)
+fi
+
+# The rows' order: the synced artifacts, the tools image, then every other source, byte by byte.
+mapfile -t synced < <(awk -F"$sep" '$3 == "sync" { print $1 }' "$tmp/sources.txt" | sort -u)
+tools_source=$(awk -F"$sep" '$3 == "tools" { print $1 }' "$tmp/sources.txt")
+expected=()
+for source in "${synced[@]}" "$tools_source"; do
+  [[ -z $source || -z ${row_of[$source]+set} ]] || expected+=("$source")
+done
+while IFS= read -r source; do
+  [[ -z $source ]] || expected+=("$source")
+done < <(printf '%s\n' "${order[@]}" | grep -vxF -f <(printf '%s\n' "${expected[@]}" "") | sort)
+for ((i = 0; i < ${#order[@]}; i++)); do
+  if [[ ${order[i]} != "${expected[i]}" ]]; then
+    fail "signatures.yaml: the rows are out of order: ${order[i]} stands where ${expected[i]} belongs; the synced artifact comes first, then the tools image, then every other source sorted byte by byte"
+    break
+  fi
+done
+
+# The sources against their rows, and the verify blocks against the rows.
+declare -A has_source=() on_cluster=()
+while IFS=$sep read -r source where kind pin verify; do
+  has_source[$source]=1
+  [[ $kind == tools ]] || on_cluster[$source]=1
+  if [[ -z ${row_of[$source]+set} ]]; then
+    fail "$source ($where): has no row in signatures.yaml"
+    continue
+  fi
+  row=${row_of[$source]}
+  signed=$(jq -r '.signed // ""' <<< "$row")
+  if [[ $kind == HelmRepository && $signed != unsigned ]]; then
+    fail "$source ($where): a chart from a Helm repository is unsigned by its kind, as Flux verifies none: its row is signed: unsigned"
+  fi
+  [[ $kind == OCIRepository || $kind == sync ]] || continue
+  # A sync source whose patch was not read has failed for it already.
+  [[ $verify != unread ]] || continue
+  if [[ $signed == keyless ]] && ! jq -e '.cluster == false' <<< "$row" > /dev/null; then
+    if [[ $verify == null ]]; then
+      fail "$source ($where): has no verify block, which its row gives it"
+    elif ! jq -e --argjson row "$row" '. == {"provider": "cosign", "matchOIDCIdentity": [{"issuer": $row.issuer, "subject": $row.subject}]}' <<< "$verify" > /dev/null; then
+      fail "$source ($where): its verify block is not its row's identity: exactly provider cosign and one matchOIDCIdentity of the row's issuer and subject"
+    fi
+  elif [[ $verify != null ]]; then
+    fail "$source ($where): has a verify block its row does not give it"
+  fi
+done < "$tmp/sources.txt"
+for source in "${order[@]}"; do
+  if [[ -z ${has_source[$source]+set} ]]; then
+    fail "signatures.yaml: the row of $source names no source the tree has"
+  elif [[ -z ${on_cluster[$source]+set} ]] && jq -e '.signed == "keyless" and .cluster != false' <<< "${row_of[$source]}" > /dev/null; then
+    fail "signatures.yaml: the row of $source says the cluster verifies it, but nothing on the cluster pulls it: give it cluster: false and its reason"
+  fi
+done
+
+if ((failures > 0)); then
+  echo "signatures-check: $failures failure(s)" >&2
+  exit 1
+fi
+if [[ $mode == check ]]; then
+  echo "signatures-check: passed (${#order[@]} rows)"
+  exit 0
+fi
+
+# The verification. A run directory of its own: a home, a Docker configuration with no login in it
+# and a TUF root, which cosign fills with the public Sigstore root.
+mkdir -p "$tmp/home" "$tmp/docker" "$tmp/tuf"
+printf '{}\n' > "$tmp/docker/config.json"
+
+# cosign_verify ARG...: cosign verify ARG... with nothing of the caller's that would log in, move
+# where a signature is read from or change what is trusted; what it prints goes nowhere. Sets
+# cosign_status and cosign_seconds, the seconds it took.
+cosign_verify() {
+  local start=$SECONDS
+  cosign_status=0
+  (
+    unset "${cosign_variables[@]}" REGISTRY_AUTH_FILE XDG_RUNTIME_DIR XDG_CONFIG_HOME
+    export HOME="$tmp/home" DOCKER_CONFIG="$tmp/docker" TUF_ROOT="$tmp/tuf"
+    run_tool cosign verify "$@"
+  ) > /dev/null 2>&1 < /dev/null || cosign_status=$?
+  cosign_seconds=$((SECONDS - start))
+}
+
+# probe HOST: why the registry HOST is out of reach, or nothing: any HTTP answer to /v2/ but a 429 or
+# a 5xx counts as reached. Docker Hub's registry is registry-1.docker.io.
+probe() {
+  local host=$1 api=$1 code
+  [[ $api != docker.io ]] || api=registry-1.docker.io
+  if ! code=$(curl -q -sS -o /dev/null -w '%{http_code}' --connect-timeout 10 --max-time 20 "https://$api/v2/" 2> /dev/null); then
+    echo "the registry $host could not be reached"
+  elif [[ $code == 429 ]]; then
+    echo "the registry $host limits anonymous requests"
+  elif [[ ! $code =~ ^[1-4][0-9][0-9]$ ]]; then
+    echo "the registry $host could not be reached"
+  fi
+}
+
+# result VERDICT SOURCE WHY: one row's line.
+verdicts=0
+result() {
+  printf '%-4s  %s: %s\n' "$1" "$2" "$3"
+  [[ $1 != FAIL ]] || verdicts=$((verdicts + 1))
+}
+
+for source in "${order[@]}"; do
+  row=${row_of[$source]}
+  signed=$(jq -r .signed <<< "$row")
+  if [[ $source == https://* ]]; then
+    result pass "$source" "unsigned, a Helm repository: nothing to fetch"
+    continue
+  fi
+  mapfile -t pins < <(awk -F"$sep" -v source="$source" '$1 == source && $4 != "-" { print $4 }' "$tmp/sources.txt" | sort -u)
+  if ((${#pins[@]} == 0)); then
+    result skip "$source" "nothing to verify, as versions.yaml records no tools image"
+    continue
+  fi
+  repository=${source#oci://}
+  why=$(probe "${repository%%/*}")
+  if [[ -n $why ]]; then
+    result FAIL "$source" "$why"
+    continue
+  fi
+  case $signed in
+    keyless) flags=(--certificate-oidc-issuer-regexp "$(jq -r .issuer <<< "$row")" --certificate-identity-regexp "$(jq -r .subject <<< "$row")") ;;
+    key)
+      flags=(--key "$dir/$(jq -r .key <<< "$row")" --insecure-ignore-tlog)
+      [[ $(jq -r '.digest // ""' <<< "$row") != sha512 ]] || flags+=(--signature-digest-algorithm sha512)
+      ;;
+    # A lookup with an identity no certificate holds: a signature of any kind fails it.
+    unsigned) flags=(--certificate-oidc-issuer-regexp '^$' --certificate-identity-regexp '^$') ;;
+  esac
+  why=
+  for pin in "${pins[@]}"; do
+    if [[ $pin == sha256:* ]]; then
+      reference=$repository@$pin
+    else
+      reference=$repository:$pin
+    fi
+    cosign_verify "${flags[@]}" --timeout "${timeout}s" "$reference"
+    case $signed:$cosign_status in
+      keyless:0 | key:0 | unsigned:10) continue ;;
+    esac
+    if ((cosign_status != 0 && cosign_seconds >= timeout)); then
+      why="cosign did not finish within ${timeout}s at $pin"
+    else
+      case $signed:$cosign_status in
+        unsigned:0 | unsigned:12 | unsigned:13) why="a signature at $pin, where the row says unsigned" ;;
+        *:10) why="no signature at $pin, where the row names one" ;;
+        *:11) why="the tag or digest $pin is not there" ;;
+        *:12) why="the signature at $pin does not match the row" ;;
+        *:13) why="the signature at $pin has no certificate, where the row names a keyless identity" ;;
+        unsigned:1) why="cosign failed at $pin with no outcome of its own (exit 1), as for a bundle or a registry's error, so no signature was ruled out" ;;
+        *:1) why="cosign failed at $pin with no outcome of its own (exit 1), as for a bundle that does not match the row" ;;
+        *) why="cosign failed at $pin (exit $cosign_status)" ;;
+      esac
+    fi
+    break
+  done
+  if [[ -n $why ]]; then
+    result FAIL "$source" "$why"
+  else
+    case $signed in
+      keyless) result pass "$source" "verified keyless at $(printf '%s\n' "${pins[@]}" | paste -sd, - | sed 's/,/, /g')" ;;
+      key) result pass "$source" "verified with $(jq -r .key <<< "$row") at $(printf '%s\n' "${pins[@]}" | paste -sd, - | sed 's/,/, /g')" ;;
+      unsigned) result pass "$source" "unsigned: no signature at $(printf '%s\n' "${pins[@]}" | paste -sd, - | sed 's/,/, /g')" ;;
+    esac
+  fi
+done
+((verdicts == 0))

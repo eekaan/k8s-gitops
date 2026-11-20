@@ -122,5 +122,21 @@
       matchPackageNames: ["ghcr.io/open-feature/charts/open-feature-operator", "ghcr.io/open-feature/open-feature-operator"],
       groupName: "OpenFeature Operator",
     },
+    {
+      // tests/ascender.bats fails unless the operator's image is of the chart's appVersion and
+      // Ascender's images of the chart's version: Ctrl IQ releases the three at one version and its
+      // installer runs them so.
+      description: "Ascender: the operator's chart and image, and Ascender's application and execution environment images",
+      matchPackageNames: ["ascender-operator", "ghcr.io/ctrliq/ascender-operator", "ghcr.io/ctrliq/ascender", "ghcr.io/ctrliq/ascender-ee"],
+      groupName: "Ascender",
+    },
+    {
+      // OpenShell versions its chart and tags its images with the release's version (its
+      // deploy/helm/openshell/Chart.yaml), so the sandbox image runtime-check runs and whatever else
+      // of OpenShell the tree pins move in one pull request, to one release.
+      description: "OpenShell: its images and charts",
+      matchPackageNames: ["ghcr.io/nvidia/openshell/**"],
+      groupName: "OpenShell",
+    },
   ],
 }

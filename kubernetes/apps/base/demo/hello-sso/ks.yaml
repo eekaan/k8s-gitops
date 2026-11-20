@@ -8,21 +8,40 @@ metadata:
 spec:
   path: ./apps/base/demo/hello-sso/app
   targetNamespace: demo
-  # The component adds the policy that asks oauth2-proxy and the route for the sign-in paths.
+  # The components add the policy that asks oauth2-proxy and the route for the sign-in paths, and
+  # the rate limit at its default of 300 requests a minute on each proxy, on the signed-in route
+  # alone: a route behind the sign-in that takes a limit, for the live check that a limited route
+  # signs in.
   components:
     - ../../../../../components/sso
+    - ../../../../../components/ratelimit
   postBuild:
     substitute:
       SSO_ROUTE: hello-sso
       SSO_HOSTNAME: hello-sso
+      RATELIMIT_ROUTE: hello-sso
   # The route names the public Gateway and the hello Service, and the policy names oauth2-proxy's
   # Service, which the grant in its namespace lets this one reach. A cluster without any of them
-  # cannot enable it.
+  # cannot enable it. The rate limit is of a kind envoy-gateway-crds defines, which gateway-public
+  # waits for through envoy-gateway. Its Probe is answered by the blackbox exporter.
   dependsOn:
     - name: gateway-public
     - name: hello
     - name: oauth2-proxy
+    - name: blackbox-exporter
   wait: true
+  # Ready only once the controller has accepted the rate limit at its generation, as it reports a
+  # policy it cannot translate not accepted (components/ratelimit).
+  healthCheckExprs:
+    - apiVersion: gateway.envoyproxy.io/v1alpha1
+      kind: BackendTrafficPolicy
+      current: >-
+        has(status.ancestors) && size(status.ancestors) > 0 && status.ancestors.all(a,
+        a.conditions.exists(c, c.type == 'Accepted' && c.status == 'True' && c.observedGeneration
+        == metadata.generation))
+      failed: >-
+        has(status.ancestors) && status.ancestors.exists(a, a.conditions.exists(c, c.type ==
+        'Accepted' && c.status == 'False' && c.observedGeneration == metadata.generation))
   sourceRef:
     kind: ExternalArtifact
     name: hello-sso

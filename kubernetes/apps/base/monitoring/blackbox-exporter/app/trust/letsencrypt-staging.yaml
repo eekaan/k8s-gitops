@@ -1,0 +1,19 @@
+---
+# The exporter's trust while the public Gateway's certificate comes from Let's Encrypt's staging
+# directory, the ClusterIssuer letsencrypt-staging (docs/kubernetes.md, Probes): none. No client
+# trusts the staging chain, so the two modules that probe over https skip verification, of the chain
+# and of the name alike, and this is their one setting. The probe still needs a TLS answer with the
+# status the module takes, and the exporter still reads the served certificate's expiry
+# (probe_ssl_earliest_cert_expiry, from the certificates the proxies send, verified or not), so the
+# endpoint and certificate alerts hold; a wrong certificate is not caught until the cluster moves to
+# production. Nothing is mounted.
+config:
+  modules:
+    public_https:
+      http:
+        tls_config:
+          insecure_skip_verify: true
+    public_https_signin:
+      http:
+        tls_config:
+          insecure_skip_verify: true

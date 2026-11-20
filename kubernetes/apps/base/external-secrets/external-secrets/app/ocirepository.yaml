@@ -17,3 +17,9 @@ spec:
   ref:
     # renovate: datasource=docker depName=ghcr.io/external-secrets/charts/external-secrets
     tag: 2.15.0
+  # Go regular expressions, kept to syntax POSIX extended expressions read the same way (no \d).
+  verify:
+    provider: cosign
+    matchOIDCIdentity:
+      - issuer: '^https://token\.actions\.githubusercontent\.com$'
+        subject: '^https://github\.com/external-secrets/external-secrets/\.github/workflows/helm\.yml@refs/heads/main$'

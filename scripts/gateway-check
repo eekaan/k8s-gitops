@@ -24,6 +24,9 @@
 #   routes                 no HTTPRoute is Accepted on the Gateway from a namespace without the label
 #                          k8s-gitops/gateway: public, but for the redirect in the Gateway's own;
 #   http listener          the http listener holds one route, the redirect;
+#   rate limit             the BackendTrafficPolicy demo/hello targets the HTTPRoute hello alone, is
+#                          Accepted by every ancestor at its generation and has one local rule
+#                          without client selectors of N requests a Second, N from 1 to 20;
 # and for each edge router, by its name (one skipped line says why when the edge stack has no
 # outputs, and a failed one when they cannot be read):
 #   EDGE http              plain HTTP on 80 for hello.<CLUSTER_DOMAIN> answers 301 with the Location
@@ -35,6 +38,12 @@
 #                          says, when TLS fails, whether the names are the cause;
 #   EDGE hello             the demo answers 200 with the page of its ConfigMap demo/hello;
 #   EDGE unrouted host     a host under the domain that no route serves answers 404;
+#   EDGE rate limit        one curl call sends 2N+1 requests for hello over HTTP/2 in parallel: their
+#                          connects add up to one, so one proxy answered, and they are answered 200
+#                          and 429 alone, at least one of each; skipped when TLS did not verify, the
+#                          demo's line did not pass or the rate limit line did not;
+#   EDGE after the limit   two seconds later, twice the unit, one request answers 200 with the demo's
+#                          page;
 # and then, with the edge stack's outputs (check_dns):
 #   DNS records            skipped when external-dns is not selected in the cluster, or no route
 #                          names a host to look up;
@@ -43,8 +52,8 @@
 #                          answer with the status NOERROR that holds no record of another type or name;
 #   name hello             a request for the demo by its name alone, with no --resolve, verifies
 #                          against the trust the issuer implies and serves the demo's page.
-# It runs kubectl get, tofu init and output on the edge stack, and curl; the host names it looks up
-# go to the public resolver. It prints object, node and
+# It runs kubectl get, tofu init and output on the edge stack, curl, and sleep after each burst;
+# the host names it looks up go to the public resolver. It prints object, node and
 # edge names, each only once it is a valid name of its kind, and never an address, a host name under
 # the domain, what the Secrets it reads hold, or a tool's own errors, which can name addresses: kubectl's
 # go nowhere, and tofu's to the edge stack's errors file. Any other text it shows from the cluster or
@@ -53,8 +62,8 @@
 # curl by --connect-timeout and --max-time, and curl reads no configuration file, uses no proxy and
 # trusts nothing but what the issuer's line names, but for the lookups at the public resolver,
 # which trust the system's public trust store. Needs curl 7.88 or newer, for its write-out of the
-# certificates. A failure that is not a check's names the step it happened in, and so does Ctrl-C
-# or SIGTERM, which stops the run there.
+# certificates, built with HTTP/2, for the burst. A failure that is not a check's names the step it
+# happened in, and so does Ctrl-C or SIGTERM, which stops the run there.
 # Usage: scripts/gateway-check [cluster]
 set -euo pipefail
 
@@ -65,6 +74,8 @@ here=$(dirname "$0")
 . "$here/lib/edge.sh"
 # shellcheck source=scripts/lib/errors.sh
 . "$here/lib/errors.sh"
+# shellcheck source=scripts/lib/dns.sh
+. "$here/lib/dns.sh"
 
 if (($# > 1)) || [[ ${1-} == -* ]]; then
   infra_error "usage: gateway-check [cluster]"
@@ -93,10 +104,10 @@ redirect=https-redirect
 # serves.
 probe_path=/gateway-check
 unrouted='gateway-check-unrouted'
-# The application that makes the records, whose Kustomization says whether the cluster selects it,
-# and the public resolver's JSON interface over HTTPS (docs/kubernetes.md, DNS records).
+# The application that makes the records, whose Kustomization says whether the cluster selects it
+# (docs/kubernetes.md, DNS records). The public resolver it is asked at is dns_resolve_a's
+# (scripts/lib/dns.sh).
 dns_app=external-dns
-doh_json=https://dns.google/resolve
 
 tmp=$(mktemp -d)
 # A failure that is not one of the checks, such as an answer jq cannot read, names the step it
@@ -471,6 +482,47 @@ else
   fi
 fi
 
+# The demo's rate limit, which the edge lines send a burst over: the BackendTrafficPolicy
+# components/ratelimit makes for the route hello (docs/kubernetes.md, Rate limits). Its figure, N,
+# is read here and not assumed; a burst of 2N+1 is answered 429 within one refill only for a small
+# figure a second.
+limit_namespace=demo limit_policy=hello limit_route=hello
+limit_figure=0
+if ! limit_json=$(get backendtrafficpolicies.gateway.envoyproxy.io --namespace="$limit_namespace" -- "$limit_policy"); then
+  result FAIL "rate limit" "kubectl could not read the BackendTrafficPolicy $limit_namespace/$limit_policy"
+else
+  # One line: "ok N", or why it does not hold. The unit is shown only as a word, the figure only
+  # as a whole number.
+  # shellcheck disable=SC2016 # $route, $generation, $ancestors, $rules and $limit are jq variables.
+  limit_verdict=$(jq -r --arg route "$limit_route" '
+    .metadata.generation as $generation | (.status.ancestors // []) as $ancestors
+    | [.spec.rateLimit.local.rules // [] | .[]] as $rules | ($rules[0].limit // {}) as $limit
+    | if (.spec.targetRefs // []) != [{group: "gateway.networking.k8s.io", kind: "HTTPRoute", name: $route}]
+        or (.spec | has("targetRef") or has("targetSelectors")) then
+        "it does not target the HTTPRoute \($route) alone"
+      elif ($ancestors | length) == 0 or (all($ancestors[]; any(.conditions[]?; .type == "Accepted" and .status == "True"
+          and .observedGeneration == $generation)) | not) then
+        "it is not Accepted by every ancestor at its generation"
+      elif ($rules | length) != 1 or ($rules[0] | has("clientSelectors")) or (.spec.rateLimit | has("global")) then
+        "its limit is not one local rule without client selectors"
+      elif $limit.unit != "Second" then
+        if ($limit.unit | type) == "string" and ($limit.unit | test("\\A[A-Za-z]{1,20}\\z")) then
+          "its limit is per \($limit.unit), not per Second"
+        else "its limit is not per Second" end
+      elif ($limit.requests | type) != "number" or $limit.requests != ($limit.requests | floor) then
+        "its figure is not a whole number"
+      elif $limit.requests < 1 or $limit.requests > 20 then
+        "its figure, \($limit.requests), is not from 1 to 20"
+      else "ok \($limit.requests | floor)" end' <<< "$limit_json")
+  case $limit_verdict in
+    "ok "[1-9] | "ok "[1-2][0-9])
+      limit_figure=${limit_verdict#ok }
+      result pass "rate limit" "$limit_namespace/$limit_policy limits the route $limit_route to $limit_figure requests a second on each proxy, Accepted by every ancestor at its generation"
+      ;;
+    *) result FAIL "rate limit" "the BackendTrafficPolicy $limit_namespace/$limit_policy: $limit_verdict" ;;
+  esac
+fi
+
 # The page the demo serves, which its answer through an edge must be, byte for byte. Both stay in
 # files: a shell variable would drop a NUL and say so.
 page_read=0
@@ -553,8 +605,11 @@ check_edge() {
   if ((!tls)); then
     result skip "$edge hello" "no verified TLS connection"
     result skip "$edge unrouted host" "no verified TLS connection"
+    result skip "$edge rate limit" "no verified TLS connection"
+    result skip "$edge after the limit" "no verified TLS connection"
     return
   fi
+  local hello=0
   if ((!page_read)); then
     result FAIL "$edge hello" "kubectl could not read the page of demo/hello to compare with"
   elif [[ $code != 200 ]]; then
@@ -563,6 +618,7 @@ check_edge() {
     result FAIL "$edge hello" "the demo answered 200 with another page than its ConfigMap's"
   else
     result pass "$edge hello" "the demo answers 200 with its page"
+    hello=1
   fi
   status=0
   answer=$(request "$edge_address" 443 "$unrouted.$domain" / /dev/null '%{http_code}' "${trust[@]}") || status=$?
@@ -573,43 +629,83 @@ check_edge() {
   else
     result pass "$edge unrouted host" "a host under the domain that no route serves answers 404"
   fi
+
+  if ((!limit_figure)); then
+    result skip "$edge rate limit" "the rate limit line did not pass, so no burst is sent"
+    result skip "$edge after the limit" "no burst was sent"
+    return
+  fi
+  if ((!hello)); then
+    result skip "$edge rate limit" "the demo did not answer 200 with its page, so a burst would show nothing of the limit"
+    result skip "$edge after the limit" "no burst was sent"
+    return
+  fi
+  check_limit "$edge" "$edge_address" "$host"
 }
 
-# resolve_a HOST: the addresses in the A records the public resolver gives for HOST, asked over
-# HTTPS for its JSON answer, sorted, one per line. The answer counts only when it is one JSON
-# document whose status is NOERROR and whose records are all A records of HOST itself, each one IPv4
-# address. Returns 1 when the resolver cannot be asked, 2 when its answer is not readable as that,
-# 3 when it says the name does not exist (NXDOMAIN), 4 for any other status, which it prints, and 5
-# when a record is of another type or another name, such as a CNAME. HOST is sent to the resolver.
-# The resolver's certificate is verified against the system's public trust store as curl has it,
-# which the variables unset above cannot add to; the cluster's CA has no part in it. The answer stays
-# in a file, as a shell variable would drop a NUL and say so.
-resolve_a() {
-  local verdict
-  rm -f -- "$tmp/resolver.json"
-  curl --disable --silent --noproxy '*' --connect-timeout 5 --max-time 15 --output "$tmp/resolver.json" \
-    "$doh_json?name=$1&type=A" 2> /dev/null || return 1
-  # shellcheck disable=SC2016 # $name is a jq variable.
-  verdict=$(jq -rs --arg name "$1." '
-    if length != 1 or (.[0] | type) != "object" then "unreadable"
-    else .[0]
-      | if (.Status | type) != "number" or .Status != (.Status | floor) or .Status < 0 or .Status > 65535
-          or ((.Answer // []) | type) != "array" then "unreadable"
-        elif .Status == 3 then "nxdomain"
-        elif .Status != 0 then "status \(.Status)"
-        elif any(.Answer[]?; .type != 1 or (.name | type) != "string" or (.name | ascii_downcase) != $name) then "foreign"
-        elif any(.Answer[]?; (.data | type) != "string" or (.data | test("\\A[0-9]{1,3}(\\.[0-9]{1,3}){3}\\z") | not)) then "unreadable"
-        else "ok" end end' "$tmp/resolver.json") || return 2
-  case $verdict in
-    ok) jq -r '.Answer[]?.data' "$tmp/resolver.json" | sort -u ;;
-    nxdomain) return 3 ;;
-    "status "*)
-      printf '%s\n' "${verdict#status }"
-      return 4
-      ;;
-    foreign) return 5 ;;
-    *) return 2 ;;
-  esac
+# check_limit NAME ADDRESS HOST: the demo's rate limit through one edge. One curl call sends 2N+1
+# requests for the demo, N the figure a second, over HTTP/2 in parallel: curl waits for the first
+# connection and multiplexes the others on it unless told --parallel-immediate, so they reach one
+# proxy, whose bucket holds N, all at once, far within the second over which it fills again. They
+# pass when their connects add up to one and they are answered 200 and 429 alone, at least one of
+# each. Then, after twice the unit, one request gets the demo's page again.
+check_limit() {
+  local edge=$1 edge_address=$2 host=$3 count status answer code connected i
+  local connects=0 passed=0 limited=0 unreadable=0 lines=0
+  local -a transfers=() others=() problems=()
+  count=$((2 * limit_figure + 1))
+  for ((i = 0; i < count; i++)); do
+    transfers+=(--output /dev/null "https://$host/")
+  done
+  status=0
+  answer=$(curl --disable --silent --noproxy '*' --connect-timeout 5 --max-time 15 --resolve "$host:443:$edge_address" \
+    --http2 --parallel --parallel-max "$count" --write-out '%{http_code} %{num_connects}\n' "${trust[@]}" "${transfers[@]}" 2> /dev/null) || status=$?
+  if ((status != 0)); then
+    result FAIL "$edge rate limit" "the burst of $count requests for hello got no answer to every one (curl exit $status)"
+  else
+    while read -r code connected; do
+      lines=$((lines + 1))
+      if [[ ! $code =~ ^[0-9]{3}$ || ! $connected =~ ^[0-9]{1,3}$ ]]; then
+        unreadable=1
+        continue
+      fi
+      connects=$((connects + 10#$connected))
+      case $code in
+        200) passed=$((passed + 1)) ;;
+        429) limited=$((limited + 1)) ;;
+        *) others+=("$code") ;;
+      esac
+    done <<< "$answer"
+    if ((unreadable || lines != count)); then
+      problems+=("its answers could not be read as a status and a count of connections for each of its $count requests")
+    else
+      ((connects == 1)) || problems+=("its $count requests took $connects connections, not one, so more than one proxy may have answered")
+      ((${#others[@]} == 0)) || problems+=("it was answered with $(printf '%s\n' "${others[@]}" | sort -u | joined) as well as 200 and 429")
+      ((limited > 0)) || problems+=("none of its $count requests was answered 429, so the limit did not hold")
+      ((passed > 0)) || problems+=("none of its $count requests was answered 200")
+    fi
+    if ((${#problems[@]} > 0)); then
+      result FAIL "$edge rate limit" "$(printf '%s\n' "${problems[@]}" | paste -sd';' - | sed 's/;/; /g')"
+    else
+      result pass "$edge rate limit" "$count requests on one connection, so to one proxy: $passed answered 200 and $limited answered 429, over hello's $limit_figure a second"
+    fi
+  fi
+
+  # Twice the unit, which is a second: by then the bucket holds the figure again, however it refills.
+  sleep 2
+  status=0
+  answer=$(request "$edge_address" 443 "$host" / "$tmp/page" '%{http_code}' "${trust[@]}") || status=$?
+  if ((status != 0)); then
+    result FAIL "$edge after the limit" "no verified answer for hello two seconds after the burst (curl exit $status)"
+  elif [[ $answer == 429 ]]; then
+    result FAIL "$edge after the limit" "hello still answers 429 two seconds after the burst"
+  elif [[ $answer != 200 ]]; then
+    result FAIL "$edge after the limit" "hello answered $(shown "$answer") two seconds after the burst, not 200"
+  elif [[ $(sha256sum < "$tmp/page") != "$(sha256sum < "$tmp/expected")" ]]; then
+    result FAIL "$edge after the limit" "hello answered 200 two seconds after the burst with another page than its ConfigMap's"
+  else
+    result pass "$edge after the limit" "two seconds after the burst hello answers 200 with its page again"
+  fi
 }
 
 # check_dns CLEAN ADDRESS...: the lines about the names the cluster's routes publish, once the edges
@@ -620,7 +716,8 @@ resolve_a() {
 #                   when the Kustomization cannot be read
 #   DNS <label>     for each host under the domain that a route accepted on the Gateway, from a
 #                   namespace that opts in, names: the public resolver's A records for it are exactly
-#                   the edges' addresses, and its answer holds nothing else (resolve_a)
+#                   the edges' addresses, and its answer holds nothing else (dns_resolve_a in
+#                   scripts/lib/dns.sh, its answer kept in the run's own directory)
 #   name hello      for the demo's host once its records are right and every edge passed: a request by
 #                   the name alone, which curl resolves as this machine does, verifies against the
 #                   trust the issuer implies and serves the demo's page
@@ -658,7 +755,7 @@ check_dns() {
   for host in "${hosts[@]}"; do
     label=${host%%.*}
     status=0
-    answers=$(resolve_a "$host") || status=$?
+    answers=$(dns_resolve_a "$host" "$tmp/resolver.json") || status=$?
     if ((status == 1)); then
       result FAIL "DNS $label" "the public resolver could not be asked, so the name is not looked up (no answer over HTTPS)"
     elif ((status == 2)); then

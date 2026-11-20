@@ -1,0 +1,16 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/monitoring.coreos.com/podmonitor_v1.json
+# vmauth's own metrics, on its internal port, where they need no credential: among them each user's
+# requests, vmauth_user_requests_total{username}, and the requests it refused, by reason,
+# vmauth_http_request_errors_total{reason}.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: vmauth
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vmauth
+  podMetricsEndpoints:
+    - port: internal
+      path: /metrics

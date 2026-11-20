@@ -1,0 +1,21 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/gateway.networking.k8s.io/httproute_v1.json
+# Ascender's public name: ascender under the cluster's domain, on the public Gateway's https
+# listener, which this namespace reaches through its k8s-gitops/gateway label. Every method and path
+# goes to the web pods, behind Ascender's own login: its interface, its API and its websockets,
+# which Envoy Gateway upgrades on a route of HTTP/1.1 by default.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: ascender
+spec:
+  parentRefs:
+    - name: public
+      namespace: envoy-gateway-system
+      sectionName: https
+  hostnames:
+    - ascender.${CLUSTER_DOMAIN}
+  rules:
+    - backendRefs:
+        - name: ascender-web
+          port: 80

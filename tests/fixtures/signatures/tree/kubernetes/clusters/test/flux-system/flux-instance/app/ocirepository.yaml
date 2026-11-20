@@ -1,0 +1,15 @@
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: flux-instance
+spec:
+  interval: 1h
+  url: oci://charts.example.invalid/flux/instance
+  ref:
+    tag: 1.0.0
+  verify:
+    provider: cosign
+    matchOIDCIdentity:
+      - issuer: '^https://token\.ci\.example\.invalid$'
+        subject: '^https://code\.example\.invalid/example/charts/\.ci/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$'

@@ -1,9 +1,14 @@
 #!/usr/bin/env bats
 # Proves features/logs.feature, except the scenarios tagged @by:vector-check, which Vector's unit
 # tests in tests/vector prove; each test carries its scenario's title. Needs helm, flux, kustomize,
-# just, yq, jq and awk on PATH (the versions pinned for the repository). Each chart is pulled once
-# per run from its public registry; building and rendering are offline. The applications are built
-# in memory, so no build rewrites a file of this checkout.
+# just, yq, jq, awk and git on PATH (the versions pinned for the repository). Each chart is pulled
+# once per run from its public registry; building and rendering are offline. The applications are
+# built in memory, so no build rewrites a file of this checkout.
+#
+# One test also runs Renovate's image, the one the justfile pins, with docker: the proof of
+# Renovate's own lookup of the VictoriaLogs plugin. It skips, saying why, where no docker daemon
+# answers, as in the CI containers; with one, a pull or a run that fails is a failure. Its container
+# has no network, no capability and a read-only root, and mounts only a directory of the test's own.
 
 # The tests run one at a time even where bats runs a file's tests side by side: a test that starts
 # while another pulls a chart finds the chart's directory before the chart is in it.
@@ -37,6 +42,19 @@ setup() {
   # shellcheck disable=SC2016 # $list is a yq variable.
   yq ea '. as $list ireduce ({}; . * ($list // {}))' \
     "$CLUSTER/cluster-config.example.yaml" "$CLUSTER/cluster-secrets.example.yaml" >"$EXAMPLE"
+}
+
+teardown() {
+  local pid
+  # A port-forward a failing recipe left behind is stopped here, and so is a recipe a failing test
+  # left running in the background, so no test leaves one running.
+  if [ -n "${JUST_PID-}" ]; then kill "$JUST_PID" 2>/dev/null || true; fi
+  if [ -s "$BATS_TEST_TMPDIR/state/recipe" ]; then kill "$(cat "$BATS_TEST_TMPDIR/state/recipe")" 2>/dev/null || true; fi
+  if [ -f "$BATS_TEST_TMPDIR/state/forwards" ]; then
+    while read -r pid; do
+      kill "$pid" 2>/dev/null || true
+    done <"$BATS_TEST_TMPDIR/state/forwards"
+  fi
 }
 
 # other_vars: writes a copy of the example values with another domain and sets OTHER to it, so a
@@ -172,16 +190,19 @@ route_admits() {
 
 # store_reach FILE...: one line for each way, in the objects of the files, that the log store is
 # reached from the public Gateway other than through the sign-in, naming what does it: a route other
-# than logs of monitoring whose rules send to the Service victoria-logs of monitoring, as a backend,
-# a backend's mirror or a rule's mirror, whatever namespace the reference names or leaves out; a
-# route of monitoring on the public Gateway that no SecurityPolicy of monitoring asking oauth2-proxy
-# of sso-system, without failing open, targets by name and that is not such a route's sign-in route
-# <name>-oauth2 sending to oauth2-proxy of sso-system alone; a Grafana of monitoring that has its
-# operator make an HTTPRoute there, which no render holds and so no policy can be seen to target; an
-# object other than that policy that targets logs, by reference or by selector; a route other than
-# logs and logs-oauth2 of monitoring that lists logs's host; and a ReferenceGrant of monitoring that
-# lets another namespace refer to its Services, as a route there could then reach the store's pods
-# through any Service of monitoring that selects them. Prints nothing when none does.
+# than logs of monitoring whose rules send to the Service victoria-logs or vmauth of monitoring, as a
+# backend, a backend's mirror or a rule's mirror, whatever namespace the reference names or leaves
+# out; a route of monitoring on the public Gateway that no SecurityPolicy of monitoring asking
+# oauth2-proxy of sso-system, without failing open, targets by name and that is not such a route's
+# sign-in route <name>-oauth2 sending to oauth2-proxy of sso-system alone; a Grafana of monitoring
+# that has its operator make an HTTPRoute there, which no render holds and so no policy can be seen
+# to target; an object other than that policy that targets logs, by reference or by selector; a
+# route other than logs and logs-oauth2 of monitoring that lists logs's host; an HTTPRouteFilter
+# other than logs of monitoring that injects the route's credential, the Secret vmauth-logs-route,
+# whatever namespace it is in; and a ReferenceGrant of monitoring that lets another namespace refer
+# to its Services or Secrets, as a route there could then reach the store's or vmauth's pods through
+# any Service of monitoring that selects them, or a filter there inject the route's credential.
+# Prints nothing when none does.
 store_reach() {
   # shellcheck disable=SC2016 # $all, $own, $r, $p, $policy, $protected, $hosts and $ref are jq variables.
   yq -N -o json -I0 'select(. != null)' "$@" | jq -rs '
@@ -200,9 +221,9 @@ store_reach() {
     | ([$all[] | select(.kind == "HTTPRoute" and .metadata.namespace == "monitoring" and .metadata.name == "logs")
         | .spec.hostnames[]?]) as $hosts
     | ($all[] | select(.kind | tostring | endswith("Route")) | . as $r
-        | select(([refs] | any(.name == "victoria-logs" and .namespace == "monitoring"))
-            and ($r.kind != "HTTPRoute" or $r.metadata.namespace != "monitoring" or $r.metadata.name != "logs"))
-        | "\($r.kind)/\($r.metadata.namespace)/\($r.metadata.name) sends to the Service victoria-logs of monitoring"),
+        | select($r.kind != "HTTPRoute" or $r.metadata.namespace != "monitoring" or $r.metadata.name != "logs")
+        | [refs | select((.name == "victoria-logs" or .name == "vmauth") and .namespace == "monitoring") | .name] | unique[]
+        | "\($r.kind)/\($r.metadata.namespace)/\($r.metadata.name) sends to the Service \(.) of monitoring"),
       ($all[] | select(.kind | tostring | endswith("Route")) | select(.metadata.namespace == "monitoring" and on_public) | . as $r
         | select(($protected | index($r.metadata.name)) == null)
         | select(($r.metadata.name | endswith("-oauth2")) and ($protected | index($r.metadata.name | sub("-oauth2$"; ""))) != null
@@ -220,9 +241,13 @@ store_reach() {
         | select(any(.spec.hostnames[]?; . as $h | $hosts | index($h) != null))
         | select(($r.metadata.namespace == "monitoring" and ($r.metadata.name == "logs" or $r.metadata.name == "logs-oauth2")) | not)
         | "\($r.kind)/\($r.metadata.namespace)/\($r.metadata.name) lists the host of the route logs"),
-      ($all[] | select(.kind == "ReferenceGrant" and .metadata.namespace == "monitoring")
-        | select(any(.spec.to[]?; (.group // "") == "" and .kind == "Service"))
-        | "ReferenceGrant/monitoring/\(.metadata.name) lets another namespace refer to the Services of monitoring")'
+      ($all[] | select(.kind == "HTTPRouteFilter") | . as $f
+        | select(($f.metadata.namespace == "monitoring" and $f.metadata.name == "logs") | not)
+        | select(($f.spec.credentialInjection.credential.valueRef.name // "") == "vmauth-logs-route")
+        | "HTTPRouteFilter/\($f.metadata.namespace)/\($f.metadata.name) injects the credential of vmauth-logs-route"),
+      ($all[] | select(.kind == "ReferenceGrant" and .metadata.namespace == "monitoring") | . as $g
+        | [.spec.to[]? | select((.group // "") == "" and (.kind == "Service" or .kind == "Secret")) | .kind] | unique[]
+        | "ReferenceGrant/monitoring/\($g.metadata.name) lets another namespace refer to the \(.)s of monitoring")'
 }
 
 # collector_config: the configuration the rendered collector runs with, as JSON: the ConfigMap its
@@ -318,12 +343,12 @@ k8s_bytes() {
   esac
 }
 
-# monitor_targets: one line per ServiceMonitor or PodMonitor in $RENDERED, "Kind/name -> Kind/name"
-# naming each rendered object it scrapes: for a ServiceMonitor, a Service whose labels its selector
-# matches and that names every port it scrapes; for a PodMonitor, a workload whose pod template
-# does so. A monitor that scrapes none of them ends in "-> none".
+# monitor_targets [FILE]: one line per ServiceMonitor or PodMonitor in FILE, or else in $RENDERED,
+# "Kind/name -> Kind/name" naming each object there it scrapes: for a ServiceMonitor, a Service whose
+# labels its selector matches and that names every port it scrapes; for a PodMonitor, a workload
+# whose pod template does so. A monitor that scrapes none of them ends in "-> none".
 monitor_targets() {
-  yq -N -o json -I0 'select(. != null)' "$RENDERED" | jq -rs '. as $all | .[]
+  yq -N -o json -I0 'select(. != null)' "${1:-$RENDERED}" | jq -rs '. as $all | .[]
     | select(.kind == "ServiceMonitor" or .kind == "PodMonitor") | . as $monitor
     | ($monitor.spec.selector.matchLabels // {}) as $selector
     | [($monitor.spec.endpoints // $monitor.spec.podMetricsEndpoints // [])[].port] as $ports
@@ -461,7 +486,7 @@ defined_keys() {
 }
 
 @test "The collector ships every pod's logs and every Talos service's log but the audit log to the store" {
-  local service name namespace port domain pods restricted files include sinks upstream source talos first last tests found
+  local service name namespace port domain pods restricted files include sinks auth upstream source talos first last tests found
   render "$STORE"
   service="$(store_service)"
   echo "the store's Service: ${service:-none}"
@@ -487,11 +512,18 @@ defined_keys() {
   echo "file sources: ${files:-none}; reading: ${include:-nothing}"
   [ "$(grep -c . <<<"$files")" -eq 1 ]
   [ "$include" = "/var/log/*.log /var/log/*.log.1" ]
-  # One sink for the store, at its Service's name in the cluster's DNS domain, and both sources reach
-  # it, directly or through transforms.
+  # One sink for the store, at vmauth's Service's name in the cluster's DNS domain, as the user vector,
+  # whose bulk path vmauth sends on to the store's Service in that domain on the store's port, and
+  # both sources reach it, directly or through transforms.
   sinks="$(jq -r '.sinks[] | select(.type == "elasticsearch") | .endpoints // [] | join(" ")' "$CONFIG")"
   echo "store sinks: ${sinks:-none}"
-  [ "$sinks" = "http://$name.$namespace.svc.$domain:$port/insert/elasticsearch/" ]
+  built vmauth
+  [ "$sinks" = "http://$(yq -N 'select(.kind == "Service") | .metadata.name + "." + .metadata.namespace + ".svc"' "$BUILT").$domain:$(yq -N 'select(.kind == "Service") | .spec.ports[] | select(.name == "http") | .port' "$BUILT")/insert/elasticsearch/" ]
+  [ "$(jq -r '.sinks[] | select(.type == "elasticsearch") | .auth.user' "$CONFIG")" = vector ]
+  auth="$(yq -N 'select(.kind == "ConfigMap") | .data["auth.yml"]' "$BUILT" | yq -o json -I0 '.users[] | select(.username == "vector") | .url_map')"
+  echo "vmauth sends the user vector: $auth"
+  [ "$(jq -r '[.[].url_prefix] | unique | join(" ")' <<<"$auth")" = "http://$name.$namespace.svc.$domain:$port" ]
+  [ "$(jq -r '[.[].src_paths[]] | join(" ")' <<<"$auth")" = /insert/elasticsearch/_bulk ]
   # shellcheck disable=SC2016 # $c and $n are jq variables.
   upstream="$(jq -r 'def up($c): . as $n | if $c.sources[$n] != null then [$n]
       else [($c.transforms[$n].inputs // [])[] | up($c)[]] end;
@@ -597,7 +629,7 @@ defined_keys() {
 }
 
 @test "The collector's configuration is rendered with flux and helm given none of the secrets" {
-  local bin="$BATS_TEST_TMPDIR/bin" tool real name
+  local bin="$BATS_TEST_TMPDIR/bin" tool real name named
   mkdir -p "$bin"
   # Each tool is recorded, by the names of its environment, and then runs as itself.
   for tool in flux helm; do
@@ -612,9 +644,29 @@ defined_keys() {
   local settings=()
   for name in "${names[@]}"; do settings+=("$name=marker-$name"); done
 
-  run env PATH="$bin:$PATH" "${settings[@]}" "$REPO/scripts/vector-config" "$BATS_TEST_TMPDIR/vector-out"
+  # The variable the collector reads its credential from is set too: neither flux nor helm puts it
+  # in place of the placeholder, which Vector fills from the pod's environment.
+  run env PATH="$bin:$PATH" "${settings[@]}" VMAUTH_PASSWORD=marker-VMAUTH_PASSWORD "$REPO/scripts/vector-config" "$BATS_TEST_TMPDIR/vector-out"
 
   [ "$status" -eq 0 ]
+  # shellcheck disable=SC2016 # ${VMAUTH_PASSWORD} is Vector's placeholder.
+  [ "$(yq -N '.sinks.victoria_logs.auth.password' "$BATS_TEST_TMPDIR/vector-out/vector.yaml")" = '${VMAUTH_PASSWORD}' ]
+  # With interpolation allowed, Vector fills each $NAME and ${NAME} of every string of the
+  # configuration from its environment, a VRL program's included, and reads $$ as a dollar sign
+  # (ENVIRONMENT_VARIABLE_INTERPOLATION_REGEX in src/config/loading/interpolation.rs of Vector
+  # v0.61.0): the configuration names no variable but the credential's, so that none the pod
+  # happens to have, such as HOSTNAME, is put in place of text.
+  # shellcheck disable=SC2016 # The $ are Vector's and jq's.
+  named="$(yq -N -o json '.' "$BATS_TEST_TMPDIR/vector-out/vector.yaml" |
+    jq -r '[.. | strings | scan("\\$\\$|\\$[[:word:].]+|\\$\\{[[:word:].]+(?:(?::?-|:?\\?)[^}]*)?\\}")]
+      | map(select(. != "$$")) | unique | join(" ")')"
+  echo "variables the configuration names: ${named:-none}"
+  # shellcheck disable=SC2016 # ${VMAUTH_PASSWORD} is Vector's placeholder.
+  [ "$named" = '${VMAUTH_PASSWORD}' ]
+  if grep -q marker- "$BATS_TEST_TMPDIR/vector-out/vector.yaml"; then
+    echo "the configuration holds a value of the environment"
+    return 1
+  fi
   for tool in flux helm; do
     echo "$tool"
     [ -s "$BATS_TEST_TMPDIR/names.$tool" ]
@@ -722,31 +774,112 @@ defined_keys() {
   echo "metrics exporter on $exporter; PodMonitor scrapes container port ${port:-none}"
   [ -n "$exporter" ]
   [ "$port" = "$exporter" ]
+
+  # vmauth's PodMonitor scrapes /metrics on the port of its internal listener, which serves its own
+  # endpoints and none of what it proxies, and which its Service does not serve.
+  built vmauth
+  targets="$(monitor_targets "$BUILT")"
+  echo "vmauth: ${targets:-no monitor}"
+  [ "$targets" = "PodMonitor/vmauth -> Deployment/vmauth" ]
+  port="$(yq -N 'select(.kind == "PodMonitor") | .spec.podMetricsEndpoints[0].port' "$BUILT")"
+  [ "$(yq -N 'select(.kind == "PodMonitor") | .spec.podMetricsEndpoints[0].path' "$BUILT")" = /metrics ]
+  port="$(yq -N "select(.kind == \"Deployment\") | .spec.template.spec.containers[].ports[] | select(.name == \"$port\") | .containerPort" "$BUILT")"
+  echo "the PodMonitor scrapes container port ${port:-none}"
+  [ "$port" = "$(yq -N 'select(.kind == "Deployment") | .spec.template.spec.containers[].args[] | select(test("^-httpInternalListenAddr=")) | sub(".*:"; "")' "$BUILT")" ]
+  [ -z "$(yq -N "select(.kind == \"Service\") | .spec.ports[] | select(.targetPort == $port or .port == $port or .targetPort == \"internal\") | .name" "$BUILT")" ]
   # The monitor kinds exist once the definitions are installed.
-  for app in "$STORE" "$COLLECTOR"; do
+  for app in "$STORE" "$COLLECTOR" vmauth; do
     depends="$(yq '.spec.dependsOn // [] | .[].name' "$REPO/kubernetes/apps/base/$NAMESPACE/$app/ks.yaml")"
     echo "$app depends on: ${depends:-nothing}"
     grep -qx prometheus-operator-crds <<<"$depends"
   done
 }
 
+# store_retry_problem [FILE]: what is wrong with how long the collector's sink to the store waits
+# before it tries again an endpoint it has stopped sending to, nothing when it is right. Vector
+# stops sending to an endpoint once five requests in a row fail at the connection, refused or with
+# a name that does not resolve, or with a 5xx, and tries it again after a delay that doubles from a
+# second up to the sink's distribution.retry_max_duration_secs, an hour when unset
+# (src/sinks/util/service/health.rs at Vector's v0.61.0). LogCollectorSendFailing reads the
+# requests the sink sends, which must move in every 5 minutes of an outage, and must not stand
+# still for the 300 seconds after which Vector stops exporting a counter. Reads the configuration
+# as collector_config writes it, from FILE or else from $CONFIG.
+store_retry_problem() {
+  local sinks name wait
+  sinks="$(jq -r '.sinks | to_entries[] | select(.value.type == "elasticsearch")
+    | "\(.key) \(.value.distribution.retry_max_duration_secs // "unset")"' "${1:-$CONFIG}")"
+  if [ "$(grep -c . <<<"$sinks")" -ne 1 ]; then
+    echo "the collector has $(grep -c . <<<"$sinks") sinks to the store, not one"
+    return 0
+  fi
+  read -r name wait <<<"$sinks"
+  if [ "$wait" = unset ]; then
+    echo "the sink $name leaves the wait before it tries the store again to Vector's default, up to an hour:" \
+      "set distribution.retry_max_duration_secs to 30, as LogCollectorSendFailing depends on its requests moving at least every 30 seconds"
+  elif ! [[ $wait =~ ^[0-9]+$ ]] || ((wait < 1 || wait > 30)); then
+    echo "the sink $name waits up to $wait seconds before it tries the store again:" \
+      "set distribution.retry_max_duration_secs to 30, as LogCollectorSendFailing depends on its requests moving at least every 30 seconds"
+  fi
+  return 0
+}
+
+@test "The collector tries a store that has failed it again at least every 30 seconds" {
+  local broken problem filter expected case
+  render "$COLLECTOR"
+  collector_config
+  echo "the store's sink: $(jq -c '.sinks[] | select(.type == "elasticsearch") | {distribution}' "$CONFIG")"
+  problem="$(store_retry_problem)"
+  echo "${problem:-the tree waits at most 30 seconds}"
+  [ -z "$problem" ]
+  # Left to the default, set longer, or set to no wait at all, the check fails, naming the alert.
+  broken="$BATS_TEST_TMPDIR/broken.json"
+  for case in "del(.distribution)|leaves the wait before it tries the store again to Vector's default, up to an hour" \
+    ".distribution.retry_max_duration_secs = 31|waits up to 31 seconds before it tries the store again" \
+    ".distribution.retry_max_duration_secs = 3600|waits up to 3600 seconds before it tries the store again" \
+    ".distribution.retry_max_duration_secs = 0|waits up to 0 seconds before it tries the store again"; do
+    IFS='|' read -r filter expected <<<"$case"
+    jq "(.sinks[] | select(.type == \"elasticsearch\")) |= ($filter)" "$CONFIG" >"$broken"
+    problem="$(store_retry_problem "$broken")"
+    echo "$filter: ${problem:-nothing}"
+    [ "$problem" = "the sink victoria_logs $expected: set distribution.retry_max_duration_secs to 30, as LogCollectorSendFailing depends on its requests moving at least every 30 seconds" ]
+  done
+  jq '.sinks.second = (.sinks[] | select(.type == "elasticsearch"))' "$CONFIG" >"$broken"
+  problem="$(store_retry_problem "$broken")"
+  echo "a second sink to the store: $problem"
+  [ "$problem" = "the collector has 2 sinks to the store, not one" ]
+}
+
 # logs_copy: a copy of the repository's scripts, with a kubeconfig for the cluster lab-sto2, for just
 # logs to run in through the repository's justfile, against recording fakes: a mise with nothing
-# installed, which keeps the justfile from putting real tools in front of the fakes, and a kubectl
-# that records its arguments, the kubeconfig it was given and the names of its environment, then
-# acts as the file $STATE/mode says, each time after a warning naming the API server's address on
-# its error output. As kubectl v1.37 does: ok answers with the file $STATE/answer; refuse and
-# refuse-long fail as when the proxied store answers 400 with a plain-text body, which is what
-# VictoriaLogs sends for a query it refuses, a short one and one of over 3000 bytes: the error output
-# says only "the server rejected our request for an unknown reason", and the body is only in the log
-# of a verbose run, whose lines from -v=6 on name the API server's address: from -v=4 on as the
-# message of the cause of the Status kubectl made of the answer, cut at 2048 bytes, and from -v=8 on
-# also as the response body, cut at 1024; fail500, fail503, fail403 and fail404 fail as for those
-# answers, the first two naming the store's address in kubectl's message; notready as when the
-# store's Service has no ready endpoint; noreason as for a Status without a reason, naming the
-# store's address; fail401 as when the API server refuses the kubeconfig's credentials; down fails
-# as when the API server does not answer, naming its address; big answers with 4000 records of
-# about 250 bytes, in neither time order. Sets COPY, BIN, RECORD, STATE and KUBECONFIG_FILE.
+# installed, which keeps the justfile from putting real tools in front of the fakes; a kubectl that
+# records its arguments, the kubeconfig it was given and the names of its environment and writes a
+# warning naming the API server's address on its error output, then answers as kubectl v1.37 does:
+# get secret with the base64 of $STATE/authorization, the Secret's key, and port-forward with the
+# line that names the local port it forwards from, 41234, after which it runs until it is stopped,
+# its process id in $STATE/forwards and its parent's, the recipe's, in $STATE/recipe; and a curl
+# that records its arguments, the names of its environment and each request, its URL and the
+# headers it read from a file or file descriptor, records in $RECORD/header-files each header file
+# that is not a pipe and in $RECORD/credential-files each file under the test's directory, but the
+# fakes' own state and record, that holds the Secret's value while it runs, and answers as vmauth
+# does in front of the store, through the forward alone: a request to any other address, or with no
+# forward running, fails to connect. What they do is set by $STATE/mode:
+#   ok            curl answers 200 with the file $STATE/answer
+#   big           curl answers 200 with 4000 records of about 250 bytes, in neither time order
+#   refuse        curl answers 400 with the plain-text body VictoriaLogs gives a query it refuses,
+#   refuse-long   ... and one of over 3000 bytes with a control character and an address in it
+#   fail401       curl answers 401, as vmauth does a credential it does not know
+#   fail502       curl answers 502, as vmauth does when the store does not answer
+#   fail503       curl answers 503 with vmauth's error, which names the store's URL and address
+#   vmauth-down   curl's connection through the forward is closed with no answer
+#   no-forward    kubectl port-forward fails before it forwards, as for a Service that is missing
+#   slow-forward  kubectl port-forward runs without reporting the port it forwards from
+#   secret-forbidden, secret-missing
+#                 kubectl get secret fails as when the kubeconfig may not read the Secret, or it
+#                 does not exist
+#   secret-empty  the Secret holds no such key, for which kubectl prints nothing
+#   api-401       kubectl fails as when the API server refuses the kubeconfig's credentials
+#   down          kubectl fails as when the API server does not answer, naming its address
+# Sets COPY, BIN, RECORD, STATE and KUBECONFIG_FILE, and AUTHORIZATION, the Secret's value.
 logs_copy() {
   COPY="$BATS_TEST_TMPDIR/copy" BIN="$BATS_TEST_TMPDIR/bin"
   RECORD="$BATS_TEST_TMPDIR/record" STATE="$BATS_TEST_TMPDIR/state"
@@ -755,98 +888,171 @@ logs_copy() {
   KUBECONFIG_FILE="$COPY/talos/lab-sto2/clusterconfig/kubeconfig"
   echo 'not a real kubeconfig' >"$KUBECONFIG_FILE"
   echo ok >"$STATE/mode"
+  : >"$STATE/forwards"
+  # The Basic value of the user operator, as vmauth-operator's ExternalSecret forms it.
+  AUTHORIZATION="Basic $(printf 'operator:%s' marker-operator-password | base64 -w0)"
+  printf '%s' "$AUTHORIZATION" >"$STATE/authorization"
   printf '#!/usr/bin/env bash\n' >"$BIN/mise"
   { printf '#!/usr/bin/env bash\nRECORD=%q STATE=%q\n' "$RECORD" "$STATE"; cat <<'EOF'; } >"$BIN/kubectl"
 printf '%s\n' "$*" >>"$RECORD/argv"
 printf '%s\n' "${KUBECONFIG-unset}" >>"$RECORD/kubeconfig"
 env | cut -d= -f1 >>"$RECORD/names"
-level=0
-for arg; do [[ $arg =~ ^-v=([0-9]+)$ ]] && level=${BASH_REMATCH[1]}; done
-# refused BODY: the store answered 400 with the plain-text body BODY.
-refused() {
-  local body=$1
-  if ((level >= 6)); then
-    cat >&2 <<'LOG'
-I1114 12:00:00.777460 3565636 loader.go:408] Config loaded from file:  /home/operator/kubeconfig
-I1114 12:00:00.785877 3565636 round_trippers.go:527] "Request" verb="GET" url="https://192.0.2.10:6443/api/v1/namespaces/monitoring/services/victoria-logs:9428/proxy/select/logsql/query?query=x" headers=<
-	Accept: application/json, */*
-	User-Agent: kubectl/v1.37.1 (linux/amd64) kubernetes/f78e722
- >
-I1114 12:00:00.786392 3565636 round_trippers.go:632] "Response" status="400 Bad Request" headers=<
-	Content-Type: text/plain
- > milliseconds=0
-LOG
-  fi
-  if ((level >= 8)); then
-    if ((${#body} <= 1024)); then
-      printf 'I1114 12:00:00.786485 3565636 get.go:174] "Response Body" body=<\n%s\n >\n' "$(sed 's/^/\t/' <<<"$body")" >&2
-    else
-      printf 'I1114 12:00:00.786485 3565636 get.go:174] "Response Body" body=%s\n' \
-        "$(jq -n --arg b "${body:0:1024} [truncated $((${#body} - 1024)) chars]" '$b')" >&2
-    fi
-  fi
-  if ((level >= 4)); then
-    jq -n --arg m "${body:0:2048}" '{metadata: {}, status: "Failure",
-        message: "the server rejected our request for an unknown reason", reason: "BadRequest",
-        details: {causes: [{reason: "UnexpectedServerResponse", message: ($m | sub("^\\s+|\\s+$"; ""; "g"))}]}, code: 400}' |
-      sed '1s/^/I1114 12:00:00.786612 3565636 helpers.go:247] server response object: /' >&2
-  fi
-  echo 'Error from server (BadRequest): the server rejected our request for an unknown reason' >&2
-  exit 1
-}
 echo 'W1114 12:00:00 request to https://192.0.2.10:6443 was slow' >&2
-case $(cat "$STATE/mode") in
-  ok)
-    cat "$STATE/answer"
-    ;;
-  refuse)
-    refused "cannot parse query \"kubernetes.pod_name:(\": unexpected end of query"$'\n'
-    ;;
-  refuse-long)
-    refused "cannot parse query \"_time:5m at 192.0"$'\xc2\x9b'".2.77:9428 $(printf 'x%.0s' {1..3000})\": unexpected end of query"$'\n'
-    ;;
-  fail500)
-    echo 'Error from server (InternalError): an error on the server ("cannot read the block at 192.0.2.77:9428: store exploded") has prevented the request from succeeding' >&2
-    exit 1
-    ;;
-  fail503)
-    echo 'Error from server (ServiceUnavailable): error trying to reach service: dial tcp 192.0.2.77:9428: connect: connection refused' >&2
-    exit 1
-    ;;
-  fail403)
-    echo 'Error from server (Forbidden): services "victoria-logs:9428" is forbidden: User "operator" cannot get resource "services/proxy" in API group "" in the namespace "monitoring"' >&2
-    exit 1
-    ;;
-  fail404)
-    echo 'Error from server (NotFound): the server could not find the requested resource' >&2
-    exit 1
-    ;;
-  notready)
-    echo 'Error from server (ServiceUnavailable): no endpoints available for service "victoria-logs:9428"' >&2
-    exit 1
-    ;;
-  noreason)
-    echo 'Error from server: proxy error from 192.0.2.77:9428 while dialing: dial tcp 192.0.2.77:9428: i/o timeout' >&2
-    exit 1
-    ;;
-  fail401)
-    echo 'error: You must be logged in to the server (Unauthorized)' >&2
-    exit 1
-    ;;
+mode=$(cat "$STATE/mode")
+case $mode in
   down)
     echo 'Unable to connect to the server: dial tcp 192.0.2.10:6443: connect: connection refused' >&2
     exit 1
     ;;
+  api-401)
+    echo 'error: You must be logged in to the server (Unauthorized)' >&2
+    exit 1
+    ;;
+esac
+case " $* " in
+  *" get secret vmauth-operator "*)
+    case $mode in
+      secret-forbidden)
+        echo 'Error from server (Forbidden): secrets "vmauth-operator" is forbidden: User "operator" cannot get resource "secrets" in API group "" in the namespace "monitoring"' >&2
+        exit 1
+        ;;
+      secret-missing)
+        echo 'Error from server (NotFound): secrets "vmauth-operator" not found' >&2
+        exit 1
+        ;;
+      secret-empty) ;;
+      *) base64 -w0 <"$STATE/authorization" ;;
+    esac
+    ;;
+  *" port-forward "*)
+    if [[ $mode == no-forward ]]; then
+      echo 'Error from server (NotFound): services "vmauth" not found at https://192.0.2.10:6443' >&2
+      exit 1
+    fi
+    echo "$$" >>"$STATE/forwards"
+    echo "$PPID" >"$STATE/recipe"
+    if [[ $mode != slow-forward ]]; then echo "Forwarding from 127.0.0.1:41234 -> 8427"; fi
+    exec sleep 600
+    ;;
+  *)
+    echo "the recording kubectl does not know: $*" >&2
+    exit 64
+    ;;
+esac
+EOF
+  { printf '#!/usr/bin/env bash\nRECORD=%q STATE=%q\n' "$RECORD" "$STATE"; cat <<'EOF'; } >"$BIN/curl"
+printf '%s\n' "$*" >>"$RECORD/curl-argv"
+env | cut -d= -f1 >>"$RECORD/curl-names"
+url="" output=/dev/stdout write_out="" headers=""
+args=("$@")
+for ((i = 0; i < ${#args[@]}; i++)); do
+  case ${args[i]} in
+    --header | -H)
+      header=${args[++i]}
+      if [[ $header == @* ]]; then
+        [[ -p ${header#@} ]] || printf '%s\n' "${header#@}" >>"$RECORD/header-files"
+        headers+=$(cat "${header#@}")$'\n'
+      else
+        headers+=$header$'\n'
+      fi
+      ;;
+    --output | -o) output=${args[++i]} ;;
+    --write-out | -w) write_out=${args[++i]} ;;
+    --max-time | -m | --connect-timeout) ((i++)) ;;
+    http://* | https://*) url=${args[i]} ;;
+  esac
+done
+value=$(cat "$STATE/authorization")
+grep -rlF --exclude-dir=state --exclude-dir=record -e "${value#Basic }" -e "$(printf '%s' "$value" | base64 -w0)" \
+  "${STATE%/*}" >>"$RECORD/credential-files" 2>/dev/null || true
+running=0
+while read -r pid; do
+  if kill -0 "$pid" 2>/dev/null; then running=1; fi
+done <"$STATE/forwards"
+if [[ $url != http://127.0.0.1:41234/* ]] || ((!running)); then
+  echo "curl: (7) Failed to connect to ${url#http://} after 0 ms: Could not connect to server" >&2
+  exit 7
+fi
+jq -nc --arg url "$url" --arg headers "$headers" '{url: $url, headers: ($headers | split("\n") | map(select(. != "")))}' >>"$RECORD/requests"
+# respond STATUS: the body on standard input to the output, and the status as --write-out has it.
+respond() {
+  cat >"$output"
+  if [[ -n $write_out ]]; then printf '%s' "$1"; fi
+  exit 0
+}
+case $(cat "$STATE/mode") in
+  ok) respond 200 <"$STATE/answer" ;;
   big)
     # Record i of 4000 is i seconds after 12:00; multiplying by 1237 modulo the prime 4001 orders
     # 1 to 4000 neither oldest nor newest first.
     awk 'BEGIN { pad = sprintf("%200s", ""); gsub(/ /, "x", pad)
       for (k = 1; k <= 4000; k++) { i = (k * 1237) % 4001
-        printf "{\"_time\":\"2026-11-14T%02d:%02d:%02dZ\",\"_msg\":\"record %d %s\",\"node\":\"node-1\"}\n", 12 + int(i / 3600), int(i / 60) % 60, i % 60, i, pad } }'
+        printf "{\"_time\":\"2026-11-14T%02d:%02d:%02dZ\",\"_msg\":\"record %d %s\",\"node\":\"node-1\"}\n", 12 + int(i / 3600), int(i / 60) % 60, i % 60, i, pad } }' | respond 200
+    ;;
+  refuse) printf '%s\n' 'cannot parse query "kubernetes.pod_name:(": unexpected end of query' | respond 400 ;;
+  refuse-long)
+    printf '%s\n' "cannot parse query \"_time:5m at 192.0"$'\xc2\x9b'".2.77:9428 $(printf 'x%.0s' {1..3000})\": unexpected end of query" | respond 400
+    ;;
+  fail401) printf '%s\n' 'Unauthorized' | respond 401 ;;
+  fail502)
+    printf '%s\n' 'all the 1 backends for the user "operator" are unavailable for proxying the request - check previous WARN logs to see the exact error for each failed backend' | respond 502
+    ;;
+  fail503)
+    printf '%s\n' 'cannot proxy the request to http://victoria-logs.monitoring.svc.cluster.local:9428/select/logsql/query?query=x: dial tcp 192.0.2.77:9428: connect: connection refused' | respond 503
+    ;;
+  vmauth-down)
+    echo 'curl: (52) Empty reply from server' >&2
+    exit 52
     ;;
 esac
 EOF
-  chmod +x "$BIN/mise" "$BIN/kubectl"
+  # Every file the recipe deletes is read before it goes, so a credential written to a file and
+  # removed again, before curl looks or when the recipe ends, is found as one curl sees is.
+  { printf '#!/usr/bin/env bash\nRECORD=%q STATE=%q RM=%q\n' "$RECORD" "$STATE" "$(command -v rm)"; cat <<'EOF'; } >"$BIN/rm"
+value=$(cat "$STATE/authorization")
+paths=()
+for arg; do
+  case $arg in -*) ;; *) paths+=("$arg") ;; esac
+done
+if ((${#paths[@]})); then
+  grep -rlF -e "${value#Basic }" -e "$(printf '%s' "$value" | base64 -w0)" -- "${paths[@]}" >>"$RECORD/credential-files" 2>/dev/null || true
+fi
+exec "$RM" "$@"
+EOF
+  chmod +x "$BIN/mise" "$BIN/kubectl" "$BIN/curl" "$BIN/rm"
+}
+
+# forwards_closed: every port-forward the recipe started has stopped.
+forwards_closed() {
+  local pid left=""
+  while read -r pid; do
+    if kill -0 "$pid" 2>/dev/null; then left+=" $pid"; fi
+  done <"$STATE/forwards"
+  echo "port-forwards still running:${left:- none}"
+  [ -z "$left" ]
+}
+
+# no_credential OUTPUT: no recorded argument of kubectl or curl holds the Secret's value, its base64,
+# or the password inside it, and OUTPUT, what the recipe printed, holds none of them; curl read each
+# header file from a pipe, and no file the recipe made held the value while curl ran or when the
+# recipe deleted it.
+no_credential() {
+  local value
+  if [ -s "$RECORD/header-files" ] || [ -s "$RECORD/credential-files" ]; then
+    echo "header files that are no pipe: $(cat "$RECORD/header-files" 2>/dev/null)"
+    echo "files that held the credential: $(cat "$RECORD/credential-files" 2>/dev/null)"
+    return 1
+  fi
+  for value in "$AUTHORIZATION" "$(base64 -w0 <"$STATE/authorization")" marker-operator-password "${AUTHORIZATION#Basic }"; do
+    if grep -qF -- "$value" "$RECORD/argv" "$RECORD/curl-argv" 2>/dev/null; then
+      echo "a recorded argument holds $value"
+      return 1
+    fi
+    if [[ $1 == *"$value"* ]]; then
+      echo "the recipe printed $value"
+      return 1
+    fi
+  done
 }
 
 # answer_records: the answer VictoriaLogs gives, newest first as it does for a query that keeps the
@@ -867,7 +1073,7 @@ answer_records() {
 EOF
 }
 
-# The secret variables the recipes read, which just logs must not pass on to kubectl.
+# The secret variables the recipes read, which just logs must not pass on to kubectl or curl.
 LOGS_SECRETS=(AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY CLUSTER_S3_ACCESS_KEY_ID CLUSTER_S3_SECRET_ACCESS_KEY
   OS_CLOUD OS_APPLICATION_CREDENTIAL_ID OS_APPLICATION_CREDENTIAL_SECRET TF_STATE_PASSPHRASE
   TF_ENCRYPTION SOPS_AGE_KEY SOPS_AGE_KEY_FILE FLUX_AGE_KEY FLUX_AGE_KEY_FILE GH_TOKEN OPERATOR_CIDRS)
@@ -881,18 +1087,60 @@ logs_recipe() {
     "$(command -v just)" --justfile "$REPO/justfile" --working-directory "$COPY" logs "$@"
 }
 
-# last_request: the one request kubectl last recorded, as "path" and the decoded parameters, in
-# REQUEST_PATH, QUERY, START and LIMIT.
+# logs_start ARG...: starts just logs ARG... as logs_recipe runs it, in the background, with its
+# output in $BATS_TEST_TMPDIR/out. Sets OUT and JUST_PID.
+logs_start() {
+  local markers=() name
+  for name in "${LOGS_SECRETS[@]}"; do markers+=("$name=marker-$name"); done
+  OUT="$BATS_TEST_TMPDIR/out"
+  env -i HOME="$BATS_TEST_TMPDIR" TMPDIR="$BATS_TEST_TMPDIR" PATH="$BIN:$PATH" "${markers[@]}" \
+    "$(command -v just)" --justfile "$REPO/justfile" --working-directory "$COPY" logs "$@" >"$OUT" 2>&1 3>&- &
+  JUST_PID=$!
+}
+
+# forward_started: waits up to 10 seconds for the recording kubectl's port-forward to start.
+forward_started() {
+  local tick
+  for ((tick = 0; tick < 100; tick++)); do
+    if [ -s "$STATE/recipe" ]; then return 0; fi
+    sleep 0.1
+  done
+  echo "no port-forward after 10 seconds: $(cat "$OUT")"
+  return 1
+}
+
+# logs_finished SECONDS: waits up to SECONDS for just, started by logs_start, to end, and sets STATUS
+# to its exit status.
+logs_finished() {
+  local tick
+  for ((tick = 0; tick < $1 * 10; tick++)); do
+    if ! kill -0 "$JUST_PID" 2>/dev/null; then
+      STATUS=0
+      wait "$JUST_PID" || STATUS=$?
+      return 0
+    fi
+    sleep 0.1
+  done
+  echo "just logs still runs after $1 seconds: $(cat "$OUT")"
+  return 1
+}
+
+# last_request: the one request curl last recorded, as its address and path and the decoded
+# parameters, in REQUEST_ADDRESS, REQUEST_PATH, QUERY, START and LIMIT, and the value of the header
+# Authorization it sent in REQUEST_AUTHORIZATION.
 last_request() {
-  local argv params
-  argv="$(tail -n 1 "$RECORD/argv")"
-  [[ $argv == "get --raw "* ]] || { echo "kubectl ran: $argv"; return 1; }
-  REQUEST_PATH="${argv#get --raw }"
+  local request url params
+  request="$(tail -n 1 "$RECORD/requests")"
+  url="$(jq -r '.url' <<<"$request")"
+  REQUEST_ADDRESS="${url#http://}"
+  REQUEST_ADDRESS="${REQUEST_ADDRESS%%/*}"
+  REQUEST_PATH="/${url#http://*/}"
   params="${REQUEST_PATH#*\?}"
   REQUEST_PATH="${REQUEST_PATH%%\?*}"
   QUERY="$(jq -rn --arg p "$params" '$p | split("&") | map(select(startswith("query="))) | .[0] | .[6:] | @urid')"
   START="$(jq -rn --arg p "$params" '$p | split("&") | map(select(startswith("start="))) | .[0] // "" | .[6:] | @urid')"
   LIMIT="$(jq -rn --arg p "$params" '$p | split("&") | map(select(startswith("limit="))) | .[0] // "" | .[6:]')"
+  REQUEST_AUTHORIZATION="$(jq -r '[.headers[] | select(test("^authorization:"; "i")) | sub("^[^:]*: *"; "")] | if length == 1 then .[0] else "\(length) Authorization headers" end' <<<"$request")"
 }
 
 # window_seconds: how many seconds before now START, the request's start, lies.
@@ -901,7 +1149,7 @@ window_seconds() {
 }
 
 @test "An operator's query prints the matching records, oldest first, without an address" {
-  local seconds name
+  local seconds name signal recipe_pid
   logs_copy
   answer_records
 
@@ -917,24 +1165,38 @@ window_seconds() {
     '2026-11-14T12:00:03Z node-2 sixth: the kubelet restarted')" ]
   # No address, from the API server's warnings on kubectl's error output or from anywhere else.
   [[ $output != *192.0.2.* && $output != *https://* ]]
-  # The query goes through the API's service proxy to the store's Service and port, with the
-  # query as given, the last 15 minutes and 200 records unless told otherwise, through the
-  # cluster's kubeconfig.
+  # The recipe reads the operator's credential from the Secret vmauth-operator of monitoring, once,
+  # and forwards a port that kubectl chooses on the loopback to vmauth's Service and port, the one
+  # vmauth proxies on; nothing else is asked of kubectl.
+  echo "kubectl ran: $(paste -sd'|' "$RECORD/argv")"
+  [ "$(cat "$RECORD/argv")" = "$(printf '%s\n' \
+    'get secret vmauth-operator --namespace monitoring --output jsonpath={.data.authorization} --request-timeout=30s' \
+    'port-forward --namespace monitoring service/vmauth :8427 --address 127.0.0.1')" ]
+  # The query goes through the forward to vmauth's query endpoint, with the Secret's value as the
+  # header Authorization, the query as given, the last 15 minutes and 200 records unless told
+  # otherwise.
+  [ "$(grep -c . "$RECORD/requests")" -eq 1 ]
   last_request
-  echo "request: $REQUEST_PATH; query: $QUERY; start: $START; limit: $LIMIT"
-  [ "$REQUEST_PATH" = /api/v1/namespaces/monitoring/services/victoria-logs:9428/proxy/select/logsql/query ]
+  echo "request: $REQUEST_ADDRESS $REQUEST_PATH; query: $QUERY; start: $START; limit: $LIMIT"
+  [ "$REQUEST_ADDRESS" = 127.0.0.1:41234 ]
+  [ "$REQUEST_PATH" = /select/logsql/query ]
+  [ "$REQUEST_AUTHORIZATION" = "$AUTHORIZATION" ]
   [ "$QUERY" = '_time:5m error' ]
   [ "$LIMIT" = 200 ]
   seconds="$(window_seconds)"
   echo "the window starts $seconds seconds ago"
   ((seconds >= 899 && seconds <= 910))
+  # The credential is never an argument of kubectl or curl, and never printed; the forward is
+  # stopped once the recipe ends.
+  no_credential "$output"
+  forwards_closed
   [ "$(sort -u "$RECORD/kubeconfig")" = "$KUBECONFIG_FILE" ]
-  # kubectl is run with the kubeconfig and none of the secrets the recipes read.
-  [ -s "$RECORD/names" ]
+  # kubectl and curl are run with none of the secrets the recipes read, kubectl with the kubeconfig.
+  [ -s "$RECORD/names" ] && [ -s "$RECORD/curl-names" ]
   grep -qx KUBECONFIG "$RECORD/names"
   for name in "${LOGS_SECRETS[@]}"; do
     echo "$name"
-    if grep -qx "$name" "$RECORD/names"; then return 1; fi
+    if grep -qx "$name" "$RECORD/names" "$RECORD/curl-names"; then return 1; fi
   done
 
   logs_recipe 'kubernetes.pod_namespace:monitoring' --since 2h --limit 5 lab-sto2
@@ -954,81 +1216,117 @@ window_seconds() {
   [ "$LIMIT" = 7 ]
   seconds="$(window_seconds)"
   ((seconds >= 89 && seconds <= 100))
+  forwards_closed
+
+  # Interrupted while it waits for the forward, by Ctrl-C, which the terminal sends to just and the
+  # recipe alike, by SIGTERM, which just passes on to the recipe, and by SIGHUP, which a closed
+  # terminal sends to both: each ends the recipe at once, well before its 15 seconds' wait for the
+  # forward would, with the signal's status and the step it ended in, and stops the forward.
+  echo slow-forward >"$STATE/mode"
+  for signal in INT TERM HUP; do
+    rm -f "$STATE/recipe"
+    logs_start '*'
+    forward_started
+    read -r recipe_pid <"$STATE/recipe"
+    if [ "$signal" = TERM ]; then kill -TERM "$JUST_PID"; else kill "-$signal" "$recipe_pid" "$JUST_PID"; fi
+    logs_finished 5
+    echo "after SIG$signal: status $STATUS; $(cat "$OUT")"
+    [ "$STATUS" -eq $((128 + $(kill -l "$signal"))) ]
+    grep -qF 'failed while opening a port-forward to service/vmauth in monitoring' "$OUT"
+    forwards_closed
+  done
 }
 
 @test "A query VictoriaLogs refuses, and an API that does not answer, each fail and say why" {
   logs_copy
   answer_records
 
+  # A query the store refuses fails with the store's own message, which vmauth relays in its
+  # answer's body, without an address or a control character, however long.
   echo refuse >"$STATE/mode"
   logs_recipe 'kubernetes.pod_name:('
   echo "refused: status $status; $output"
   [ "$status" -ne 0 ]
-  [[ $output == *'cannot parse query "kubernetes.pod_name:(": unexpected end of query'* ]]
+  [[ $output == *'refused the query: cannot parse query "kubernetes.pod_name:(": unexpected end of query'* ]]
   [[ $output != *192.0.2.* && $output != *6443* && $output != *https://* ]]
-
-  # A message longer than kubectl keeps: its first 2048 bytes, without a control character or the
-  # address it names, even with one inside the other, and said to be cut.
+  no_credential "$output"
+  forwards_closed
   echo refuse-long >"$STATE/mode"
   logs_recipe '_time:5m'
   echo "refused at length: status $status; $output"
   [ "$status" -ne 0 ]
-  [[ $output == *'cannot parse query "_time:5m at <address> '"$(printf 'x%.0s' {1..1900})"* ]]
-  [[ $output == *"x [kubectl keeps only the first 2048 bytes of the store's answer]"* ]]
-  [[ $output != *'unexpected end of query'* ]]
+  [[ $output == *'cannot parse query "_time:5m at <address> '"$(printf 'x%.0s' {1..3000})"'": unexpected end of query'* ]]
   [[ $output != *192.0.2.* && $output != *6443* && $output != *https://* ]]
   [[ $output != *$'\xc2\x9b'* ]]
 
-  # Any other answer the API server or the store gives is shown as kubectl words it, without the
-  # address it may name.
-  echo fail500 >"$STATE/mode"
+  # vmauth refusing the credential says so and names the Secret.
+  echo fail401 >"$STATE/mode"
   logs_recipe '*'
-  echo "store failed: status $status; $output"
+  echo "credential refused: status $status; $output"
   [ "$status" -ne 0 ]
-  [[ $output == *'an error on the server ("cannot read the block at <address>: store exploded")'* ]]
-  [[ $output != *192.0.2.* && $output != *https://* ]]
-  echo fail503 >"$STATE/mode"
+  [[ $output == *'vmauth refused the credential of the Secret vmauth-operator in monitoring'* ]]
+  no_credential "$output"
+  forwards_closed
+  # Any other answer is shown with its status and vmauth's words, without the address or URL they
+  # may name.
+  echo fail502 >"$STATE/mode"
   logs_recipe '*'
   echo "store away: status $status; $output"
   [ "$status" -ne 0 ]
-  [[ $output == *'error trying to reach service: dial tcp <address>: connect: connection refused'* ]]
+  [[ $output == *'vmauth answered 502: all the 1 backends for the user "operator" are unavailable for proxying the request'* ]]
+  echo fail503 >"$STATE/mode"
+  logs_recipe '*'
+  echo "store refused the connection: status $status; $output"
+  [ "$status" -ne 0 ]
+  [[ $output == *'vmauth answered 503: cannot proxy the request to <url> dial tcp <address>: connect: connection refused'* ]]
+  [[ $output != *192.0.2.* && $output != *http://* && $output != *svc.cluster.local* ]]
+  # vmauth that does not answer through the forward.
+  echo vmauth-down >"$STATE/mode"
+  logs_recipe '*'
+  echo "vmauth down: status $status; $output"
+  [ "$status" -ne 0 ]
+  [[ $output == *'vmauth did not answer through the port-forward to service/vmauth in monitoring'* ]]
+  forwards_closed
+
+  # A port-forward that does not start, with kubectl's reason and no address.
+  echo no-forward >"$STATE/mode"
+  logs_recipe '*'
+  echo "no forward: status $status; $output"
+  [ "$status" -ne 0 ]
+  [[ $output == *'kubectl port-forward to service/vmauth in monitoring stopped before it forwarded a port: services "vmauth" not found'* ]]
   [[ $output != *192.0.2.* && $output != *https://* ]]
-  echo fail403 >"$STATE/mode"
+
+  # A Secret the kubeconfig may not read, one that is missing and one without the key, each before
+  # any port is forwarded, saying what the kubeconfig must be able to do.
+  for mode in secret-forbidden secret-missing; do
+    echo "$mode" >"$STATE/mode"
+    rm -f "$RECORD/argv"
+    logs_recipe '*'
+    echo "$mode: status $status; $output"
+    [ "$status" -ne 0 ]
+    [[ $output == *'cannot read the Secret vmauth-operator in monitoring: '*'; the kubeconfig must be able to read it and forward a port in monitoring'* ]]
+    [ "$(grep -c 'port-forward' "$RECORD/argv" || true)" -eq 0 ]
+  done
+  [[ $output == *'secrets "vmauth-operator" not found'* ]]
+  echo secret-empty >"$STATE/mode"
   logs_recipe '*'
-  echo "forbidden: status $status; $output"
+  echo "no key: status $status; $output"
   [ "$status" -ne 0 ]
-  [[ $output == *'cannot get resource "services/proxy"'* ]]
-  [[ $output != *192.0.2.* && $output != *https://* ]]
-  echo fail404 >"$STATE/mode"
-  logs_recipe '*'
-  echo "not found: status $status; $output"
-  [ "$status" -ne 0 ]
-  [[ $output == *'the server could not find the requested resource'* ]]
-  [[ $output != *192.0.2.* && $output != *https://* ]]
-  echo notready >"$STATE/mode"
-  logs_recipe '*'
-  echo "store not ready: status $status; $output"
-  [ "$status" -ne 0 ]
-  [[ $output == *'no endpoints available for service "victoria-logs:9428"'* ]]
-  [[ $output != *"did not answer"* ]]
-  echo noreason >"$STATE/mode"
-  logs_recipe '*'
-  echo "no reason: status $status; $output"
-  [ "$status" -ne 0 ]
-  [[ $output == *'proxy error from <address> while dialing: dial tcp <address>: i/o timeout'* ]]
-  [[ $output != *192.0.2.* && $output != *https://* && $output != *"did not answer"* ]]
-  echo fail401 >"$STATE/mode"
+  [[ $output == *'the Secret vmauth-operator in monitoring holds no authorization'* ]]
+
+  # Credentials the API server refuses point to just cluster-kubeconfig, and an API that does not
+  # answer is said to be one, with no address.
+  echo api-401 >"$STATE/mode"
   logs_recipe '*'
   echo "credentials refused: status $status; $output"
   [ "$status" -ne 0 ]
   [[ $output == *'You must be logged in to the server (Unauthorized)'*'just cluster-kubeconfig'* ]]
   [[ $output != *"did not answer"* ]]
-
   echo down >"$STATE/mode"
   logs_recipe '*'
   echo "down: status $status; $output"
   [ "$status" -ne 0 ]
-  [[ $output == *"did not answer"* ]]
+  [[ $output == *"the Kubernetes API did not answer"* ]]
   [[ $output != *192.0.2.10* ]]
   [[ $output != *6443* ]]
 
@@ -1039,6 +1337,7 @@ window_seconds() {
   echo "not records: status $status; $output"
   [ "$status" -ne 0 ]
   [[ $output == *"not JSON lines"* ]]
+  forwards_closed
 
   # Refused before kubectl runs.
   rm -f "$RECORD/argv"
@@ -1098,14 +1397,15 @@ window_seconds() {
   type="$(jq -r '.spec.datasource.type' <<<"$sources")"
   uid="$(jq -r '.spec.uid // ""' <<<"$sources")"
   [ -n "$uid" ]
-  # Grafana's server queries the store, through its Service, so a browser needs no way to it.
+  # Grafana's server queries the store through vmauth's Service, so a browser needs no way to it.
   [ "$(jq -r '.spec.datasource.access' <<<"$sources")" = proxy ]
   # Prometheus stays the default datasource.
   [ "$(jq -r '.spec.datasource.isDefault // false' <<<"$sources")" = false ]
   url="$(jq -r '.spec.datasource.url // ""' <<<"$sources")"
-  render "$STORE"
-  read -r name namespace port <<<"$(store_service)"
-  echo "datasource URL: $url; the store's Service: $name $namespace $port"
+  built vmauth
+  read -r name namespace port <<<"$(yq -N 'select(.kind == "Service") | .metadata.name + " " + .metadata.namespace + " " + (.spec.ports[] | select(.name == "http") | .port | tostring)' "$BUILT")"
+  echo "datasource URL: $url; vmauth's Service: $name $namespace $port"
+  [ "$name $namespace $port" = "vmauth $NAMESPACE 8427" ]
   [[ $url =~ ^http://([a-z0-9-]+)\.([a-z0-9-]+)\.svc(\.cluster\.local)?:([0-9]+)/?$ ]]
   [ "${BASH_REMATCH[1]}" = "$name" ]
   [ "${BASH_REMATCH[2]}" = "$namespace" ]
@@ -1127,9 +1427,10 @@ window_seconds() {
     | select(.name == "GF_INSTALL_PLUGINS_FORCE" and .value == "true")] | length' <<<"$grafana")" -eq 1 ]
   [ "$(jq -r '[.spec.deployment.spec.template.spec.containers // [] | .[] | .env // [] | .[]
     | select(.name == "GF_INSTALL_PLUGINS" or .name == "GF_PLUGINS_PREINSTALL" or .name == "GF_PLUGINS_PREINSTALL_SYNC")] | length' <<<"$grafana")" -eq 0 ]
-  # Renovate's regex manager reads the version on the line under such a comment.
+  # Renovate's regex manager reads the version on the line under such a comment, by the plugin's
+  # name, from the catalogue Grafana installs it from.
   [ "$(grep -B1 -E "^[[:blank:]]+version: [\"']?${version//./\\.}[\"']?\$" "$REPO/kubernetes/apps/base/$NAMESPACE/grafana/app/grafanadatasource-victoria-logs.yaml" | head -1 | sed 's/^[[:blank:]]*//')" \
-    = '# renovate: datasource=github-releases depName=VictoriaMetrics/victorialogs-datasource' ]
+    = "# renovate: datasource=custom.grafana-plugins depName=$type" ]
 
   # The dashboard: loaded into the Grafana from a ConfigMap of the application, and reading this
   # datasource, with volume by namespace and by node and a logs panel filtered by two variables.
@@ -1159,6 +1460,211 @@ window_seconds() {
   # The logs panel is filtered by both variables.
   jq -e '[.panels[] | select(.type == "logs") | .targets[].expr]
     | length > 0 and all(test("kubernetes.pod_namespace\":\\$namespace") and test("kubernetes.pod_name\":\\$pod"))' <<<"$json"
+}
+
+# The plugin repository Grafana's CLI installs from while neither --repo, GF_PLUGIN_REPO nor --config
+# names another, and the image's entrypoint passes none: the default of the CLI's repo flag
+# (pkg/cmd/grafana-cli/commands/cli.go:46-49 in Grafana v13.1.3). The install asks
+# <repository>/<plugin>/versions for the plugin's versions (pkg/plugins/repo/service.go:109-118).
+GRAFANA_PLUGIN_REPO=https://grafana.com/api/plugins
+
+# The one transform of the custom datasource grafana-plugins: every item of the listing a release,
+# by its version and dated by the catalogue's createdAt for it, from the publisher's repository.
+PLUGIN_TRANSFORM="{'sourceUrl': items[0].url, 'releases': [items.{'version': version, 'releaseTimestamp': createdAt}]}"
+
+# docker_or_skip: skips the test, saying why, where no docker daemon answers. Past it, whatever
+# docker fails at fails the test, a pull of the image included.
+docker_or_skip() {
+  type -P docker >/dev/null || skip "no docker daemon answers: docker is not on PATH"
+  docker version --format '{{.Server.Version}}' >/dev/null 2>&1 ||
+    skip "no docker daemon answers: docker version reaches none"
+}
+
+# renovate_json FILE: a Renovate configuration file as JSON (the files are JSON5 with comments,
+# which YAML reads once they are dropped).
+renovate_json() {
+  grep -v '^[[:space:]]*//' "$1" | yq -o json -I0 '.'
+}
+
+# renovate_config: renovate.json5 and each preset of this repository it extends, one line each:
+# {"file": its path in the tree, "config": the file as JSON}.
+renovate_config() {
+  local file presets
+  mapfile -t presets < <(renovate_json "$REPO/renovate.json5" | jq -r '.extends[] | select(startswith("local>")) | sub(".*//"; "")')
+  for file in renovate.json5 "${presets[@]}"; do
+    renovate_json "$REPO/$file" | jq -c --arg file "$file" '{file: $file, config: .}'
+  done
+}
+
+# victoria_logs_plugin: the plugin the VictoriaLogs datasource of $BUILT asks for. Sets
+# PLUGIN_NAME and PLUGIN_VERSION.
+victoria_logs_plugin() {
+  local plugin
+  plugin="$(yq -N -o json -I0 'select(.kind == "GrafanaDatasource" and .spec.datasource.type == "victoriametrics-logs-datasource")
+    | .spec.plugins[0]' "$BUILT")"
+  echo "the datasource's plugin: $plugin"
+  PLUGIN_NAME="$(jq -r '.name // ""' <<<"$plugin")"
+  PLUGIN_VERSION="$(jq -r '.version // ""' <<<"$plugin")"
+  [ -n "$PLUGIN_NAME" ]
+  [ -n "$PLUGIN_VERSION" ]
+}
+
+@test "Renovate reads the VictoriaLogs plugin's versions from the catalogue Grafana installs it from" {
+  local file="kubernetes/apps/base/$NAMESPACE/grafana/app/grafanadatasource-victoria-logs.yaml"
+  local managers manager pins pin datasource custom entry url configs rules grafana row
+  local github=github-releases publisher=VictoriaMetrics/victorialogs-datasource
+  built grafana
+  victoria_logs_plugin
+  # The custom managers whose file patterns take the datasource's file: one, which takes all it
+  # reads of the pin from the comment and its line, as it has no template.
+  managers="$(renovate_json "$REPO/.renovate/managers.json5")"
+  manager="$(jq -c --arg file "$file" '[.customManagers[]
+    | select(any(.managerFilePatterns[]; . as $p | $file | test($p | ltrimstr("/") | rtrimstr("/"))))]' <<<"$managers")"
+  echo "custom managers of $file: $(jq -r 'map(.description) | join("; ")' <<<"$manager")"
+  [ "$(jq 'length' <<<"$manager")" -eq 1 ]
+  manager="$(jq -c '.[0]' <<<"$manager")"
+  [ "$(jq -r '.customType' <<<"$manager")" = regex ]
+  echo "templates of that manager: $(jq -c '[keys[] | select(endswith("Template"))]' <<<"$manager")"
+  [ "$(jq -c '[keys[] | select(endswith("Template"))]' <<<"$manager")" = '[]' ]
+  # What its own patterns read from the file: the plugin's pin, under the custom datasource, by the
+  # plugin's name, the one the operator hands to GF_INSTALL_PLUGINS and the install asks the
+  # catalogue for, at the datasource's version.
+  pins="$(jq -Rs -c --argjson m "$manager" '. as $text | [$m.matchStrings[] as $re | $text | capture($re; "g")]' "$REPO/$file")"
+  echo "what the manager reads there: $pins"
+  [ "$(jq 'length' <<<"$pins")" -eq 1 ]
+  pin="$(jq -c '.[0]' <<<"$pins")"
+  datasource="$(jq -r '.datasource' <<<"$pin")"
+  [ "$datasource" = custom.grafana-plugins ]
+  [ "$(jq -r '.depName' <<<"$pin")" = "$PLUGIN_NAME" ]
+  [ "$(jq -r '.currentValue' <<<"$pin")" = "$PLUGIN_VERSION" ]
+  # The datasource is the one custom datasource, by the name Renovate takes from custom.<name>, and
+  # reads JSON from the listing the install reads, through the one transform.
+  custom="$(jq -c '.customDatasources // {}' <<<"$managers")"
+  echo "custom datasources: $custom"
+  [ "$(jq -c 'keys' <<<"$custom")" = "$(jq -cn --arg name "${datasource#custom.}" '[$name]')" ]
+  entry="$(jq -c --arg name "${datasource#custom.}" '.[$name]' <<<"$custom")"
+  [ "$(jq -c 'keys' <<<"$entry")" = '["defaultRegistryUrlTemplate","format","transformTemplates"]' ]
+  url="$(jq -r '.defaultRegistryUrlTemplate' <<<"$entry")"
+  echo "the listing Renovate reads for $PLUGIN_NAME: ${url//'{{packageName}}'/$PLUGIN_NAME}"
+  [ "${url//'{{packageName}}'/$PLUGIN_NAME}" = "$GRAFANA_PLUGIN_REPO/$PLUGIN_NAME/versions" ]
+  [ "$(jq -r '.format' <<<"$entry")" = json ]
+  [ "$(jq -c '.transformTemplates' <<<"$entry")" = "$(jq -cn --arg transform "$PLUGIN_TRANSFORM" '[$transform]')" ]
+  # Renovate deep-merges customDatasources from every preset, with renovate.json5's own over them; a
+  # registry URL that the configuration or a rule gives the dependency replaces the datasource's URL
+  # template (datasource/custom/utils.js in Renovate 44.227.4), and a rule's overrideDatasource or
+  # overridePackageName replaces what it looks up. So of the configuration's files only
+  # managers.json5 sets customDatasources, none sets registryUrls at its top, and no rule sets one
+  # of the three unless a list of plain names it matches by leaves the plugin out.
+  configs="$(renovate_config)"
+  echo "files of the configuration that set customDatasources: $(jq -r 'select(.config | has("customDatasources")) | .file' <<<"$configs" | paste -sd' ' -)"
+  [ "$(jq -r 'select(.config | has("customDatasources")) | .file' <<<"$configs")" = .renovate/managers.json5 ]
+  rules="$(jq -c --arg datasource "$datasource" --arg name "$PLUGIN_NAME" '
+    def leaves_out($own): type == "array" and length > 0
+      and all(.[]; test("^[^!/][^*?{}\\[\\]]*$") and ascii_downcase != $own);
+    .file as $file | .config
+    | (select(has("registryUrls")) | {file: $file, registryUrls}),
+      (.packageRules // [] | .[]
+        | select(has("registryUrls") or has("overrideDatasource") or has("overridePackageName"))
+        | select((.matchDatasources | leaves_out($datasource)) or (.matchDepNames | leaves_out($name))
+          or (.matchPackageNames | leaves_out($name)) | not)
+        | {file: $file, rule: .})' <<<"$configs")"
+  echo "what could give the plugin another registry or name: $rules"
+  [ -z "$rules" ]
+  # The CLI takes another repository from GF_PLUGIN_REPO, and an archive from GF_PLUGIN_URL in
+  # place of the catalogue's (cli.go:45-56), and the image's entrypoint sets each from the file that
+  # the same name with __FILE appended names, before the install (packaging/docker/run.sh:50-62).
+  # The Grafana's containers set none of the four, and take no variables from a ConfigMap or a
+  # Secret, which could.
+  grafana="$(yq -N -o json -I0 'select(.kind == "Grafana")' "$BUILT")"
+  [ "$(jq '[.spec.deployment.spec.template.spec // {} | (.containers // []) + (.initContainers // []) | .[]
+    | (.env // [] | .[] | select(.name | IN("GF_PLUGIN_REPO", "GF_PLUGIN_URL", "GF_PLUGIN_REPO__FILE", "GF_PLUGIN_URL__FILE"))),
+      (.envFrom // [] | .[])]
+    | length' <<<"$grafana")" -eq 0 ]
+  # The records name the pin by the datasource and the plugin's name: the form of the listing's
+  # versions, and what Renovate extracts from the file.
+  row="$(awk -F'\t' -v datasource="$datasource" -v name="$PLUGIN_NAME" '$1 == datasource && $2 == name' "$REPO/.renovate/tag-forms.tsv")"
+  echo "tag form: $row"
+  [ "$(grep -c . <<<"$row")" -eq 1 ]
+  [ "$(cut -f3 <<<"$row")" = '^[0-9]+\.[0-9]+\.[0-9]+$' ]
+  [[ $(cut -f4 <<<"$row") == *"$GRAFANA_PLUGIN_REPO/$PLUGIN_NAME/versions"* ]]
+  echo "extracted from $file: $(awk -F'\t' -v file="$file" '$1 == file' "$REPO/.renovate/extracted.tsv")"
+  [ "$(awk -F'\t' -v file="$file" '$1 == file' "$REPO/.renovate/extracted.tsv")" = "$file"$'\tregex\t'"$PLUGIN_NAME"$'\tversion' ]
+  # Nothing reads the version from the publisher's GitHub releases, which the catalogue lists
+  # later than GitHub, and some never.
+  [ -z "$(awk -F'\t' -v datasource="$github" -v name="$publisher" '$1 == datasource && $2 == name' "$REPO/.renovate/tag-forms.tsv")" ]
+  # git grep answers 1 for no match, and fails otherwise, as outside a work tree.
+  run git -C "$REPO" grep --untracked -l -F "datasource=$github depName=$publisher"
+  echo "files naming the GitHub releases as the datasource: status $status; $output"
+  [ "$status" -eq 1 ]
+}
+
+@test "Renovate's own lookup of the VictoriaLogs plugin finds exactly the catalogue's versions, with the times the catalogue published them" {
+  local dir="$BATS_TEST_TMPDIR/lookup" fixture="$REPO/tests/fixtures/grafana-plugin-versions.json"
+  local image out result copy
+  built grafana
+  victoria_logs_plugin
+  # Only this directory is mounted, never the checkout: the presets as JSON, the copies of the
+  # listing and the script. The fixture is the catalogue's listing as
+  # https://grafana.com/api/plugins/victoriametrics-logs-datasource/versions answered a request
+  # without headers on 2026-11-19, trimmed with jq '.items |= .[:3]' and every field of those items
+  # kept. The publisher's GitHub release v0.33.0 is not in that listing; the copy added.json lists
+  # it, as the catalogue would.
+  mkdir -p "$dir"
+  grep -v '^[[:space:]]*//' "$REPO/.renovate/managers.json5" | yq -o json '.' >"$dir/managers.json"
+  cp "$fixture" "$dir/listing.json"
+  jq '.items += [.items[0] | .version = "0.33.0" | .createdAt = "2026-10-15T09:00:00.000Z"]' "$fixture" >"$dir/added.json"
+  jq '.items = []' "$fixture" >"$dir/empty.json"
+  # Renovate's own code from the image: the custom datasource's configuration as a lookup compiles
+  # it, and the lookup itself, over a file:// registry, which replaces the URL template and is read
+  # within the local directory only.
+  cat >"$dir/lookup.mjs" <<'EOF'
+import { readFileSync } from 'node:fs';
+import { GlobalConfig } from '/usr/local/renovate/dist/config/global.js';
+import { massageCustomDatasourceConfig } from '/usr/local/renovate/dist/modules/datasource/custom/utils.js';
+import { CustomDatasource } from '/usr/local/renovate/dist/modules/datasource/custom/index.js';
+
+const [datasource, packageName, currentValue] = process.argv.slice(2);
+const { customDatasources } = JSON.parse(readFileSync('/w/managers.json', 'utf8'));
+GlobalConfig.set({ localDir: '/w' });
+const config = { datasource, packageName, currentValue, customDatasources };
+const compiled = massageCustomDatasourceConfig(datasource.replace(/^custom\./, ''), config);
+const result = { url: compiled?.defaultRegistryUrlTemplate ?? null };
+for (const copy of ['listing', 'added', 'empty']) {
+  result[copy] = await new CustomDatasource().getReleases({ ...config, registryUrl: `file:///w/${copy}.json` });
+}
+console.log(`lookup: ${JSON.stringify(result)}`);
+EOF
+  # The image runs as a user of its own, which must be able to read the directory.
+  chmod -R a+rX "$dir"
+  docker_or_skip
+  image="$("$(command -v just)" --justfile "$REPO/justfile" --evaluate renovate_image)"
+  echo "image: $image"
+  [[ $image == *@sha256:* ]]
+  out="$(
+    # shellcheck source=scripts/lib/tools.sh
+    . "$REPO/scripts/lib/tools.sh"
+    docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges \
+      --volume "$dir:/w:ro" --entrypoint node "$image" /w/lookup.mjs custom.grafana-plugins "$PLUGIN_NAME" "$PLUGIN_VERSION" 2>&1
+  )" || { echo "$out"; return 1; }
+  result="$(sed -n 's/^lookup: //p' <<<"$out")"
+  [ -n "$result" ] || { echo "$out"; return 1; }
+  # The URL Renovate asks for the plugin is the one Grafana's install asks.
+  echo "compiled URL: $(jq -r '.url' <<<"$result")"
+  [ "$(jq -r '.url' <<<"$result")" = https://grafana.com/api/plugins/victoriametrics-logs-datasource/versions ]
+  # Each copy's releases are its items, in its order, each dated by its createdAt.
+  for copy in listing added empty; do
+    echo "$copy: $(jq -c --arg copy "$copy" '.[$copy]' <<<"$result")"
+    [ "$(jq -c --arg copy "$copy" '[.[$copy].releases // [] | .[] | {version, releaseTimestamp}]' <<<"$result")" \
+      = "$(jq -c '[.items[] | {version, releaseTimestamp: .createdAt}]' "$dir/$copy.json")" ]
+  done
+  [ "$(jq -r '[.listing.releases[].version] | join(" ")' <<<"$result")" = "0.34.0 0.33.1 0.32.0" ]
+  [ "$(jq -r '.listing.sourceUrl' <<<"$result")" = "$(jq -r '.items[0].url' "$fixture")" ]
+  [ "$(jq -r '.listing.sourceUrl' <<<"$result")" = https://github.com/VictoriaMetrics/victorialogs-datasource ]
+  # A GitHub release the listing lacks is no release, until the listing holds it; an empty listing
+  # gives none.
+  [ "$(jq '[.listing.releases[] | select(.version == "0.33.0")] | length' <<<"$result")" -eq 0 ]
+  [ "$(jq -r '.added.releases[] | select(.version == "0.33.0") | .releaseTimestamp' <<<"$result")" = 2026-10-15T09:00:00.000Z ]
+  [ "$(jq '.empty.releases // [] | length' <<<"$result")" -eq 0 ]
 }
 
 # Vector's unit tests run the collector's transforms and cannot see a source or a sink, so what
@@ -1266,7 +1772,8 @@ paths_record() {
   domain="$(yq -e '.CLUSTER_DOMAIN' "$EXAMPLE")"
   # The application beside the store, in its namespace, as the overlay applies it: shaped as
   # demo/hello-sso, with the component, the route's and the host's names, waiting, after the Gateway,
-  # the store and the sign-in. No patch of the overlay changes it.
+  # vmauth, which it sends to, the sign-in and the exporter that answers its Probe. No patch of the
+  # overlay changes it.
   ks="$REPO/kubernetes/apps/base/$NAMESPACE/$ROUTE_APP/ks.yaml"
   overlay
   [ "$(yq -o json -I0 '.spec | sort_keys(..)' "$ks")" \
@@ -1277,23 +1784,24 @@ paths_record() {
   [ "$(yq '.spec.targetNamespace' "$ks")" = "$NAMESPACE" ]
   [ "$(yq -o json -I0 '.spec.components' "$ks")" = '["../../../../../components/sso"]' ]
   [ "$(yq -o json -I0 '.spec.postBuild.substitute | sort_keys(.)' "$ks")" = '{"SSO_HOSTNAME":"logs","SSO_ROUTE":"logs"}' ]
-  [ "$(yq '.spec.dependsOn | map(.name) | sort | join(" ")' "$ks")" = "gateway-public oauth2-proxy victoria-logs" ]
+  [ "$(yq '.spec.dependsOn | map(.name) | sort | join(" ")' "$ks")" = "blackbox-exporter gateway-public oauth2-proxy vmauth" ]
   [ "$(yq '.spec.wait' "$ks")" = true ]
   [ "$(yq -o json -I0 '.spec.sourceRef' "$ks")" = "{\"kind\":\"ExternalArtifact\",\"name\":\"$ROUTE_APP\"}" ]
-  # The store's application waits, so the route is applied once the store's release is Ready.
-  [ "$(NAME="$STORE" yq -N 'select(.kind == "Kustomization" and .metadata.name == strenv(NAME)) | .spec.wait' "$OVERLAY")" = true ]
+  # vmauth's application waits, so the route is applied once vmauth's pods are available with the
+  # route's credential in place.
+  [ "$(NAME=vmauth yq -N 'select(.kind == "Kustomization" and .metadata.name == strenv(NAME)) | .spec.wait' "$OVERLAY")" = true ]
   # The namespace's routes may attach to the public Gateway's https listener.
   [ "$(yq -N "select(.kind == \"Namespace\" and .metadata.name == \"$NAMESPACE\") | .metadata.labels[\"k8s-gitops/gateway\"]" "$OVERLAY")" = public ]
-  # app/ holds the one HTTPRoute; the component adds the policy and the sign-in route, all in
-  # monitoring.
+  # app/ holds the one HTTPRoute, the filter that gives it its credential to vmauth and its Probe
+  # (tests/probes.bats); the component adds the policy and the sign-in route, all in monitoring.
   # shellcheck disable=SC2016 # The file holds a ${NAME} reference, not for the shell to expand.
-  [ "$(yq -N 'select(.kind != "Kustomization") | .kind + "/" + .metadata.name' "$REPO/kubernetes/apps/base/$NAMESPACE/$ROUTE_APP"/app/*.yaml)" \
-    = 'HTTPRoute/${SSO_ROUTE}' ]
-  [ "$(yq -o json -I0 '.resources' "$REPO/kubernetes/apps/base/$NAMESPACE/$ROUTE_APP/app/kustomization.yaml")" = '["httproute.yaml"]' ]
+  [ "$(yq -N 'select(.kind != "Kustomization") | .kind + "/" + .metadata.name' "$REPO/kubernetes/apps/base/$NAMESPACE/$ROUTE_APP"/app/*.yaml | LC_ALL=C sort | paste -sd' ' -)" \
+    = 'HTTPRoute/${SSO_ROUTE} HTTPRouteFilter/${SSO_ROUTE} Probe/${SSO_ROUTE}' ]
+  [ "$(yq -o json -I0 '.resources' "$REPO/kubernetes/apps/base/$NAMESPACE/$ROUTE_APP/app/kustomization.yaml")" = '["httproute.yaml","httproutefilter.yaml","probe.yaml"]' ]
   built "$ROUTE_APP"
-  objects="$(yq -N 'select(.kind != null) | .kind + "/" + .metadata.namespace + "/" + .metadata.name' "$BUILT" | sort | paste -sd' ' -)"
+  objects="$(yq -N 'select(.kind != null) | .kind + "/" + .metadata.namespace + "/" + .metadata.name' "$BUILT" | LC_ALL=C sort | paste -sd' ' -)"
   echo "built: $objects"
-  [ "$objects" = "HTTPRoute/monitoring/logs HTTPRoute/monitoring/logs-oauth2 SecurityPolicy/monitoring/logs" ]
+  [ "$objects" = "HTTPRoute/monitoring/logs HTTPRoute/monitoring/logs-oauth2 HTTPRouteFilter/monitoring/logs Probe/monitoring/logs SecurityPolicy/monitoring/logs" ]
   # The route: on the public Gateway's https listener, for logs under the cluster's domain.
   route="$(yq -N -o json -I0 'select(.kind == "HTTPRoute" and .metadata.name == "logs")' "$BUILT")"
   [ "$(jq -cS '.spec.parentRefs' <<<"$route")" = '[{"name":"public","namespace":"envoy-gateway-system","sectionName":"https"}]' ]
@@ -1340,10 +1848,10 @@ paths_record() {
 
 @test "Only the interface and its queries are routed to the log store, and the root is redirected to the interface" {
   local name namespace port rules wide request method target
-  render "$STORE"
-  read -r name namespace port <<<"$(store_service)"
-  echo "the store's Service: $name $namespace $port"
-  [ "$name" = victoria-logs ] && [ "$namespace" = "$NAMESPACE" ] && [ "$port" = 9428 ]
+  built vmauth
+  read -r name namespace port <<<"$(yq -N 'select(.kind == "Service") | .metadata.name + " " + .metadata.namespace + " " + (.spec.ports[] | select(.name == "http") | .port | tostring)' "$BUILT")"
+  echo "vmauth's Service: $name $namespace $port"
+  [ "$name" = vmauth ] && [ "$namespace" = "$NAMESPACE" ] && [ "$port" = 8427 ]
   built "$ROUTE_APP"
   yq -N 'select(.kind == "HTTPRoute" and .metadata.name == "logs")' "$BUILT" >"$BATS_TEST_TMPDIR/route.yaml"
   [ "$(yq '.metadata.namespace' "$BATS_TEST_TMPDIR/route.yaml")" = "$namespace" ]
@@ -1357,7 +1865,8 @@ paths_record() {
     and ((.path.value // "/") | test("^/(select/?)?$"))) | .path.value // "/"' <<<"$rules")"
   [ -z "$wide" ] || { echo "a prefix match of $wide"; return 1; }
   # Both rules in full, matches, filters and backends: the root's redirect to the interface, which
-  # has no backend, and the reads, by path alone, to the store's Service on its port.
+  # has no backend, and the reads, by path alone, to vmauth's Service on its port, through the
+  # route's one filter, which puts the route's credential in Authorization.
   [ "$(yq '.spec.rules | length' "$BATS_TEST_TMPDIR/route.yaml")" -eq 2 ]
   [ "$(yq -o json -I0 '.spec.rules[0]' "$BATS_TEST_TMPDIR/route.yaml" | jq -cS .)" = "$(jq -cnS '{
     matches: [{path: {type: "Exact", value: "/"}}],
@@ -1365,6 +1874,7 @@ paths_record() {
   [ "$(yq -o json -I0 '.spec.rules[1]' "$BATS_TEST_TMPDIR/route.yaml" | jq -cS .)" = "$(jq -cnS --arg name "$name" --argjson port "$port" '{
     matches: [{path: {type: "PathPrefix", value: "/select/vmui"}}, {path: {type: "PathPrefix", value: "/select/logsql"}},
       {path: {type: "Exact", value: "/select/buildinfo"}}, {path: {type: "Exact", value: "/select/tenant_ids"}}],
+    filters: [{type: "ExtensionRef", extensionRef: {group: "gateway.envoyproxy.io", kind: "HTTPRouteFilter", name: "logs"}}],
     backendRefs: [{name: $name, port: $port}]}')" ]
   # What reaches the store, by Gateway API's matching of the rules: its interface's files, among
   # them the script the v1.54.0 interface loads, every handler of /select/logsql/, which the
@@ -1489,6 +1999,38 @@ YAML
   found="$(store_reach "$BATS_TEST_TMPDIR/second.yaml")"
   echo "with a second route: $found"
   [ "$found" = "HTTPRoute/demo/logs-open sends to the Service victoria-logs of monitoring" ]
+  # So is a second route to vmauth, in monitoring without the sign-in's policy, and a filter of
+  # another route that injects the route's credential.
+  cp "$EVERYTHING" "$BATS_TEST_TMPDIR/vmauth.yaml"
+  cat >>"$BATS_TEST_TMPDIR/vmauth.yaml" <<'YAML'
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: logs-direct
+  namespace: monitoring
+spec:
+  rules:
+    - backendRefs:
+        - name: vmauth
+          port: 8427
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: HTTPRouteFilter
+metadata:
+  name: borrowed
+  namespace: demo
+spec:
+  credentialInjection:
+    overwrite: true
+    credential:
+      valueRef:
+        name: vmauth-logs-route
+        namespace: monitoring
+YAML
+  found="$(store_reach "$BATS_TEST_TMPDIR/vmauth.yaml")"
+  echo "with a second route to vmauth and a borrowed credential: $found"
+  [ "$(LC_ALL=C sort <<<"$found" | paste -sd'|' -)" = "HTTPRoute/monitoring/logs-direct sends to the Service vmauth of monitoring|HTTPRouteFilter/demo/borrowed injects the credential of vmauth-logs-route" ]
   cp "$EVERYTHING" "$BATS_TEST_TMPDIR/unprotected.yaml"
   cat >>"$BATS_TEST_TMPDIR/unprotected.yaml" <<'YAML'
 ---
@@ -1567,6 +2109,13 @@ YAML
   found="$(store_reach "$BATS_TEST_TMPDIR/granted.yaml")"
   echo "with a second Service behind a grant: $found"
   [ "$found" = "ReferenceGrant/monitoring/logs-open lets another namespace refer to the Services of monitoring" ]
+  # A grant to the Secrets of monitoring is named too: a filter of another namespace could then
+  # inject the route's credential.
+  yq '(select(.kind == "ReferenceGrant" and .metadata.name == "logs-open") | .spec.to[0].kind) = "Secret"' \
+    "$BATS_TEST_TMPDIR/granted.yaml" >"$BATS_TEST_TMPDIR/secrets.yaml"
+  found="$(store_reach "$BATS_TEST_TMPDIR/secrets.yaml")"
+  echo "with a grant to the Secrets: $found"
+  [ "$found" = "ReferenceGrant/monitoring/logs-open lets another namespace refer to the Secrets of monitoring" ]
   # So is the store's own route with its policy failing open, a second object on it, and another
   # route on its host.
   yq '(select(.kind == "SecurityPolicy" and .metadata.namespace == "monitoring") | .spec.extAuth.failOpen) = true' \
@@ -1622,7 +2171,7 @@ YAML
   [ "$found" = "Grafana/monitoring/grafana has its operator make an HTTPRoute that no policy can be seen to target" ]
 }
 
-@test "The log store's route is selected by an overlay entry, builds nothing when it is not, and is refused without the store, the Gateway or the sign-in" {
+@test "The log store's route is selected by an overlay entry, builds nothing when it is not, and is refused without vmauth, the Gateway or the sign-in" {
   local entries dependency with without
   # One entry of the overlay, which builds the Kustomization.
   entries="$(grep -c "/$NAMESPACE/$ROUTE_APP/ks.yaml\$" "$REPO/kubernetes/apps/overlays/lab-sto2/kustomization.yaml")"
@@ -1642,7 +2191,7 @@ YAML
   echo "$output"
   [ "$status" -eq 0 ]
   # Each application it names, left out, is refused, naming both.
-  for dependency in "$STORE" gateway-public oauth2-proxy; do
+  for dependency in vmauth gateway-public oauth2-proxy blackbox-exporter; do
     tree_without "$dependency"
     run "$REPO/scripts/kubernetes-check" "$TREE"
     echo "without $dependency: status $status"

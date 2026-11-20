@@ -1,0 +1,52 @@
+---
+# The fixture tree's sources, one row each, as signatures.yaml at the repository's root lists the
+# tree's: the synced artifact, the tools image, then every other source sorted by source.
+sources:
+  - source: oci://charts.example.invalid/tree/manifests
+    signed: keyless
+    issuer: '^https://token\.ci\.example\.invalid$'
+    subject: '^https://code\.example\.invalid/example/tree/\.ci/publish\.yml@refs/heads/main$'
+    from: the fixture's publish run
+  - source: oci://charts.example.invalid/example/tree/ci-tools
+    signed: keyless
+    issuer: '^https://token\.ci\.example\.invalid$'
+    subject: '^https://code\.example\.invalid/example/tree/\.ci/tools-image\.yml@refs/heads/main$'
+    from: the fixture's tools image run
+    cluster: false
+    reason: nothing on the cluster pulls it; the checks run in it
+  - source: https://charts.example.invalid/classic
+    signed: unsigned
+    reason: a chart from a Helm repository, which Flux verifies no signature of
+  - source: oci://charts.example.invalid/charts/hello
+    signed: keyless
+    issuer: '^https://token\.ci\.example\.invalid$'
+    subject: '^https://code\.example\.invalid/example/hello/\.ci/release\.yml@refs/heads/main$'
+    from: the certificate of the signature of 2.0.0
+  - source: oci://charts.example.invalid/charts/keyed
+    signed: key
+    key: signatures/keyed.pem
+    digest: sha512
+    from: the fixture publisher's page
+    cluster: false
+    reason: signed over SHA-512, and the pinned source-controller verifies a key's signature over
+      SHA-256 alone
+  - source: oci://charts.example.invalid/charts/mirrored
+    signed: keyless
+    issuer: '^https://token\.ci\.example\.invalid$'
+    subject: '^https://code\.example\.invalid/example/mirror/\.ci/mirror\.yml@refs/heads/main$'
+    from: the certificate of the signature of 5.0.0
+    cluster: false
+    reason: verified before merge alone in the fixture
+  - source: oci://charts.example.invalid/charts/plain
+    signed: unsigned
+    reason: the fixture publisher signs nothing
+  - source: oci://charts.example.invalid/flux/instance
+    signed: keyless
+    issuer: '^https://token\.ci\.example\.invalid$'
+    subject: '^https://code\.example\.invalid/example/charts/\.ci/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$'
+    from: the certificate of the signature of 1.0.0
+  - source: oci://charts.example.invalid/flux/operator
+    signed: keyless
+    issuer: '^https://token\.ci\.example\.invalid$'
+    subject: '^https://code\.example\.invalid/example/charts/\.ci/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$'
+    from: the certificate of the signature of 1.0.0

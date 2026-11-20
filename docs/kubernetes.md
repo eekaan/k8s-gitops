@@ -54,6 +54,12 @@ spec:
   `<namespace>`, and `path` is the application's own `app/`.
 - `dependsOn`, `wait`, `healthCheckExprs`, `components` and `postBuild.substitute` belong to the
   application. The fields the root sets do not; see below.
+- A route on the public Gateway takes what it puts in front of itself as components of its
+  `ks.yaml`: `components/sso` for the cluster's sign-in ([Putting a route behind
+  it](#putting-a-route-behind-it)), `components/waf` for the web application firewall ([Putting a
+  route behind the firewall](#putting-a-route-behind-the-firewall)) and `components/ratelimit` for a
+  request rate limit ([Rate limits](#rate-limits)), each with its variables in
+  `postBuild.substitute`.
 - What `dependsOn` names is an application the cluster's overlay enables, and one that waits: it
   sets `wait: true`, `healthChecks` or `healthCheckExprs`, so it is Ready only once what it
   applies is. A dependency on an application a cluster deliberately does not enable is an error:
@@ -68,6 +74,12 @@ spec:
   match what the render holds. A custom resource whose operator creates pods sets the security
   context `restricted` requires where the resource has the fields, and `tests/pod-security.bats`
   lists it; a pod it makes that needs more is an entry with `created-by`.
+- A namespace that runs sandboxed carries the label `k8s-gitops/sandbox` in its `namespace.yaml`,
+  set to `userns`, `gvisor` or `kata` ([Runtime classes](#runtime-classes)), and every pod template
+  of its applications sets what that tier asks, `hostUsers: false` or that `runtimeClassName`. Such
+  an application takes neither `components/volsync` nor `components/cnpg-cluster`, whose operators
+  make pods it cannot give a tier. `just pod-security-check` fails until it holds, and Kyverno
+  refuses a pod without its tier at admission ([The sandbox tier rule](#the-sandbox-tier-rule)).
 - The namespace denies ingress and egress by default, and the application declares the flows it
   lets through in a `CiliumNetworkPolicy` beside it ([Network policy](#network-policy)): a new
   namespace gets a `default-deny` `NetworkPolicy` next to its `namespace.yaml`, or an entry of
@@ -80,6 +92,9 @@ spec:
 
 An application the overlay selects also has an entity in Backstage's catalogue, in the same change
 ([Backstage](#backstage)); `tests/backstage.bats` fails without it.
+
+A new test file, such as `tests/<app>.bats`, gets its time with `just test-time tests/<app>.bats` in
+the same change, and `just test` fails until it has one.
 
 Enable the application by listing its namespace directory, once, and its `ks.yaml` in
 `apps/overlays/<cluster>/kustomization.yaml`. A disabled application stays in the list,
@@ -95,7 +110,10 @@ values. Once they are in place, `just renovate-record` writes what Renovate extr
 `.renovate/extracted.tsv`, which the change commits; a pin under such a comment also gets the form
 of its datasource's tags in `.renovate/tag-forms.tsv`, read from the registry's own listing, and a
 pin that no manager reads is listed in `.renovate/by-hand.tsv` with why and how it is moved.
-`just renovate-check` and `just renovate-pins` fail, naming the file to change, until they hold.
+`just renovate-check` and `just renovate-pins` fail, naming the file to change, until they hold. The
+chart's source is a row of `signatures.yaml`, and where its publisher signs keyless its
+`OCIRepository` carries the row's `verify` block ([Adding a source](#adding-a-source)); `just
+signatures-check` fails, naming the source, until it holds.
 
 ## What the root sets
 
@@ -132,6 +150,12 @@ by what a rule needs:
   images. It runs `kubernetes-check` first, keeping what Flux builds, and stops when that fails;
   then `scripts/render`, whose output it reads. It is a check of the `static` group, so it runs on
   every pull request and every push to `main`, and not in the publish run.
+
+The sources' signatures have two checks of their own, beside these ([Signatures](#signatures)):
+`just signatures-check`, offline, on what `kubernetes-check` builds, holds every chart source to its
+row of `signatures.yaml` and the rows to the verify blocks, and is a check of `static`; `just
+signatures-verify` asks the registries whether each pin is signed as its row says, and is the group
+`signatures` alone. Neither is in the publish run.
 
 That split is the design, and its cost is this: a tree with a misspelt field or an untagged image
 fails every pull request's `static` group, but the publish run does not refuse it again. Where the
@@ -497,6 +521,21 @@ level is declared in the tree, never left to the API server's default.
   enforces a level other than the strictest its workloads pass; and when a namespace that enforces
   less than `restricted` does not audit and warn at `restricted` at the cluster's minor.
   `tests/pod-security.bats` proves each rule on a small render and runs the check on the tree.
+- **Sandbox tiers.** A namespace whose manifest carries the label `k8s-gitops/sandbox` names its
+  sandbox tier with it ([Runtime classes](#runtime-classes)), and the check also fails, naming the
+  namespace: when the label is any value other than `userns`, `gvisor` or `kata`, whether or not the
+  namespace has workloads; when a workload in it, a CronJob through its job template, does not set
+  what its tier asks of the pod, `hostUsers: false` for `userns` and `runtimeClassName` of the
+  tier's name for `gvisor` and `kata`; and when it holds an object of the API group
+  `volsync.backube` or `postgresql.cnpg.io`, which `components/volsync` and
+  `components/cnpg-cluster` bring. VolSync and CloudNativePG make the movers' and the database's
+  pods from those resources, and the namespace's application cannot give those pods a tier: at the
+  pinned versions, the definitions of `ReplicationSource`, `ReplicationDestination` and `Cluster`
+  declare neither `runtimeClassName` nor `hostUsers`. Any other operator that makes pods in such a
+  namespace must give them the tier itself, which the check cannot see, as the render does not
+  hold those pods. The namespace's line of the report ends `, sandbox <tier>`. The exceptions file
+  lists levels, never tiers, so no entry of it lets a workload past its tier. Kyverno holds the same
+  rule at admission ([The sandbox tier rule](#the-sandbox-tier-rule)).
 - **The Flux install it evaluates.** The pinned Flux CLI's `flux install --export` for the
   components the FluxInstance names, with the instance's patches applied, each a patch and its
   target by their exact fields (any other key is refused, [Paths](#what-the-checks-refuse)): the
@@ -547,6 +586,15 @@ level is declared in the tree, never left to the API server's default.
     gives the mover's container no privilege escalation and no capabilities itself, as its
     documentation's permission model describes for movers without the privileged-movers
     annotation, which no namespace here carries ([Volume backups](#volume-backups)).
+  - The ReplicationDestination `<app>-drill` of each application that takes the restore drill,
+    `volsync-demo` in `demo`: the same mover security context in `spec.restic.moverSecurityContext`,
+    from `components/volsync-drill` ([The restore drill](#the-restore-drill)).
+  - `AWX/ascender` in `ascender`: the web and task pods and the migration Job its operator makes, by
+    `spec.restricted_security_context` and the pod's non-root user and seccomp profile in
+    `spec.security_context_settings`; the operator's restricted mode gives every container of them
+    no privilege escalation and no capabilities. Ascender itself starts the job pods; the operator
+    does not make them, so its restricted mode does not reach them. They are an entry of the
+    exceptions file, `created-by` the `AWX` ([Ascender](#ascender)).
 
   Admission evaluates each such pod when the operator creates it: a namespace that enforces
   `restricted` refuses one that fails it, and one that enforces less records and reports it
@@ -606,23 +654,27 @@ once it is not, and the agents' rendered configuration agrees.
 
 | Namespace | Posture | Why, and what covers it instead |
 | --- | --- | --- |
-| `demo` | default deny | `hello` takes the proxies on 8080; the backup movers resolve names and reach the object storage on 443; `volsync-demo` and the rest open nothing. |
-| `envoy-gateway-system` | default deny | the controller, its webhook, its certificate job and the proxies, below. |
+| `demo` | default deny | `hello` takes the proxies, Locust's workers and Robot Framework's runner on 8080; the backup movers, the restore drill's among them, resolve names and reach the object storage on 443; `volsync-demo`, the drill's check and the rest open nothing. |
+| `envoy-gateway-system` | default deny | the controller, its webhook, its certificate job and the proxies, below; the proxies take the blackbox exporter's probes. |
 | `kromgo` | default deny | kromgo takes the proxies and the kubelet's probes on 8080 and Prometheus' scrape on 8081, and reaches the resolver and Prometheus on 9090. |
 | `sso-system` | default deny | dex takes the proxies and oauth2-proxy on 5556 and reaches the API server and GitHub on 443; oauth2-proxy takes the proxies on 4180 and reaches dex; below. |
-| `backstage` | default deny | Backstage takes the proxies and the kubelet's probes on 7007 and reaches the resolver and its database on 5432; the database takes the operator, its own pods, Backstage, the dump job, Prometheus and the kubelet's probes, and reaches its own pods, the resolver and the API server, and its instances, for their Barman Cloud sidecars, the object storage on 443; the dump job reaches the resolver, the database and the world on 443. |
-| `security-system` | default deny | Falco takes Prometheus' scrape and the kubelet's probes on 8765, and reaches the resolver alone. |
+| `backstage` | default deny | Backstage takes the proxies and the kubelet's probes on 7007 and reaches the resolver and its database on 5432; the database's pods, those of every cluster of the namespace by `cnpg.io/cluster` existing, a restore's beside `backstage-db` included, take the operator, each other, Backstage, the dump job, Prometheus and the kubelet's probes, and reach each other, the resolver and the API server, and its instances and a restore's recovery job, for their Barman Cloud sidecars, the object storage on 443; the dump job reaches the resolver, the database and the world on 443. |
+| `ascender` | default deny | the web pods take the proxies, the kubelet's probe, the task pods and Robot Framework's runner on 8052; the operator takes the kubelet's probes on 6789 and reaches the API server alone; every pod of Ascender's instance reaches the resolver and its database on 5432; the task pods reach the web pods, the API server and the world on 443 and 22; the job pods reach the resolver and the world on 443 and 22 and nothing else; the database, its instances, a restore's recovery job and the dump job let through what Backstage's do. |
+| `security-system` | default deny | Falco takes Prometheus' scrape and the kubelet's probes on 8765, and reaches the resolver alone; the flow recorder takes nothing and reaches the resolver and Hubble Relay on 4245. |
 | `crowdsec` | default deny | the local API takes the agent on 8080, Prometheus on 6060 and the kubelet's probes, and sends nothing; the agent takes Prometheus and the kubelet on 6060 and reaches the resolver, the local API and the API server on 443 and 6443; below. |
 | `open-feature-operator` | default deny | the OpenFeature Operator takes the kubelet's probes on 8081, Prometheus' scrape on 8080 and the API server's calls to its webhooks on 9443, and reaches the API server alone. |
-| `kguardian` | default deny | the broker takes the interface, Prometheus, the local host and other nodes' hosts on 9090 and reaches the resolver and its database on 5432; the interface takes the kubelet's probes on 5173 and reaches the resolver and the broker; the database and its dump job as Backstage's, the object storage on 443 included. The observers run in the host's network namespace, which no pod policy selects. |
+| `locust` | default deny | Locust's master takes its workers on 5557, and the proxies and the kubelet's probe on 8089, and sends nothing; the workers take nothing and reach the resolver, the master on 5557 and `hello`'s pods in `demo` on 8080. |
+| `robot` | default deny | Robot Framework's runner takes nothing and reaches the resolver, `hello`'s pods in `demo` on 8080 and Ascender's web pods in `ascender` on 8052; the report server takes the kubelet's probe on 8080 and sends nothing. |
+| `escape-canary` | default deny | the escape canary's pods take nothing and reach the resolver, and the rights check's pods the API server on 443 and 6443; everything else its network check attempts is what the default deny forbids. |
+| `kguardian` | default deny | the broker takes the interface, Prometheus, the local host and other nodes' hosts on 9090 and reaches the resolver and its database on 5432; the interface takes the kubelet's probes on 5173 and reaches the resolver and the broker; the database, its instances, a restore's recovery job and the dump job let through what Backstage's do, the object storage on 443 included. The observers run in the host's network namespace, which no pod policy selects. |
 | `ai-system` | listed | applications whose allows are not written, not a namespace that cannot have the posture. n8n takes the proxies on 5678 and reaches its database, the resolver and whatever its workflows call outside; the PostgreSQL instances take n8n, each other and the operator, and reach the API server, and their Barman Cloud sidecars reach the object storage on 443 and the API server; the dump job reaches the database, the hosts age's release is downloaded from and the object storage; Open WebUI takes the proxies on 8080 and reaches nothing until an administrator turns on a connection that calls out; the backup movers reach the object storage on 443. The proxies reach n8n's 5678 and Open WebUI's 8080 alone there and forward only to their Services, PostgreSQL authenticates every client, Pod Security, node firewall. |
 | `etcd-snapshots` | listed | an application whose allows are not written, not a namespace that cannot have the posture. The snapshot job takes nothing and reaches the Talos API through `talos.default`, the object storage, the hosts age's release is downloaded from (its URL redirects to a second host, which serves the file) and the resolver. Talos' own authorisation of its one role, Pod Security, node firewall. |
-| `external-dns` | listed | an application whose allows are not written, not a namespace that cannot have the posture. external-dns takes Prometheus' scrape and the kubelet's probes on 7979 and nothing else, and reaches the API server, the DNS provider's API on 443 and the resolver. Its token, scoped to zone read and DNS edit on the cluster's one zone, its name filter, a ClusterRole that only reads, Pod Security, node firewall ([DNS records](#dns-records)). |
-| `kube-system` | listed | Cilium's agent, its Envoy and its operator run in the host's network namespace; the resolver takes queries from every namespace; the pod-network workloads' flows are not yet enumerated. Node firewall, Pod Security. |
+| `external-dns` | listed | an application whose allows are not written, not a namespace that cannot have the posture. external-dns takes Prometheus' scrape and the kubelet's probes on 7979 and nothing else, and reaches the API server, the DNS provider's API on 443 and the resolver; the Jobs of `just cluster-dns-remove` reach only the provider's API and the resolver. Its token, scoped to zone read and DNS edit on the cluster's one zone, its name filter, a ClusterRole that only reads, Pod Security, node firewall ([DNS records](#dns-records)). |
+| `kube-system` | listed | Cilium's agent, its Envoy and its operator run in the host's network namespace; the resolver takes queries from every namespace; Hubble Relay takes the flow recorder of `security-system` on 4245; the pod-network workloads' other flows are not yet enumerated. Node firewall, the recorder's egress, which names Relay's pods on that port alone, Pod Security. |
 | `flux-system` | listed | the controllers' flows are not yet enumerated as allows; Flux's own network policies, which the operator makes at run time, and the operator's for its web interface, `flux-operator-web`, which the check reads and passes because the namespace is listed ([What the check refuses](#what-the-check-refuses)); Pod Security, node firewall. |
-| `monitoring` | listed | Prometheus scrapes every namespace and the nodes, the node exporter runs in the host's network namespace, the API server calls the operator's webhook, VictoriaLogs takes the proxies on 9428 for the route `logs`, Alertmanager reaches the resolver and, outside the cluster, each of its two destinations on the port of its URL, hosts that are deployment values and so are named by no policy ([Where alerts go](#where-alerts-go)), the other flows are not yet enumerated. The proxies reach VictoriaLogs' 9428 alone there and forward only the route's reads, behind the cluster's sign-in, Pod Security, node firewall. |
+| `monitoring` | listed | Prometheus scrapes every namespace and the nodes, the node exporter runs in the host's network namespace, the API server calls the operator's webhook, vmauth takes the proxies on 8427 for the route `logs`, Alertmanager reaches the resolver and, outside the cluster, each of its two destinations on the port of its URL, hosts that are deployment values and so are named by no policy ([Where alerts go](#where-alerts-go)), the blackbox exporter takes Prometheus on 9115 and reaches the resolver and the public Gateway's proxies on 10080 and 10443, the other flows are not yet enumerated. The proxies reach vmauth's 8427 alone there and send it only the route's reads, behind the cluster's sign-in, which vmauth admits with the route's own credential and forwards to the store with the store's, Pod Security, node firewall. |
 | `openbao`, `external-secrets`, `cert-manager`, `cnpg-system`, `keda`, `volsync-system` | listed | flows not yet enumerated: webhooks and APIs the API server calls, the store's clients, scrapes, the PostgreSQL operator's calls to the Barman Cloud plugin. Each entry says which, and what covers it. |
-| `piraeus-datastore` | listed | the CSI node plugin runs in the host's network namespace; the satellites replicate over the pod network, and their flows are not yet enumerated. |
+| `piraeus-datastore` | listed | the CSI node plugin and the satellites run in the host's network namespace, and DRBD replicates between the nodes' addresses; the other flows are not yet enumerated. LINSTOR's API, which takes only clients holding a certificate its own authority signs, and the controller and the satellites, which take only each other's certificates, from an authority of their own ([Who may call LINSTOR](#who-may-call-linstor)), Pod Security, node firewall. |
 | `cilium-secrets` | listed | holds no pod. |
 | `kyverno`, `gatekeeper-system` | listed | flows not yet enumerated: the API server calls each policy engine's webhooks from the control planes' host network, the controllers reach the API server, Prometheus scrapes them ([Admission policy](#admission-policy)). Pod Security, node firewall. |
 
@@ -633,9 +685,10 @@ once it is not, and the agents' rendered configuration agrees.
 - **`envoy-gateway-system`.** The proxies (labels `app.kubernetes.io/name: envoy`,
   `app.kubernetes.io/component: proxy`, `app.kubernetes.io/managed-by: envoy-gateway`,
   `gateway.envoyproxy.io/owning-gateway-name: public`) take the world on 10080 and 10443, the
-  container ports the controller derives from the listeners 80 and 443 by adding 10000, and the
-  kubelet on 19003 and 19002: Envoy Gateway v1.10.0 probes the envoy container on its readiness
-  port, 19003 (`internal/xds/bootstrap/bootstrap.go`,
+  container ports the controller derives from the listeners 80 and 443 by adding 10000, the blackbox
+  exporter's pods on the same two ports, which are the only pods of the cluster they take there
+  ([Probes](#probes)), and the kubelet on 19003 and 19002: Envoy Gateway v1.10.0 probes the envoy
+  container on its readiness port, 19003 (`internal/xds/bootstrap/bootstrap.go`,
   `internal/infrastructure/kubernetes/proxy/resource.go`), and the shutdown manager on 19002
   (`internal/cmd/envoy/shutdown_manager.go`); 19001 is the stats port and 19000 the admin port on
   the loopback. They reach the resolver, the controller on 18000 (xDS) and 18002 (the Wasm modules
@@ -644,20 +697,23 @@ once it is not, and the agents' rendered configuration agrees.
   while that carries `k8s-gitops/gateway: public`, on the container port the route sends to and no
   other: `hello` in `demo` on 8080, kromgo in `kromgo` on 8080, n8n on 5678 and Open WebUI on 8080
   in `ai-system`, dex on 5556 and oauth2-proxy on 4180 in `sso-system`, Backstage in `backstage` on
-  7007, and VictoriaLogs in `monitoring` on 9428. oauth2-proxy's rule also carries the question the
-  proxies ask it about each request of a route that opts in to sign-in ([Sign-in](#sign-in)), which
-  is no route's backend but reaches the same pods and port. `tests/network-policy.bats` reads those
-  ports from the render, from each route's backend through its Service's target port to the
+  7007, Ascender's web pods in `ascender` on 8052, vmauth in `monitoring`
+  on 8427, and Locust's master in `locust` on 8089. oauth2-proxy's rule also carries the question
+  the proxies ask it about each request of a route that opts in to sign-in ([Sign-in](#sign-in)),
+  which is no route's backend but reaches the same pods and port. `tests/network-policy.bats` reads
+  those ports from the render, from each route's backend through its Service's target port to the
   container port, and fails unless the rules name, in each labelled namespace, exactly them; it
   reads the proxies' egress in every form the evaluation reads, and fails on a port entry or a peer
   it cannot compare, a backend in a namespace without the label and a Service without a selector.
   What a pod of such a namespace takes is its own namespace's to say: in `demo`, `hello` on 8080; in
   `kromgo`, kromgo on 8080; in `sso-system`, dex on 5556 and oauth2-proxy on 4180; in `backstage`,
-  Backstage on 7007. In `ai-system`, which is listed and so has no pod in default deny, every pod
-  takes them on every port, so the proxies' rules are what keep them from n8n's other ports, from
-  every port of its database and from Open WebUI's other ports; PostgreSQL also authenticates every
-  client. So it is in `monitoring`, listed as well: the proxies' rule for VictoriaLogs is what keeps
-  them off Prometheus, Grafana, Alertmanager, the collector and the store's other ports. The
+  Backstage on 7007; in `ascender`, the web pods on 8052; in `locust`, Locust's master on 8089. In
+  `ai-system`, which is
+  listed and so has no pod in default deny, every pod takes them on every port, so
+  the proxies' rules are what keep them from n8n's other ports, from every port of
+  its database and from Open WebUI's other ports; PostgreSQL also authenticates every
+  client. So it is in `monitoring`, listed as well: the proxies' rule for vmauth is what keeps
+  them off vmauth's internal port, the store, Prometheus, Grafana, Alertmanager and the collector. The
   controller takes the proxies on 18000 and 18002 and the kubelet on 8081, and reaches the resolver
   and the API server on 443 and 6443 (a Service's address is translated to the control plane's
   before policy applies), and, in a policy of its own with its reason, `envoy-gateway-registry`, the
@@ -667,14 +723,18 @@ once it is not, and the agents' rendered configuration agrees.
   the resolver and the API server. No monitor of the tree scrapes the Gateway, so no scrape is
   allowed; a monitor that does adds its rule.
 - **`demo`.** `hello` takes the proxies by their labels, not by their namespace, on 8080, so the
-  controller is no path to it, and the kubelet's probe. The backup movers, the pods VolSync labels
-  `app.kubernetes.io/created-by: volsync` for every application of the namespace that adds
+  controller is no path to it, Locust's workers by their labels in `locust` on the same port, so
+  Locust's master is not admitted, Robot Framework's runner by its labels in `robot` on the same
+  port, so the report server is not admitted, and the kubelet's probe. The backup movers, the pods VolSync
+  labels `app.kubernetes.io/created-by: volsync` for every application of the namespace that adds
   `components/volsync`, reach the resolver, and the world on 443 in a policy of its own with its
   reason, both by the application `demo-volsync-movers`, one for the namespace. A pod without a
   policy of its own reaches nothing and is reached by nothing. The movers' policies select by that
   label, so any pod of `demo` that carries it gets the movers' flows, the world on 443 among them:
   the label is no proof of being a mover. What keeps it to the movers is who makes pods in the
-  namespace, Flux from the reviewed tree and VolSync's controller.
+  namespace, Flux from the reviewed tree and VolSync's controller. The restore drill's mover is one
+  of them; its check's pods carry labels of their own and reach nothing
+  ([The restore drill](#the-restore-drill)).
 - **`kromgo`.** kromgo's pods, by the labels its Service selects, take the proxies by their labels
   on 8080, the port the route sends to, the kubelet's probes on the same port, and Prometheus
   (`app.kubernetes.io/name: prometheus` in `monitoring`) on 8081, the metrics port the chart's
@@ -694,36 +754,72 @@ once it is not, and the agents' rendered configuration agrees.
   controller, another namespace's pods or the world, and no monitor scrapes them.
 - **`backstage`.** Backstage's pod, by the labels its Service selects, takes the proxies by their
   labels on 7007, the port the route sends to, and the kubelet's probes on the same port; it reaches
-  the resolver and the database's instances (`cnpg.io/cluster: backstage-db`,
+  the resolver and the database's instances (`cnpg.io/cluster` existing,
   `cnpg.io/podRole: instance`) on 5432, every instance, as a failover moves the primary that
-  `backstage-db-rw` selects. The database's pods, every pod the operator makes for the cluster, by
-  `cnpg.io/cluster: backstage-db`, take the operator (`app.kubernetes.io/name: cloudnative-pg` in
-  `cnpg-system`) on 8000 and 5432 and each other on every port, as the pinned operator's
-  documentation asks (`docs/src/security.md`, Exposed Ports; `docs/src/networking.md`), and reach
-  each other, the resolver and the API server on 443 and 6443; its instances take Backstage and the
-  dump job on 5432, Prometheus on 9187, the port the PodMonitor names, and the kubelet's probes on
-  8000, where the operator puts them (`pkg/specs/pods.go`). The instances also reach the world on
-  443, in a policy of its own with its reason: the object storage, whose endpoint is a URL, as for
-  the movers below, where the Barman Cloud plugin's sidecar in each instance's pod archives the WAL
-  and writes the base backups ([Backups and restores](#backups-and-restores)). The sidecar reaches
-  the API server as the instance manager does, and talks to the instance manager over a socket in
-  the pod, which policy does not see; a policy selects pods, not containers, so PostgreSQL's
-  container shares the rule, and the jobs that create and join an instance, which hold no sidecar,
-  are not selected. The operator's own calls to the plugin stay inside `cnpg-system`. The dump
-  job's pods, by the labels
+  `backstage-db-rw` selects. The database's pods are every pod the operator makes for a cluster of
+  the namespace: `backstage-db`'s instances and the jobs that create, join and recover them, and
+  those of a cluster a restore adds beside it
+  ([postgres-restore.md](runbooks/postgres-restore.md)). The operator labels each of them
+  `cnpg.io/cluster` with its own cluster's name (`pkg/specs/pods.go` and `pkg/specs/jobs.go`), so
+  the database's policies, and Backstage's and the dump job's rules to the instances, select by
+  the label existing (`matchExpressions`, `Exists`), not by its value, and a restore's cluster has
+  the database's flows from its start, with no allow in its pull request. The trade-off is that
+  every cluster of the namespace shares them, which holds because every one of them is Backstage's,
+  made by Flux from the reviewed tree. The database's pods take the operator
+  (`app.kubernetes.io/name: cloudnative-pg` in `cnpg-system`) on 8000 and 5432 and each other on
+  every port, as the pinned operator's documentation asks (`docs/src/security.md`, Exposed Ports;
+  `docs/src/networking.md`), and reach each other, the resolver and the API server on 443 and 6443;
+  the instances take Backstage and the dump job on 5432, Prometheus on 9187, the port the
+  PodMonitor names, and the kubelet's probes on 8000, where the operator puts them
+  (`pkg/specs/pods.go`). The instances also reach the world on 443, in a policy of its own with its
+  reason: the object storage, whose endpoint is a URL, as for the movers below, where the Barman
+  Cloud plugin's sidecar in each instance's pod archives the WAL and writes the base backups
+  ([Backups and restores](#backups-and-restores)). The sidecar reaches the API server as the
+  instance manager does, and talks to the instance manager over a socket in the pod, which policy
+  does not see; a policy selects pods, not containers, so PostgreSQL's container shares the rule,
+  and the jobs that create an instance by initdb and join one, which hold no sidecar, are not
+  selected. A restore from the archive makes its new cluster's first instance in a job whose pod
+  carries `cnpg.io/jobRole: full-recovery`, into which the plugin puts its sidecar to read the base
+  backup and the WAL from the object storage (`reconcileJob` in
+  `internal/cnpgi/operator/lifecycle.go` of the plugin's release): a standing policy of its own with
+  its reason, `backstage-db-full-recovery-world`, lets such a pod reach the world on 443 alone, and
+  its resolver and the API server are the database's. The operator's own calls to the plugin stay
+  inside `cnpg-system`. The dump job's pods, by the labels
   `app.kubernetes.io/name: pgdump` and `app.kubernetes.io/instance: backstage-db` that
   `app/kustomization.yaml` gives the component's CronJob, reach the resolver, the instances on
   5432, and the world on 443 in a policy of its own with its reason: the age release, whose URL
   redirects to a second host, and the object storage, whose endpoint is a URL, as for the movers
   below ([Dumps](#dumps)). The pods the operator makes carry the labels of its source, which no
-  render holds; the job pods it makes to create and join an instance carry `cnpg.io/cluster` too.
+  render holds.
+- **`ascender`.** The pods of Ascender's instance are its operator's, made at run time, and the
+  policies name them by the labels the operator's templates give them at the release recorded beside
+  them. The web pods, by the labels of their Deployment's selector, take the proxies by their
+  labels, the kubelet's readiness probe, the task pods' websocket relay and Robot Framework's
+  runner, by its labels in `robot`, on 8052. Every pod of the
+  instance, by `app.kubernetes.io/part-of: ascender` with the operator's `managed-by` and
+  `component`, the migration Job's included, reaches the resolver and the database's instances on
+  5432. The task pods reach the web pods on 8052, the API server on 443 and 6443, and the world on
+  443 and on 22 in a policy of its own each, with its reason: the project updates that run in their
+  execution environment. The job pods, by `ansible_job`, reach the resolver and the world on 443 and
+  on 22, each in a policy of its own with its reason, and nothing in the cluster, and take nothing.
+  The operator's pod takes the kubelet's probes on 6789 and reaches the API server alone. The
+  database's pods, a restore's recovery job and the dump job are Backstage's, for `ascender-db` and
+  every cluster a restore adds beside it, by `cnpg.io/cluster` existing, the instances taking every
+  pod of the instance and the dump job on 5432, and the recovery job reaching the world on 443 by
+  `ascender-db-full-recovery-world`. [Ascender](#ascender) says what each is for.
 - **`security-system`.** Falco's pods, by the labels of the DaemonSet's selector, take Prometheus
   (`app.kubernetes.io/name: prometheus` in `monitoring`) on 8765, the metrics port the chart's
   monitor scrapes, and the kubelet's probes on the same port. They reach the resolver alone, for
   the API server's name, which the image's rule `Contact K8S API Server From Container` compares a
   container's connections with: Falco reads the container runtime's socket and the node's files
   through host paths, which no pod policy sees, writes its events to standard output, and calls no
-  API ([Runtime detection](#runtime-detection)).
+  API ([Runtime detection](#runtime-detection)). The flow recorder's pods, by the label of its
+  Deployment's selector, take nothing, as the process listens on no port and nothing probes it.
+  They reach the resolver, for the name of Relay's Service, and the pods the Service `hubble-relay`
+  selects, by its selector's label in `kube-system`, on 4245, the container port that Service's
+  port 80 targets: `kube-system` is listed and takes them on every port, so the recorder's egress
+  is what keeps them from Relay's other ports and from the namespace's other pods
+  ([The record of what policy drops](#the-record-of-what-policy-drops)).
 - **`crowdsec`.** The local API's pods, by the labels its Service selects, take the agent's pod on
   8080, Prometheus (`app.kubernetes.io/name: prometheus` in `monitoring`) on the metrics port 6060
   and the kubelet's probes on 8080, and send nothing. The agent's pod takes Prometheus and the
@@ -742,6 +838,46 @@ once it is not, and the agents' rendered configuration agrees.
   and it calls nothing outside the cluster ([OpenFeature Operator](#openfeature-operator)). A
   workload that opts in to it declares two flows of its own in its namespace, the kubelet's probes
   of the sidecar on 8014 and the sidecar to the API server, as the example `hello-flags` does.
+- **`locust`.** Locust's master, by the labels of its Deployment's selector
+  (`app.kubernetes.io/name: locust`, `app.kubernetes.io/component: master`), takes the workers by
+  their labels (`app.kubernetes.io/component: worker`) in `locust` on 5557, the port it binds for
+  them, the public Gateway's proxies by their labels on 8089, the web port, for the route `locust`
+  behind the cluster's sign-in, and the node it runs on on 8089, for the kubelet's readiness probe,
+  which admits every process in that node's network namespace, the node's pods of the host's
+  network among them; it sends nothing, as it runs no users and the one name it looks up, its own,
+  is in the pod's hosts file. The proxies' egress names the master's pods on 8089 alone, so they
+  reach neither its 5557 nor a worker. The workers take nothing, as they listen on nothing, and
+  reach the resolver, the master's pods on 5557 and the pods the Service `hello` selects in `demo`
+  on 8080, the container port its port 80 targets: the target that `LOCUST_TARGET` names, which
+  admits them by a rule beside it. Once the cluster enforces the policies, whatever host Locust's
+  interface is given, the workers reach nothing else, not the world, the API server, the Gateway's
+  proxies or another application; while it audits them, a flow they would drop is reported and
+  passes ([Service addresses](#service-addresses)), and the load goes wherever the host given
+  points. `just locust` reaches the interface through a port forward, which the container runtime
+  connects inside the pod on its loopback, where no policy applies ([Locust](#locust)).
+- **`robot`.** Robot Framework's runner, the pods of the CronJob `robot-suites` by their labels
+  (`app.kubernetes.io/name: robot`, `app.kubernetes.io/component: runner`), takes nothing, as it
+  listens on nothing, and reaches the resolver, the pods the Service `hello` selects in `demo` on
+  8080 and, by `robot-runner-ascender`, the web pods the Service `ascender-web` selects in
+  `ascender` on 8052, the container ports those Services' port 80 targets: the targets of
+  `ks.yaml`, which admit it by a rule beside each. Once the cluster enforces the policies, whatever
+  page a suite opens, the runner's browser reaches nothing else, not the world, the API server, the
+  Gateway's proxies or another application; while it audits them, a flow it would drop is reported
+  and passes ([Service addresses](#service-addresses)). The report server, by its labels
+  (`app.kubernetes.io/component: reports`), takes the node it runs on on 8080, for the kubelet's
+  readiness probe, which admits every process of that node and every pod of its host network as
+  well, so they read the reports too, and sends nothing; `just robot` reaches it through a port
+  forward, which the container runtime connects inside the pod on its loopback, where no policy
+  applies ([Robot Framework](#robot-framework)).
+- **`escape-canary`.** Every pod of the escape canary, by the label `k8s-gitops/escape-canary: "true"`
+  that both CronJobs give their pods, takes nothing, as the checks listen on nothing, and reaches the
+  resolver on 53, UDP and TCP, by `escape-canary-resolver`; the rights check's pods, by their labels
+  (`app.kubernetes.io/name: escape-canary`, `app.kubernetes.io/component: rights`), also reach the
+  API server on 443 and 6443, by `escape-canary-rights-api-server`, so that their requests reach its
+  authorisation in either mode. Nothing else: the metadata address, the nodes, the API server for the
+  network check's pods, `hello` and the secret store are what the network check attempts, and their
+  denial once the cluster enforces is its table's enforcement column; while it audits, each is a flow
+  that a policy would drop, reported and passed ([The escape canary](#the-escape-canary)).
 - **`kguardian`.** The broker's pods (`app.kubernetes.io/name: kguardian-broker`) take the
   interface's pods and Prometheus on 9090, the port the chart's monitor scrapes, and, in a policy of
   their own with its reason (`kguardian-broker-observers`), `host` and `remote-node` on 9090: the
@@ -750,22 +886,25 @@ once it is not, and the agents' rendered configuration agrees.
   tunnel as other nodes' hosts, a control plane's included, as the identity Cilium gives an address
   it knows as the API server's carries the remote node's label too
   (`pkg/identity/numericidentity.go`); the kubelet's probes come from `host` as well. They reach the
-  resolver and the database's instances (`cnpg.io/cluster: kguardian-db`,
-  `cnpg.io/podRole: instance`) on 5432, every instance, as a failover moves the primary. The
-  interface's pods take `host` on 5173 for the probes and reach the resolver and the broker on 9090;
-  `just kguardian`'s forward enters the pod's own network namespace and needs no rule. The
-  database's pods and its dump job take and reach what Backstage's do, the broker in place of
-  Backstage: the instances reach the object storage on 443 and the dump job the world on 443, each
-  in a policy of its own with its reason. No rule of the broker or the interface reaches the world,
-  and none the API server but the database's ([kguardian](#kguardian)).
+  resolver and the database's instances (`cnpg.io/cluster` existing, `cnpg.io/podRole: instance`)
+  on 5432, every instance, as a failover moves the primary. The interface's pods take `host` on 5173
+  for the probes and reach the resolver and the broker on 9090; `just kguardian`'s forward enters
+  the pod's own network namespace and needs no rule. The database's pods and its dump job take and
+  reach what Backstage's do, the broker in place of Backstage, by the same selectors of every
+  cluster of the namespace, a restore's beside `kguardian-db` included: the instances reach the
+  object storage on 443, a restore's recovery job too (`kguardian-db-full-recovery-world`), and the
+  dump job the world on 443, each in a policy of its own with its reason. No rule of the broker or
+  the interface reaches the world, and none the API server but the database's
+  ([kguardian](#kguardian)).
 - **The object storage's port.** cluster-config holds the object storage's endpoint as a URL, which
   a DNS name rule cannot take, so the movers' rule is the world on 443: the port https uses for an
   endpoint that names none, as cluster-config's example does and `tests/network-policy.bats` holds
   it to. The endpoint's validation (`scripts/lib/s3.sh`) admits a port: with an endpoint on
   another port, the rule refuses the movers, every backup and restore of the namespace fails to
   connect, and `just network-drops` shows the movers' flows to `@world` on that port. The rule's
-  port changes with the endpoint. The rules of `backstage`'s dump job and of its database's
-  instances are on that port for the same endpoint, and change with it too.
+  port changes with the endpoint. The rules of the dump jobs, the database instances and the
+  recovery jobs of `backstage`, `ascender` and `kguardian` are on that port for the same endpoint,
+  and change with it too.
 - **Which entity.** Public traffic is translated by the edge routers, arrives at the address the
   workers announce, and a worker may forward it to a proxy on another node
   (`externalTrafficPolicy: Cluster`, [The public Gateway](#the-public-gateway)). A proxy on the
@@ -773,8 +912,13 @@ once it is not, and the agents' rendered configuration agrees.
   gets it through the tunnel with the world's identity, which the pinned datapath sets for a
   load-balanced connection from outside so that the receiving node does not take it for a node's
   (`bpf/lib/nodeport.h`, `nodeport_lb4` and the NAT that follows it). The listeners therefore take
-  `world` alone, and the watch in audit mode confirms it: a flow from `@remote-node` to the
-  listeners would show as `AUDIT`.
+  `world` alone from outside, and the watch in audit mode confirms it: a flow from `@remote-node` to
+  the listeners would show as `AUDIT`. A pod that asks the proxies' Service by its cluster name, as
+  the blackbox exporter's probes do, is no `world`: the agents translate the Service's cluster
+  address to a proxy's before policy applies, as for every Service, and the source stays the pod, so
+  the proxies take the exporter's pods by their labels in a rule of their own. Nothing else in the
+  cluster reaches the listeners; a pod that resolved a public hostname to the edges' addresses would
+  leave the cluster and come back translated, as `world`.
 - **The local host and the API server.** In Kubernetes mode the pinned agent lets the local host
   reach the pods on its node whatever the policies say (`allow-localhost` `auto` becomes `always`,
   `daemon/cmd/daemon.go`; `pkg/policy/repository.go` adds the rule), so the kubelet's probes do not
@@ -817,6 +961,17 @@ once it is not, and the agents' rendered configuration agrees.
 5. A namespace whose applications add `components/volsync` has the policies of its movers, once:
    copy `apps/base/demo/demo-volsync-movers/` under the namespace's directory and list its
    `ks.yaml` in the overlay.
+6. An application that adds `components/cnpg-cluster` in a namespace with the default deny
+   declares its database's flows as Backstage does: copy the policies `backstage-db`,
+   `backstage-db-instances`, `backstage-db-instances-world`, `backstage-db-full-recovery-world`,
+   `backstage-db-pgdump` and `backstage-db-pgdump-world` from Backstage's
+   `ciliumnetworkpolicy.yaml`, the patch of its `app/kustomization.yaml` that labels the dump
+   job's pods, with the cluster's name, and the rule of the application's own policy to the
+   instances on 5432. The database's
+   policies select its pods by `cnpg.io/cluster` existing, a label the operator gives every pod of
+   every cluster, so any cluster of the namespace, a restore's included, has the database's flows,
+   and the dump job's by the labels the patch gives them. Every cluster of the namespace shares
+   them, so such a namespace holds one application's database.
 
 ### What the check refuses
 
@@ -852,15 +1007,17 @@ namespace and the policy, when
   own (`pkg/k8s/apis/cilium.io/utils/utils.go`), so that it also selects the world, the hosts and
   the nodes. A reason excuses none of these.
 
-The check reads only what the render holds. Besides the policies of `backstage`, `crowdsec`, `demo`,
-`envoy-gateway-system`, `kguardian`, `kromgo`, `open-feature-operator`, `security-system` and
-`sso-system`, that is one policy of a listed namespace: `flux-operator-web`, the `NetworkPolicy` the
-Flux Operator's chart renders in `flux-system`, which lets every pod of every namespace (an empty
-`namespaceSelector`) reach the operator's web interface on 9080. It passes because `flux-system` is
-listed; the day `flux-system` takes the default deny, the check refuses it, as a `NetworkPolicy`
-other than the default deny and as an allow of every pod of every namespace. The `NetworkPolicy`
-objects the operator makes for the Flux instance, which its `spec.cluster.networkPolicy` turns on,
-are made at run time, so no render holds them and the check never sees them.
+The check reads only what the render holds. Besides the policies of `ascender`, `backstage`,
+`crowdsec`, `demo`, `envoy-gateway-system`, `escape-canary`, `kguardian`, `kromgo`, `locust`,
+`open-feature-operator`, `security-system` and `sso-system`, that is one policy of a listed
+namespace: `flux-operator-web`, the `NetworkPolicy` the Flux Operator's chart renders in
+`flux-system`, which lets every pod of every namespace (an empty `namespaceSelector`) reach the
+operator's web interface on 9080. It passes
+because `flux-system` is listed; the day `flux-system` takes the default deny, the check refuses it,
+as a `NetworkPolicy` other than the default deny and as an allow of every pod of every namespace.
+The `NetworkPolicy` objects the operator makes for the Flux instance, which its
+`spec.cluster.networkPolicy` turns on, are made at run time, so no render holds them and the check
+never sees them.
 
 `scripts/network-policy-check --reach RENDER FROM TO PORT/PROTOCOL` evaluates the policies of a
 render for one flow and answers `allowed` or `denied`; the egress of the source and the ingress of
@@ -868,45 +1025,304 @@ the destination both have to allow it, and a pod is in default deny for a direct
 policy that selects it asks for it, as Cilium decides. Over a render that holds what the check
 refuses wherever it is, it gives no answer and exits 2. The tests use it to follow the public path
 hop by hop (the world to the proxies' listener ports, the proxies to `hello`'s port, to kromgo's, to
-n8n's, to Open WebUI's, to dex's and oauth2-proxy's and to Backstage's but not to kromgo's metrics
-port, n8n's or Open WebUI's other ports or either database, the kubelet to every probe port,
-Prometheus to kromgo's metrics port alone), to show that no pod of `demo`, `kromgo` or `backstage`
-reaches the secret store, the storage controller, another pod of `demo` or another application, n8n
-and Open WebUI among them, that Backstage reaches the resolver and its database's port and nothing
-outside the cluster, that the database takes the operator, its own pods, Backstage, the dump job and
-Prometheus on their ports and no other application, that its instances reach the world on the
-object storage's port and on no other, and a job that joins an instance on none, that kromgo reaches
-the resolver and the port of
-the Prometheus its configuration names, read from the render, and nothing else, and no other
-application reaches it, that Falco's pods take Prometheus and the kubelet on its metrics port alone
-and reach the resolver alone, that the OpenFeature Operator's pod takes Prometheus on its metrics
-port and the API server, the local host and other nodes' hosts on its webhooks' port, neither of
-them the world, another application or the other port's caller, and reaches the API server alone,
-that the proxies reach the controller on the port it serves the firewall's Wasm modules on and no
-other application's pod or anything outside the cluster does, that the controller reaches the world
-on 443 and on no other port and neither the certificate job nor the proxies reach it, that the local
+n8n's, to Open WebUI's, to dex's and oauth2-proxy's, to Backstage's, to Ascender's
+web pods' and to Locust's master's web port but not to kromgo's metrics port, n8n's, Open WebUI's,
+Ascender's or Locust's master's other ports, Ascender's task and job pods, Locust's workers or any
+database, the kubelet to every probe port,
+Prometheus to kromgo's metrics port alone), to show that the blackbox exporter, the prober the
+Probes name, reaches the proxies on the listener port each Probe's target asks for, read from the
+render, and that no other pod of the render or of the operators is taken there, to show that no pod
+of `demo`, `kromgo` or `backstage` reaches the secret store, the storage controller, another pod of
+`demo` or another application, n8n and Open WebUI among them, that Backstage reaches the resolver
+and its database's port and nothing outside the cluster, that the database takes the operator, its
+own pods, Backstage, the dump job and Prometheus on their ports and no other application, that its
+instances reach the world on the object storage's port and on no other, and a job that joins an
+instance on none, that a restore's new cluster beside each database of `backstage`, `ascender` and
+`kguardian`, its primary and replica instances and the jobs that create, join and recover an
+instance, by the labels the pinned operator gives them, takes and reaches what the old cluster's
+pods of each role do, the clients the render shows reaching the old instances among them, while its
+pods take no pod of the namespace that is no client, and a client on PostgreSQL's port alone, not on
+the status port or the exporter's, that its recovery job reaches the object storage on 443
+while the jobs that create and join an instance reach nothing outside the cluster, and that every
+selector of the three namespaces' policies that names `cnpg.io/cluster` names it by its existence
+alone and the recovery job's one rule allows the world on 443 alone (`tests/postgres-restore.bats`,
+on a copy of the tree with both restores of [postgres-restore.md](runbooks/postgres-restore.md)
+made for every database), that kromgo reaches the resolver and the port of the Prometheus its
+configuration names, read from the render, and nothing else, and no other application reaches it,
+that Falco's pods take Prometheus and the kubelet on its metrics port alone and reach the resolver
+alone, that the OpenFeature Operator's pod takes Prometheus on its metrics port and the API server,
+the local host and other nodes' hosts on its webhooks' port, neither of them the world, another
+application or the other port's caller, and reaches the API server alone, that the proxies reach
+the controller on the port it serves the firewall's Wasm modules on and no other application's pod
+or anything outside the cluster does, that the controller reaches the world on 443 and on no other
+port and neither the certificate job nor the proxies reach it, that the flow recorder takes nothing
+and reaches the resolver and Hubble Relay's pods on Relay's container port alone, that the local
 host and other nodes' hosts reach kguardian's broker on its port and no other, other nodes' hosts
 reach neither its interface nor its database, no other application reaches either, and its
 database's instances and dump job reach the world on 443 alone, as Backstage's do, and that with
 their default deny `backstage`, `demo`, `envoy-gateway-system`, `kguardian`, `kromgo`,
 `open-feature-operator`, `security-system` and `sso-system` let exactly their flows through and
-without it take and send everything. What it cannot show: the entity the pinned datapath gives a
-connection an edge translated and a worker forwarded again, read from its source above and confirmed
-in audit mode; the labels of the pods the operators create at run time, taken from the operators'
-source and observed in audit mode; that an address a name resolves to is the one a rule meant; and
-anything about pods in the host's network namespace.
+without it take and send everything. What it
+cannot show: the entity the pinned datapath gives a connection an edge translated and a worker
+forwarded again, read from its source above and confirmed in audit mode; the labels of the pods the
+operators create at run time, taken from the operators' source and observed in audit mode; that an
+address a name resolves to is the one a rule meant; and anything about pods in the host's network
+namespace.
 
 ### What policy does not cover
 
-Pods in the host's network namespace (Cilium's agent, its Envoy and its operator, the storage's CSI
-node plugin, the node exporter, kguardian's observers) are not selected by a pod policy; the node
-firewall is their layer. kguardian's observer connects to its broker, the API server, the resolver
-and, through a host path, the container runtime's Unix socket, and opens no listener (nothing in
-`controller/src` at its pinned tag binds a socket outside its tests), so the node firewall has
-nothing to admit for it ([kguardian](#kguardian)). The nodes' own listeners are the node firewall's
+Pods in the host's network namespace (Cilium's agent, its Envoy and its operator, the storage's
+CSI node plugin and satellites, the node exporter, kguardian's observers) are not selected by a pod
+policy; the node firewall is their layer. kguardian's observer connects to its broker, the API
+server, the resolver and, through a host path, the container runtime's Unix socket, and opens no
+listener (nothing in `controller/src` at its pinned tag binds a socket outside its tests), so the
+node firewall has nothing to admit for it ([kguardian](#kguardian)). The nodes' own listeners are
+the node firewall's
 ([ADR 0017](adr/0017-nodes-firewall-themselves-with-talos-ingress-firewall.md)). The listed
 namespaces take and send what they did before. Policy is connection-level: no layer 7 rule, no
-mutual authentication, no encryption.
+mutual authentication, no encryption; Cilium's WireGuard encrypts pod traffic between nodes
+whatever the policies say ([Encryption between nodes](#encryption-between-nodes)).
+
+### The record of what policy drops
+
+What a policy dropped, or would have dropped while the cluster audits, stays in an agent's Hubble
+only while its buffer of recent flows holds it: 4095 flows of every verdict by the chart's default,
+gone within minutes to hours. The decision to enforce rests on a day of it, the night's jobs
+included, so the cluster keeps a record: `apps/base/security-system/network-audit/` runs a flow
+recorder, and the log store keeps what it writes for as long as it keeps logs. A cluster selects it
+with one entry of its overlay, `security-system/network-audit/ks.yaml`, beside the namespace
+directory `security-system`, which Falco's entries hold as well; without the entry nothing of it
+builds.
+
+- **What runs.** A Deployment `network-audit` of one pod with one container, `hubble`: the Hubble
+  CLI, `hubble observe --follow` for the verdicts `DROPPED` and `AUDIT`, against the Service
+  `hubble-relay.kube-system.svc:80` of Hubble Relay, which the Cilium release runs and whose server
+  takes no TLS. `DROPPED` is a packet an agent dropped, for a policy or for any other reason, and
+  `AUDIT` a connection a policy would have dropped while the agents audit. Relay passes the request
+  on to every node's agent as it is, each agent sends the flows of those two verdicts from the
+  moment it is asked, and Relay merges them by their time into the one stream the CLI prints
+  (`pkg/hubble/relay/observer/server.go` and `observer.go`, `pkg/hubble/observer/local_observer.go`
+  at the pinned release); Relay also asks the agents that join its peers while the stream runs. One
+  replica, which goes before the next starts (`Recreate`), as two would write every flow twice. The
+  application names `cilium` in `dependsOn`, as its network policy is of a kind Cilium's operator
+  defines and Relay is part of that release, and it waits: the Deployment counts its pod available
+  once it has been running for 30 seconds (`minReadySeconds`), so a recorder that cannot reach
+  Relay, whose process then ends, keeps the Kustomization from being Ready. Hubble's exporter and
+  its metrics are the other ways to the same flows, and neither is used: the exporter writes them to
+  a file of the agent's or to the agent's standard output, and the metrics are served on another
+  port of every node, which the node firewall does not admit. Both are settings of the agents, and
+  changing them restarts every agent; the agents' own drop counter carries a reason and a direction
+  and no workload (`Documentation/observability/hubble/configuration/export.rst`,
+  `Documentation/observability/metrics.rst`). The recorder is a client of what already runs: no
+  setting of a node, an agent or the collector changes for it.
+- **Its privileges.** A connection, and nothing else. The pod passes the `restricted` Pod Security
+  level, in a namespace that enforces `privileged` for Falco: a non-root user and group, the
+  runtime's seccomp profile, no privilege escalation, no capability and a read-only root
+  filesystem. It declares no volume and mounts no service account token, as Relay asks a client for
+  no credential, and it has no port, no Service and no probe, as the process listens on nothing.
+  `just pod-security-check` holds it to `restricted`, and `pod-security-exceptions.yaml` has no
+  entry for it. Its network policy lets it reach the resolver and Relay's pods on 4245, and lets
+  nothing reach it ([What the namespaces let through](#what-the-namespaces-let-through)).
+- **Its keepalive.** The pod sets three sysctls of its own network namespace, the TCP keepalive's
+  time, interval and probes, at 60 seconds, 10 seconds and 3: the kubelet counts them as safe, and
+  the `baseline` level, and so `restricted`, admits them from Kubernetes 1.29 on
+  (`pkg/kubelet/sysctl/safe_sysctls.go` and
+  `staging/src/k8s.io/pod-security-admission/policy/check_sysctls.go` at Kubernetes v1.37.1). The
+  CLI's one connection carries nothing while nothing is dropped, and the CLI sets no timer on it;
+  its gRPC library turns the kernel's keepalive on with the kernel's settings
+  (`vendor/google.golang.org/grpc/internal/tcp_keepalive_unix.go` at the pinned release), by
+  default two hours of silence and then nine probes 75 seconds apart. A Relay that went without
+  closing the connection, as when its node loses power, would leave the recorder waiting that long
+  and recording nothing. With the pod's settings the kernel ends a connection that has been silent
+  for a minute and then left three probes unanswered, 90 seconds after the silence began, and the
+  process ends with it.
+- **The image** is the one the Cilium agents run, `quay.io/cilium/cilium`, pinned by tag and digest
+  under a `# renovate:` comment. It carries, as `/usr/bin/hubble`, the Hubble CLI of the release the
+  agents and Relay are of (`images/cilium/Dockerfile`, and `SUBDIRS_CILIUM_CONTAINER` in the
+  `Makefile`), and every node holds the image already. The CLI's own image, `quay.io/cilium/hubble`,
+  has no tag of that release; the newest release tag its registry lists is v1.16.4.
+  `tests/network-audit.bats` fails, saying what to set, unless the pin is the image the rendered
+  chart gives the agents, tag and digest, and, saying to print its fixture's flow lines again with
+  the new CLI and replace the fixture, while the tag is not the release whose CLI printed them,
+  which the test's header records as `hubble-flow-lines`. Renovate moves the chart and the image in
+  one pull request, the group Cilium of `.renovate/groups.json5`, and never merges it by itself
+  (`.renovate/automerge.json5`). The image sets `HUBBLE_SERVER` to an agent's own socket, and the
+  `--server` flag overrides it.
+- **What a line holds.** One JSON object for each flow, on standard output, written as the flow
+  arrives: under `flow`, its `time`, `uuid`, `verdict`, `drop_reason_desc` when it was dropped,
+  `traffic_direction`, `l4`, the protocol with its ports, `node_name`, the node that reported it,
+  and for `source` and for `destination` the `namespace`, `pod_name`, `workloads` and `labels`;
+  beside `flow`, the record's own `node_name` and `time`, which the agent fills from the flow's,
+  and Relay orders the records by that time. A field without a value is left out. These are the
+  fields the CLI asks for with `--field-mask`, and an agent sends no other
+  (`pkg/hubble/observer/local_observer.go`): none of the fields of a flow's addresses, `IP`,
+  `ethernet` and `tunnel`, and none of the names an address resolves to, `source_names` and
+  `destination_names`. `tests/network-audit.bats` holds the mask to that set. What can still hold
+  an address is a label, where a policy of the cluster names a prefix (`cidr:`), which none of the
+  tree's does; the group address of an IGMP message, in `l4`; and the lines that are not flows,
+  below.
+- **How an end of a flow is named.** A pod's workload is what the pinned Cilium derives from the
+  pod's controlling owner (`pkg/k8s/utils/workload.go`): the Deployment, for a pod of a ReplicaSet
+  named after the pod's template hash; the CronJob, for a pod of a Job whose name ends in the eight
+  to ten digits of its scheduled time; otherwise the owner's own kind and name. A pod whose name was
+  not generated, or that has no controlling owner, has none. An agent knows the workload only of the
+  pods on its own node (`pkg/hubble/parser/common/endpoint.go`), so of a flow's two ends the one on
+  the node that reported it carries its workload, and the other, when it is a pod of another node,
+  only its pod's name. For a policy's verdict the reporting node is the one that decides: the
+  source's for egress, the destination's for ingress.
+- **The lines that are not flows.** The pod writes other lines too, and they say where the record
+  has gaps: a `lost_events` record, on standard output, when Hubble lost events before it could
+  send them, with how many, of every verdict and not only the two asked for, and where, the
+  kernel's event buffer, Hubble's queue or an agent's buffer of recent flows; a `node_status`
+  record, on standard error, for a node Relay could not read, with the error; and the CLI's own
+  messages, plain lines on standard error: a warning, such as the one it writes when its minor
+  version is lower than Relay's, as it can be during a minor upgrade of Cilium until the recorder
+  has moved too (a patch number is not compared), and the error it ends on
+  (`hubble/pkg/printer/printer.go`, `hubble/main.go`, `hubble/cmd/root.go`,
+  `hubble/cmd/common/conn/version.go`). An error can name an address, a node's or the resolver's.
+- **Where the lines go.** The log collector ships every pod's lines ([Logs](#logs)), so they are in
+  the store with the namespace, pod, container and node of the recorder, each line whole in `_msg`.
+  `{kubernetes.pod_namespace="security-system",kubernetes.container_name="hubble"}` selects them:
+  `just logs` with that and `| unpack_json | filter flow.verdict:AUDIT` prints the audited flows as
+  they were written, labels included. The store keeps them 14 days, as it keeps every log, and
+  drops the oldest days before that once they take 15 GiB, though never the last two
+  ([Logs](#logs)); `tests/network-audit.bats` holds both numbers to the store's values.
+- **What bounds the volume.** Only the two verdicts are sent, and a flow's line is some hundreds of
+  bytes, 670 on average in a local run of the image over hand-written flows. A line is an event an
+  agent reported, not a connection: an `AUDIT` line is written once for a connection, when its
+  first packet is judged, and none for the packets of an established one, while a packet a policy
+  denies once the cluster enforces is two `DROPPED` lines, the policy's verdict and the drop
+  itself, for each packet, a sender's retries included (`bpf/bpf_lxc.c`, "Emit verdict if drop or
+  if allow for CT_NEW", and the drop notification of `tail_handle_ipv4_cont`). Nothing limits the
+  rate beyond that: a flood of denied packets is a flood of lines, up to what Hubble passes on
+  before it reports lost events instead, and the lines share the store's 15 GiB with every other
+  log, so a flood shortens how far back all of them reach.
+- **What the record misses.** The time the recorder is not following: it asks for nothing older
+  than the moment it connects, and nothing is fetched afterwards. Its process ends when Relay or
+  the connection goes, and when Relay ends the stream, as it does once it reads no agent; the
+  kubelet starts it again after its back-off, and the recipe reports that start; a Cilium upgrade
+  replaces Relay's pod and the recorder's, whose image moves with it, and so makes such a start.
+  The two move in either order: `dependsOn` holds the recorder back only while `cilium` is not
+  Ready and compares no revision, as each application reads an artifact of its own
+  (kustomize-controller's `checkDependencies`). An eviction by the descheduler
+  ([The kube-system baseline](#the-kube-system-baseline)) makes such a start too: every five
+  minutes it moves pods off a node it finds above its target use, and it may take the recorder's
+  pod, as that claims no volume, or Relay's, which claims none either and whose end ends the
+  recorder's stream. Each leaves a gap until the new pod's container runs, and evictions that
+  recur keep a 24-hour window from passing. The loss of the recorder's node stops the record until
+  its pod has been replaced on another, some six minutes at the defaults, which the recipe shows
+  only once the old pod is deleted (below). Events Hubble lost and the nodes Relay could not read,
+  which the lines above name. An agent's restart, which every change of `cilium-config` and every
+  upgrade brings, at most two agents at a time, makes its node one of those: the agent's server
+  ends the node's stream with an error, which Relay writes as a `node_status` line and answers by
+  asking the node again at its next look at its peers, every 2 seconds, once its connection to the
+  node is back; the new agent sends its flows from then on, so the record lacks that node's from
+  the old agent's stop until shortly after the new one serves, and the recorder's pod need not be
+  deleted (`pkg/hubble/server/server.go`, `pkg/hubble/relay/observer/server.go`,
+  `pkg/hubble/relay/defaults/defaults.go`). Lines the collector could not ship before the kubelet
+  rotated the pod's log away, as for any pod ([Logs](#logs)). And what Relay itself does not see,
+  which no line names at once (`pkg/hubble/relay/observer/observer.go`, `retrieveFlowsFromPeer`,
+  and `pkg/hubble/relay/pool/manager.go`): Relay counts a node's stream that ends cancelled as
+  finished and does not ask that node again while the follow runs, and it cancels a node's stream
+  itself when the node leaves its peers or changes its address; and a node that went without
+  closing its connection, as on a power loss, is asked again only once Relay's connection to it
+  has failed, which without traffic on it takes the kernel's keepalive, a little over two hours at
+  the defaults Relay's pod runs with, and then a `node_status` line says so. A new follow asks
+  every node Relay reaches, so after a node rejoined under the same name, changed its address or
+  lost power, deleting the recorder's pod starts one, and the record is whole from then on.
+- **Reading it.** `just network-audit [since] [cluster]` prints the record of a window that ends
+  now, 24 hours unless told otherwise (`since` is a whole number with `s`, `m`, `h`, `d` or `w`,
+  as `just logs --since` takes it), through the same path as `just logs`, a port-forward to vmauth
+  with the operator's credential ([Who may call the log store](#who-may-call-the-log-store)), so the
+  kubeconfig must be able to read the Secret `vmauth-operator` and forward a port in `monitoring`.
+  The store does the counting: one query unpacks each of the
+  recorder's lines and counts them by verdict, direction, drop reason, port and the namespace, pod
+  name, workloads and labels of each end, so the answer's limit, 10000, bounds groups and never
+  flows. The recipe prints one line a group, with no header, the most frequent first:
+  `COUNT VERDICT NAMESPACE DIRECTION SOURCE DESTINATION PORT/PROTOCOL REASON`. `COUNT` is the
+  number of the recorder's lines, events and not connections, as above; `DIRECTION` is `ingress`,
+  `egress` or `-`; `NAMESPACE` is the namespace whose policies decided the flow, the source's for
+  egress and the destination's for ingress, and `-` for a flow without a direction; `SOURCE` and
+  `DESTINATION` are `NAMESPACE/KIND/NAME` of the end's workload, so that a night's job pods and a
+  rollout's pods are one line, `NAMESPACE/POD` for a pod the line gives no workload, and `@world`,
+  `@host`, `@remote-node` and the like for an end that is no pod; `PORT/PROTOCOL` is the
+  destination port over `tcp`, `udp` or `sctp`, and `0/other` for anything else; `REASON` is the
+  drop reason of a `DROPPED` flow and `-` for `AUDIT`. Groups that differ only in a pod's name
+  under its workload, or in a label, are one line with their sum. It prints no label and no
+  address, and of a name only its printable ASCII, so nothing in a line can drive a terminal. With
+  no flow it says `no dropped or audited flow in the record of the last <since>`. It reads the
+  answer in the shape the store's version writes it, the version whose answers
+  `tests/network-audit.bats` holds; were a later version to flatten a line's JSON into other field
+  names, every flow would count among the lines that are not flows and the table would be empty:
+  an empty table beside a large count of those lines is that. So the test fails, saying to put the
+  recipe's query to the new version and replace its answers, while the store's image or its
+  chart's `appVersion` is of another release than the one the test's header records as
+  `victoria-logs-answers`; `.renovate/by-hand.tsv` lists this record and `hubble-flow-lines`.
+- **What the recipe says of the record.** After the table, on standard error: how many of the
+  recorder's lines in the window are not flows, with the `just logs` query that shows them, which
+  fails nothing; and, from one listing of the recorder's pod, whether it ran through the window. A
+  recorder that has run since before the window began is said so, and the run exits 0. One that is
+  not running, or whose container started inside the window, is named with its state or its start
+  time, and the run exits 1 after the table, as flows from the time it was not following are not
+  in the record; so does a run that cannot list the pod, or whose listing holds no state it reads,
+  and it shows nothing kubectl printed. The listing is what the API holds: when the recorder's node
+  is lost, its pod is listed as running from its old start until the node has been marked not
+  Ready, 50 seconds after its kubelet last renewed its lease by default, and the pod's toleration
+  of that, 300 seconds by the API server's `DefaultTolerationSeconds` admission plugin, has run
+  out, and the pod is deleted and replaced; a run in those six minutes exits 0 over a window the
+  recorder did not follow to its end, and a run after them names the new pod's state or start. An
+  answer of 10000 groups is cut: the run says so and exits 1. A `since` that is no duration exits 2
+  with the usage before anything is called, and a store or an API that refuses or does not answer
+  fails with `just logs`' own message and nothing else. The kubeconfig needs what `just logs` needs
+  and to list the pods of `security-system`.
+- **The answers the tests hold.** `tests/network-audit.bats` runs the recipe over the store's own
+  answer to its query, `tests/fixtures/network-audit/answer.jsonl`, and the inputs the answer was
+  made from are beside it: `tests/fixtures/network-audit/flows.jsonl`, 15 flows written as an
+  agent sends them under the recorder's mask, one of them `FORWARDED`;
+  `tests/fixtures/network-audit/records.jsonl`, two `lost_events` records and three `node_status`
+  records; `tests/fixtures/network-audit/bulk.ndjson`, the body of the bulk request the collector
+  would send for the lines, each whole in `message` beside the namespace, pod, container and node
+  of its pod; and `tests/fixtures/network-audit/bulk.args`, that request's query arguments, the
+  collector's sink's. The test's header records the releases of the store and of the CLI they came
+  from, and the test fails while the store or the recorder runs another, saying to do the proof
+  again, offline, in these steps. The recorder's image, with no network, a read-only root, user
+  65532 and no capability, runs the recorder's command with `--input-file -`: over `flows.jsonl`
+  it prints a line for each flow but the `FORWARDED` one; over `records.jsonl`, without the two
+  `--verdict` flags, which it applies to every record of a file, it prints the `lost_events`
+  records on standard output, the `node_status` records of a node's error and of a node Relay could
+  not reach on standard error, and nothing for the nodes that connected; and without
+  `--input-file` it ends on its error for a Relay it cannot look up, whose resolver address is put
+  in a documentation range. Those lines, in that order, are the messages of the recorder's documents
+  in `bulk.ndjson`, which also holds a line of Falco's and one of a container `hubble` in `demo`,
+  for the query to leave out. The store's image then runs by the digest the header records, on a
+  network made with `docker network create --internal`, with `-retentionPeriod=100y`: the
+  documents' times are fixed, and the store answers 201 for a line older than its retention and
+  keeps none of it. It takes `bulk.ndjson` at `/insert/elasticsearch/_bulk` with the arguments of
+  `bulk.args`, the body sent as `Content-Type: application/x-ndjson`, as the collector's
+  Elasticsearch sink sends it: a body sent as a form, as `curl --data-binary` sends one unless told
+  otherwise, is answered with no item and none of it is kept. Once it holds every line,
+  `/select/logsql/query` with the recipe's query, a `start` before the first line and the limit
+  10000, as `scripts/logs` asks it, answers what `answer.jsonl` is to hold. The container and the network are removed afterwards. The store
+  returns groups of the same count in no fixed order, so two runs over the same lines can differ in
+  that order alone; the recipe orders its table by count and then by the line's text, so it does
+  not depend on that order.
+- **No alert reads the record.** Nothing in the tree evaluates a rule over the log store: the
+  alerts are Prometheus rules over metrics ([Alerts](#alerts)), and no rules engine for the store
+  runs, so no alert reads the record and none is added for it. A recorder that is not available
+  raises the monitoring chart's own alerts, which watch every namespace, each a warning:
+  `KubeDeploymentReplicasMismatch`, once the Deployment has had fewer replicas available than it
+  asks for, with no rollout moving, for 15 minutes, whatever the cause; `KubePodCrashLooping`, once
+  its container has been in `CrashLoopBackOff` for 15 minutes, as when the process keeps ending;
+  `KubePodNotReady`, once the pod has been pending, or running and not ready, for 15 minutes; and
+  `KubeContainerWaiting`, once its container has waited for another reason, such as an image it
+  cannot pull, for an hour. `tests/network-audit.bats` reads them in the render. A recorder whose
+  stream Relay no longer feeds, as above, raises none of them.
+- **What it costs.** The recorder requests 10m of CPU and 32Mi of memory and is limited to 128Mi.
+  None of these is measured on the cluster: in a local run of the image that printed 42000 flows
+  read from standard input, the container's memory peaked at 25 MiB. Live, `kubectl top pod
+  --namespace security-system --selector app.kubernetes.io/name=network-audit` gives its use, and
+  `just logs` with the selector above and `| stats count() lines, sum_len(_msg) bytes`,
+  `--since 24h`, the lines and bytes a day it adds to the store's 15 GiB.
 
 ### Turning it on, and back
 
@@ -939,43 +1355,86 @@ does not matter.
    the chart's update strategy).
 2. **The policies merge.** The root applies the default denies, the applications apply their allows,
    and the agents evaluate both and drop nothing they deny; what a policy would drop is reported as
-   `AUDIT`. As the allows land after the denies, `AUDIT` flows of `backstage`, `crowdsec`, `demo`,
-   `envoy-gateway-system`, `kguardian`, `kromgo`, `open-feature-operator`, `security-system` and
-   `sso-system` from before they landed are expected, such as the proxies to `hello` on 8080 and to
-   the controller on 18000, and the controller to the API server, and an agent's recent flows can
-   hold them for a while.
-3. **Watch**, from the moment the Kustomizations that hold the allows, `hello`,
+   `AUDIT`. As the allows land after the denies, `AUDIT` flows of `ascender`, `backstage`,
+   `crowdsec`, `demo`, `envoy-gateway-system`, `escape-canary`, `kguardian`, `kromgo`, `locust`,
+   `open-feature-operator`, `robot`, `security-system` and `sso-system` from before they landed are
+   expected, such as the proxies to `hello` on 8080 and to the controller on 18000, and the
+   controller to the API server, and an agent's recent flows can hold them for a while. The escape
+   canary's `AUDIT` lines are expected at any time while the cluster audits: they are its network
+   check's attempts at what the policies forbid, every hour
+   ([The escape canary](#the-escape-canary)).
+3. **Watch a day of the record**, from the moment the Kustomizations that hold the allows, `hello`,
    `demo-volsync-movers`, `envoy-gateway`, `kromgo`, `dex`, `oauth2-proxy`, `backstage`, `falco`,
-   `crowdsec`, `open-feature-operator` and `kguardian`, are Ready at the merge's revision
-   (`flux get kustomizations`). `just network-drops` lists what the agents' Hubble holds: the
-   `AUDIT` flows a policy would drop, by namespace, pod and port, never an address. It runs each
-   agent's own `hubble` through `kubectl exec`, so the kubeconfig needs exec on the Cilium agents'
-   pods in `kube-system`, more than the reading recipes need; `NETWORK_DROPS_LAST` (500) bounds the
-   flows asked of each agent and `NETWORK_DROPS_TIMEOUT` (60) the seconds each call may take. Hubble
-   keeps only each agent's recent flows (4095 by the chart's default), so run it after each of:
-   `just gateway-check`; `just cluster-check`; the secret demo
-   (`just secret-rotate demo/hello greeting`); a badge asked of kromgo by its name, which has
-   kromgo query Prometheus ([Status badges](#status-badges)); a sign-in through a route that
-   opts in to it ([Sign-in](#sign-in)), and a query in the log store's interface
+   `crowdsec`, `open-feature-operator`, `network-audit`, `ascender-operator`, `ascender`, `locust`,
+   `robot`, `robot-ascender`, `escape-canary` and `kguardian`, are Ready at the revision the merge
+   gives them (`flux get kustomizations`, where each one's revision is the digest of its artifact,
+   its application's `app/`, which holds its allows, and the components). The flow recorder writes
+   every flow a policy would drop to the log store
+   ([The record of what policy drops](#the-record-of-what-policy-drops)), so each path needs to be
+   taken only once: `just gateway-check`; `just cluster-check`; the secret demo
+   (`just secret-rotate demo/hello greeting`); a badge asked of kromgo by its name, which has kromgo
+   query Prometheus ([Status badges](#status-badges)); a sign-in through a route that opts in to it
+   ([Sign-in](#sign-in)), and a query in the log store's interface
    ([The log store's interface](#the-log-stores-interface)); Backstage's catalogue opened by its
-   name, which has
-   Backstage read its database; the nightly dump of `backstage-db` from 02:00, which waits up to
-   20 minutes before it starts ([Dumps](#dumps)); the base backup of `backstage-db` at 02:47 UTC,
-   and a WAL segment its primary archives, which `select pg_switch_wal()` there forces
-   ([Backups and restores](#backups-and-restores)); the nightly backup of `volsync-demo` at 03:17,
-   and a restore of it ([Restoring](#restoring)); the two dry runs that call the OpenFeature
-   Operator's webhooks ([OpenFeature Operator](#openfeature-operator)); kguardian's interface opened
-   through `just kguardian`, which has the interface ask the broker, and `@host` and `@remote-node`
-   to kguardian's broker on 9090, where the observers post. Watch a day at least, through one
-   nightly backup, one dump and one base backup. An `AUDIT` flow of `backstage`, `crowdsec`, `demo`,
-   `envoy-gateway-system`, `kguardian`, `kromgo`, `open-feature-operator`, `security-system` or
-   `sso-system` that a check made once the allows were Ready is a missing allow, added beside its
-   application in a pull request while the cluster still audits, or a pod doing what it should not.
-   Confirm also that no `@remote-node` flow reaches the proxies' listener ports and none to a
-   webhook's 9443, Envoy Gateway's or the OpenFeature Operator's, is `AUDIT`. `AUDIT` flows of
-   `flux-system` show too: Flux's own policies and the Flux Operator's `flux-operator-web`, which
-   the agents enforced before the value, are only audited while it is set, and what they would drop
-   is what they dropped before; they are not the namespaces' allows.
+   name, which has Backstage read its database; a WAL segment the primary of `backstage-db`
+   archives, which `select pg_switch_wal()` there forces
+   ([Backups and restores](#backups-and-restores)); a restore of `volsync-demo`
+   ([Restoring](#restoring)); the two dry runs that call the OpenFeature Operator's webhooks
+   ([OpenFeature Operator](#openfeature-operator)); a job launched in Ascender and a project update
+   there, which start a job pod and have the task pod fetch the project ([Ascender](#ascender)); a
+   test started through Locust's interface at its route, which has the proxies reach the master,
+   and whose workers then resolve and reach the target ([Locust](#locust)); a run started by
+   `just robot-run`, whose runner resolves and reaches its targets
+   ([Robot Framework](#robot-framework)); and kguardian's interface opened through `just kguardian`,
+   which has the interface ask the broker ([kguardian](#kguardian)). The blackbox exporter's probes
+   need nothing to start them: its pods reach the proxies on 10080 and 10443 at every scrape of a
+   `Probe` ([Probes](#probes)); nor do kguardian's observers, which post to its broker on 9090 from
+   `@host` and `@remote-node` as they record. Then let a night pass, for the paths nobody takes by
+   hand: the nightly dump of `backstage-db` from 02:00, which waits up to 20 minutes before it starts
+   ([Dumps](#dumps)), the base backup of `backstage-db` at 02:47 UTC, the same two of `ascender-db`
+   and `kguardian-db`, the nightly backup of `volsync-demo` at 03:17, and its restore drill's restore
+   at 04:17 and check at 05:17
+   ([The restore drill](#the-restore-drill)), and the nightly run of `robot-suites` at 05:45
+   ([Robot Framework](#robot-framework)). The escape canary's two checks need nothing to start them
+   either and run in any window: `escape-canary-network` at :23 every hour and
+   `escape-canary-rights` at :10 every hour ([The escape canary](#the-escape-canary)).
+   Once the allows have been Ready for 24 hours, and within 24 hours of taking the paths above, so
+   that the window holds them and one nightly backup, one dump, one base backup, one drill and one
+   run of the suites, `just network-audit 24h` must exit 0 and print no `AUDIT` line whose
+   `NAMESPACE` is a namespace that holds the default deny: `ascender`, `backstage`, `crowdsec`,
+   `demo`, `envoy-gateway-system`, `escape-canary`, `kguardian`, `kromgo`, `locust`,
+   `open-feature-operator`, `robot`, `security-system` or `sso-system`. The escape canary's `AUDIT`
+   lines are the one
+   exception, and are expected: those whose `SOURCE` starts with `escape-canary/`, which is
+   `escape-canary/CronJob/escape-canary-network` on the node that reported the line,
+   `escape-canary/<pod>` when another node did, and `escape-canary/Job/<name>` for a run made by
+   hand, of `NAMESPACE` `escape-canary`, egress, for each of the network check's attempts but the
+   resolver's, and of `NAMESPACE` `demo`, `hello`'s ingress, the lines of `demo` that another node
+   reported one for each pod, with `COUNT`s summing to about 21 for each run of the network check,
+   one an hour ([The escape canary](#the-escape-canary)). Exit 0 says that
+   the recorder's container ran through those 24 hours and that the table is not cut, and what the
+   record can miss even then is in
+   [The record of what policy drops](#the-record-of-what-policy-drops); a run that exits 1 says what
+   the record lacks, and the day is watched again from there. The lines that are not flows, which
+   the run counts, are read with the query it prints: events Hubble lost, which its `lost_events`
+   records count whatever their verdict, and a node Relay could not read are where the record may
+   lack flows.
+   Any other `AUDIT` line of one of those namespaces is a missing allow, added beside its
+   application in a pull request while the cluster still audits, or a pod doing what it should not;
+   a flow from
+   `@remote-node` to the proxies' listener ports or to a webhook's 9443, Envoy Gateway's or the
+   OpenFeature Operator's, would be such a line.
+   `AUDIT` lines whose `NAMESPACE` is `flux-system` are expected: Flux's own policies and the Flux
+   Operator's `flux-operator-web`, which the agents enforced before the value, are only audited
+   while it is set, and what they would drop is what they dropped before; they are not the
+   namespaces' allows. A `DROPPED` line, while the agents audit, is a packet dropped for the reason
+   its `REASON` gives, which is none of the policies' denials at layers 3 and 4.
+   `just network-drops` stays for what the agents hold at this moment: the `DROPPED` and `AUDIT`
+   flows among each agent's recent ones (4095 by the chart's default), by pod and port, never an
+   address. It needs neither the recorder nor the log store: it runs each agent's own `hubble`
+   through `kubectl exec`, so the kubeconfig needs exec on the Cilium agents' pods in
+   `kube-system`, more than the reading recipes need; `NETWORK_DROPS_LAST` (500) bounds the flows
+   asked of each agent and `NETWORK_DROPS_TIMEOUT` (60) the seconds each call may take.
 4. **Enforce, a change of its own.** One pull request makes these edits, together and no others:
    - `kubernetes/apps/base/kube-system/cilium/app/values.yaml`: the line `policyAuditMode: true`
      goes, with the three comment lines above it, from `# The agents evaluate every policy`; the
@@ -988,7 +1447,7 @@ does not matter.
      when that sentence, the values and the agents' rendered configuration disagree. In
      [What the namespaces let through](#what-the-namespaces-let-through), "the watch in audit mode
      confirms it: a flow from `@remote-node` to the listeners would show as `AUDIT`" becomes
-     "`just network-drops` confirms it: a flow from `@remote-node` to the listeners would show as
+     "`just network-audit` confirms it: a flow from `@remote-node` to the listeners would show as
      `DROPPED`".
    - `features/cilium.feature` and `tests/install-cilium.bats`: the scenario "Cilium audits network
      policy by a value in Git, and the docs say so" and its test are retitled together "Cilium
@@ -1002,6 +1461,10 @@ does not matter.
      and its checks of `enable-policy` and the checksum stay as they are, the comment above the
      former becoming "Enforcement stays in its default mode, so the agents enforce the policies:
      never would enforce none."
+   - `kubernetes/apps/base/escape-canary/escape-canary/ks.yaml`: `ESCAPE_CANARY_MODE: audit` becomes
+     `ESCAPE_CANARY_MODE: enforce`, so the escape canary holds its results to its table's
+     enforcement column; `tests/escape-canary.bats` fails while the mode and the rendered
+     `cilium-config` disagree, saying which to set.
    - `docs/roadmap.md`, M8's row: "the namespaces' default deny with their allows in `backstage`,
      `crowdsec`, `demo`, `envoy-gateway-system`, `kromgo`, `security-system` and `sso-system`" gains ", which
      Cilium enforces", and the clause "; and network policy that drops anything, as Cilium audits
@@ -1012,15 +1475,35 @@ does not matter.
    `tests/network-policy.bats` requires the enforcing sentence exactly when the value is gone, and
    fails, saying which sentence the value needs, on a change that does one without the other.
    Without the value every agent enforces every policy of the tree. The agents restart into
-   enforcing as they restarted into audit mode, and a node audits until its agent has. Run the
-   checks of step 3 again; `just network-drops` then shows `DROPPED` flows, and each of an
-   application namespace is an intended denial.
+   enforcing as they restarted into audit mode, and a node audits until its agent has. Take the
+   paths of step 3 again; `just network-audit` then prints, where a policy denied, `DROPPED` lines
+   with the reason `POLICY_DENIED`: each whose `NAMESPACE` is an application namespace is an
+   intended denial, and those of `flux-system` are what Flux's own policies dropped before the
+   cluster audited. The escape canary's attempts are such lines of `NAMESPACE` `escape-canary`
+   alone, as its egress drops each before it reaches `hello`, two for each packet: the SYN and its
+   retransmissions within `nc`'s 3 seconds, two or three, so four to six for each of the six
+   attempts of each pod, `COUNT`s summing to 72 to 108 a run; its runs pass, holding the
+   enforcement column. A run of the canary while its mode and the agents disagree, as the agents
+   restart and until Flux has applied both the release and the canary's mode, holds its results to a
+   column some agents do not follow and fails, raising `EscapeCanaryUnexpectedResult` and the
+   chart's `KubeJobFailed`. A Kustomization's revision in `flux get kustomizations` is the digest of
+   its artifact, its application's `app/` and the components, which the edit of Cilium's values
+   changes and the edit of the canary's `ks.yaml` does not. So once the Kustomization `cilium` is
+   Ready at the revision the merge gives it, which it is only once its release has rolled every
+   agent, as in step 1, and both of the canary's CronJobs give the mode `enforce`, which
+   `kubectl --namespace escape-canary get cronjob --output jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.jobTemplate.spec.template.spec.containers[0].env[?(@.name=="CANARY_MODE")].value}{"\n"}{end}'`
+   prints for each, run each check by hand
+   (`kubectl --namespace escape-canary create job --from=cronjob/<cronjob> <name>`): its success
+   clears the first, and deleting a failed Job of the canary, once its lines are read, the second
+   ([The escape canary](#the-escape-canary)).
 5. **Back.** For the whole cluster: one pull request that reverses each edit of step 4, putting
    back the value and its comment, the audit paragraph, the scenario and its test under their audit
-   title, and the roadmap's clause; the agents restart into audit mode and drop nothing a policy
-   denies at layers 3 and 4. For one namespace: one pull request that deletes the
-   `networkpolicy-default-deny.yaml` line from the namespace directory's `kustomization.yaml` and
-   lists the namespace in `network-policy-exceptions.yaml` with its reason. Flux prunes the default
+   title, the escape canary's mode `audit`, and the roadmap's clause; the agents restart into audit
+   mode and drop nothing a policy denies at layers 3 and 4. A run of the canary while its mode and
+   the agents disagree fails as in step 4, and the same runs by hand clear it. For one namespace:
+   one pull request that
+   deletes the `networkpolicy-default-deny.yaml` line from the namespace directory's
+   `kustomization.yaml` and lists the namespace in `network-policy-exceptions.yaml` with its reason. Flux prunes the default
    deny; the namespace's allows stay and change nothing, as none asks for the default deny, so the
    namespace takes and sends everything, as before it had a policy; `tests/network-policy.bats`
    proves it on the objects.
@@ -1033,12 +1516,238 @@ listed: no policy of the namespace asks for the default deny, so they alter noth
 applications' Kustomizations are Ready at that revision (`flux get kustomizations`), the second adds
 `networkpolicy-default-deny.yaml` to the namespace directory's `kustomization.yaml` and removes the
 namespace's entry from `network-policy-exceptions.yaml`, so the default deny lands on allows already
-in place. Then run the namespace's own checks and `just network-drops`: a `DROPPED` flow of the
-namespace is an intended denial or a missing allow, which the way back for one namespace reopens in
-one pull request. A namespace with a flow whose peer only the live cluster shows, such as the
-callers of a webhook, is watched in audit mode as the first namespaces were: the cluster audits
-again (step 5) while its policies land, and enforces again by step 4. While the cluster audits, a
-namespace takes the posture in one change, its default deny and its allows together.
+in place. Then run the namespace's own checks and `just network-audit`: a `DROPPED` line whose
+`NAMESPACE` is the namespace, with the reason `POLICY_DENIED`, is an intended denial or a missing
+allow, which the way back for one namespace reopens in one pull request. A namespace with a flow
+whose peer only the live cluster shows, such as the callers of a webhook, is watched in audit mode
+as the first namespaces were: the cluster audits again (step 5) while its policies land, and
+enforces again by step 4. While the cluster audits, a namespace takes the posture in one change,
+its default deny and its allows together.
+
+### The escape canary
+
+Network policy, the node firewall and RBAC are each checked offline against the render, and each can
+stop holding on the cluster without a manifest changing: an agent restarted into another mode, a
+binding a chart adds to every account, a node's rule rendered wrong. The escape canary keeps
+attempting what they forbid, every hour from three workers, and fails when a result is not the one
+the tree records for it, which an alert reads. It runs in the namespace `escape-canary`
+(`apps/base/escape-canary/`), which enforces the restricted Pod Security level and denies traffic by
+default, by plain manifests with kustomize; a cluster selects it with two entries of its overlay, the
+namespace directory and `escape-canary/ks.yaml`. The application names `cilium` and
+`prometheus-operator-crds` in `dependsOn`, the definitions of its policies' and its rule's kinds,
+and `hello` and `openbao`, which serve the Services its network check attempts, so that a run never
+meets a target that is not there yet; it sets `wait`. `tests/escape-canary.bats` holds what follows
+on the application built as Flux applies it, on the render and on the checks' scripts
+(`features/escape-canary.feature`); what it says of busybox 1.38.0, of the Flux CLI image's
+`kubectl`, v1.36.1, and of the pinned Cilium, Talos, Kubernetes, kube-state-metrics and Falco is read
+from their sources at those versions and, for the two images, seen in local runs of them with a
+read-only root, user 65534, no capability and no network but, for `kubectl`, an internal one to a
+stand-in API server.
+
+- **What runs.** Two CronJobs, each a check, each with a script from the ConfigMap
+  `escape-canary-scripts`:
+  - `escape-canary-network`, at 23 minutes past every hour, runs `network.sh` in busybox. It asks the
+    pod's resolver for `kubernetes.default.svc.cluster.local` (`resolver`), and opens a TCP
+    connection to the cloud's link-local metadata address on 80 (`metadata`), to the kubelet on 10250
+    (`kubelet`) and the Talos API on 50000 (`talos-api`) of the node it runs on, by the node's
+    address the downward API gives it, to the API server's Service by its name on 443
+    (`api-server`), to `hello.demo.svc.cluster.local` on 80 (`hello`) and to
+    `openbao.openbao.svc.cluster.local` on 8200, OpenBao's Service (`secret-store`). A TCP attempt
+    is `nc -z -v -v -w 3`, which completes the handshake, sends nothing and gives up on the
+    connection after 3 seconds: the 3 seconds bound the connect alone (`connect_w_timeout` in
+    `networking/nc_bloaty.c`), and the lookup of a name before it is bounded by the resolver's own
+    timeouts and, in the end, by the run's deadline. The lookup is `nslookup` under `timeout 5`.
+  - `escape-canary-rights`, at 10 minutes past every hour, runs `rights.sh` with the Flux CLI
+    image's `kubectl`, which asks the API server, with the pod's own token, for the Secret
+    `cluster-secrets` of `flux-system` (`read-secret`) and for the pods of every namespace
+    (`list-pods`), by name only, each under `timeout -s KILL 10`. It runs through the pod's in-cluster
+    configuration, which verifies the API server's certificate against the CA mounted with the
+    token. client-go takes that configuration only while no flag or kubeconfig file changes its
+    client configuration (`tools/clientcmd/merged_client_builder.go`), and `--request-timeout` is
+    such a flag: with it, `kubectl` turns to `http://localhost:8080`, as a local run showed, so the
+    call carries none and `timeout` bounds it, as OpenBao's guard does
+    ([How it initialises](#how-it-initialises)).
+
+  Each check makes every attempt of its rows of the table, in order, prints one line for each and a
+  summary, and exits 0 when every result is the table's for the mode, 1 when one is not, and 2, with
+  the reason, for a mode it does not know, a table it cannot read or a row it cannot attempt. A line
+  names the attempt by its role and never by address, and the tools' own messages, which name
+  addresses, are read and never printed:
+  `escape-canary network mode=audit node=<node> attempt=hello result=open expected=open ok`, or
+  `UNEXPECTED` at its end, then
+  `escape-canary network mode=audit node=<node> attempts=7 unexpected=0 ok`. The results are read
+  from the tools' status and messages: `nc`'s "open", "Connection refused", "Connection timed out",
+  which it writes when its 3 seconds end first, and "bad address" (`networking/nc_bloaty.c`);
+  `nslookup`'s answer with an address, its "server can't find" and its ";; connection timed out"
+  (`networking/nslookup.c`); `kubectl`'s success and its "Error from server (Forbidden)"; and a
+  call that `timeout` ends. Any other message is the result `other`, which no row expects.
+- **The table** is `app/expected.tsv`, which the ConfigMap `escape-canary-expected` carries to the
+  checks under a fixed name, read afresh at every run, and the tests read from the tree. Each row is
+  one attempt, its fields separated by tabs, as the file's header says: the attempt's role; its
+  check; its target, the name asked, `node` for the pod's own node, the metadata address, or `-` for
+  a request to the API server; its port and protocol; its reach, the peer and port the policies decide
+  it by once a Service's address is translated to a backend's, as `scripts/network-policy-check
+  --reach` names them; its result while Cilium audits; its result once Cilium enforces; and the
+  reason for both, a fact of the tree or of the pinned sources. The results are `open`, the
+  handshake completed or the resolver answered with an address; `refused`; `blocked`, no answer
+  within the attempt's bound; `unresolved`; `forbidden`, the API server answered 403; and `allowed`.
+
+  | Attempt | Reach | Audit | Enforce |
+  | --- | --- | --- | --- |
+  | `resolver` | `kube-system:k8s-app=kube-dns 53/udp` | open | open |
+  | `metadata` | `@world 80/tcp` | open | blocked |
+  | `kubelet` | `@host 10250/tcp` | open | blocked |
+  | `talos-api` | `@host 50000/tcp` | blocked | blocked |
+  | `api-server` | `@kube-apiserver 6443/tcp` | open | blocked |
+  | `hello` | `demo/Deployment/hello 8080/tcp` | open | blocked |
+  | `secret-store` | `openbao/StatefulSet/openbao 8200/tcp` | open | blocked |
+  | `read-secret` | `@kube-apiserver 6443/tcp` | forbidden | forbidden |
+  | `list-pods` | `@kube-apiserver 6443/tcp` | forbidden | forbidden |
+
+  Once the cluster enforces, each attempt's result is what the policies allow: the test asks
+  `scripts/network-policy-check --reach` for every row's reach from its check's CronJob over the
+  render, and fails unless it is denied exactly where the enforcement column says `blocked`. A denied
+  attempt is `blocked`, and not `refused`, as the agents answer nothing to a pod's packet that its
+  egress policy denies, where each of the canary's attempts is denied: `policy-deny-response: none`
+  in the rendered `cilium-config`, the chart's default, which the test holds. While the cluster
+  audits, the agents drop nothing a policy denies at layers 3 and 4 (`policy_can_egress` and
+  `policy_can_ingress` in `bpf/lib/policy.h` of Cilium v1.20.4), so only the node firewall blocks: a
+  pod reaches its own node by its pod address
+  ([ADR 0017](adr/0017-nodes-firewall-themselves-with-talos-ingress-firewall.md)), the kubelet's
+  listener of `talos/firewall.yaml` admits `pods` and Talos' API's does not, and a node's ingress
+  action `block` drops what no rule admits without an answer
+  (`buildIngressChain` in `internal/app/machined/pkg/controllers/network/nftables_chain_config.go`
+  of Talos v1.14.6, which sets the chain's policy to drop; the traffic Talos admits by itself, its
+  loopback, replies, rate-limited ICMP and the pod and service ranges among themselves, does not
+  cover a pod's address to its node's). The test reads the listener of each `node` row's port and
+  fails unless its audit result follows it, and unless no other row is `blocked` while Cilium audits.
+  The metadata row's `open` rests on the node masquerading the pod's connection to its own address,
+  as Cilium's iptables masquerading, which the rendered `cilium-config` runs (`enable-ipv4-masquerade`
+  on, no BPF masquerading or ip-masq-agent), excepts no link-local destination
+  (`Documentation/network/concepts/masquerading.rst` of v1.20.4), and on OpenStack's metadata
+  service answering an instance at that address, its documentation's; only the cluster shows it. The
+  address is one `scripts/check-address-literals` publishes as safe, so `.address-allowlist` holds
+  nothing for it. A change to what isolation allows, a deny of the metadata address or Cilium's
+  enforcement among them, changes the table in the same pull request, with its reason, and the
+  table never changes to match a result the cluster gave.
+- **The mode** is `ESCAPE_CANARY_MODE` of `ks.yaml`, `audit` today, which both CronJobs take as
+  `CANARY_MODE` and which says the column the checks hold their results to. The test fails unless it
+  is `audit` exactly while the rendered `cilium-config` holds `policy-audit-mode: "true"` and
+  `enforce` exactly while it does not, saying which to set; the change that makes the cluster enforce
+  sets it, and the way back puts it back ([Turning it on, and back](#turning-it-on-and-back)).
+- **Three workers.** Each run is an Indexed Job of three completions, all three at once, whose pods
+  require a node without the control planes' label `node-role.kubernetes.io/control-plane` and no
+  pod of the same Job on the same node: a required anti-affinity on `kubernetes.io/hostname` by the
+  pods' own labels, with `batch.kubernetes.io/controller-uid` as a match label key, which the API
+  server joins to the selector with the pod's own value (`MatchLabelKeys` in
+  `staging/src/k8s.io/api/core/v1/types.go` of Kubernetes v1.37.1), so another Job's pods do not
+  count, nor do pods that have ended, which the scheduler does not watch (`newPodInformer` in
+  `pkg/scheduler/scheduler.go`). A run makes no second attempt at a failed pod (`backoffLimit: 0`)
+  and is stopped after 300 seconds (`activeDeadlineSeconds`), its controller deleting the pods still
+  running; a second run does not start while one runs (`concurrencyPolicy: Forbid`), one that
+  cannot start within 600 seconds of its time is skipped, and each CronJob keeps its newest
+  successful Job and its three newest failed ones. With a worker cordoned or full, a run's third pod
+  stays pending, the two others make their attempts and print their lines, and the Job fails at its
+  deadline with `DeadlineExceeded`; three such runs in a row raise `EscapeCanaryStale`, never
+  `EscapeCanaryUnexpectedResult`. A worker lost between runs, powered off, hung or cut off from the
+  others, leaves the next run's third pod pending as well, and does more: OpenBao runs its three
+  members one to a worker, and its Service `openbao` publishes members that are not ready, so the
+  lost worker's member stays one of the Service's three backends until its pod object is removed,
+  which does not happen while its node does not answer (`staging/src/k8s.io/endpointslice/utils.go`
+  of Kubernetes v1.37.1 and `pkg/k8s/endpoints.go` of Cilium v1.20.4). The agents pick a backend at
+  random, so each surviving pod's `secret-store` attempt reaches that member one time in three and
+  gets no answer: `blocked` where the table says `open`, the pod exits 1 and the Job fails at once
+  with `BackoffLimitExceeded`. While a worker is lost, `EscapeCanaryUnexpectedResult` fires in more
+  than half the runs, though isolation holds, and `EscapeCanaryStale` after three runs that failed
+  either way. A worker lost while a pod of a scheduled run is on it, placed, starting or running,
+  stops its CronJob. Once the Job controller finds the run failed, at its deadline or on another
+  pod's result, it deletes that pod, which stays `Terminating` on the `NotReady` worker, as PodGC
+  removes a terminating pod from a node that still exists only once the node is not Ready and
+  carries the taint `node.kubernetes.io/out-of-service` (`pkg/controller/podgc/gc_controller.go`);
+  it adds no `Failed` condition to a Job while a pod of it terminates (`enactJobFinished` in
+  `pkg/controller/job/job_controller.go`); and the CronJob holds a Job with neither a `Complete` nor
+  a `Failed` condition among its active ones and, by `Forbid`, starts no run while it does, each
+  schedule skipped with the event `JobAlreadyActive` (`pkg/controller/cronjob/cronjob_controllerv2.go`,
+  all of Kubernetes v1.37.1). Without that condition, kube-state-metrics gives the Job no failed
+  state and its failures no reason (`internal/store/job.go` of v2.20.0), so neither
+  `EscapeCanaryUnexpectedResult` nor the chart's `KubeJobFailed` fires, and `EscapeCanaryStale`
+  does, 3 hours after the last success; the stuck pod's lines cannot be read while its node does not
+  answer. Runs start again once the worker answers and its kubelet ends the pod, or once the pod is
+  removed, by `kubectl --namespace escape-canary delete pod <pod> --force --grace-period=0`. Taking
+  a lost worker out for good removes it as well, through PodGC: the taint
+  `node.kubernetes.io/out-of-service` or the deletion of its Node, which act on every pod of the
+  worker, the taint on its volumes as well, and belong to that, not to the canary. The Job then
+  gets its `Failed` condition, with the reason it failed for, and the alerts read it as any failed
+  Job of the canary. A run made by hand is never among the CronJob's active Jobs, which records
+  only the event `UnexpectedJob` for it (the same file), so one stuck the same way stops no
+  schedule, while its Job stays active until its pod is removed.
+- **The token.** Only the rights check's pods hold one: they run as the ServiceAccount
+  `escape-canary-rights` and ask for its token, which the account mounts for no pod that does not,
+  and the network check's pods mount none. No Role or binding of the tree names the account: the test
+  reads every RoleBinding and ClusterRoleBinding of the render, every application's build and every
+  chart's objects, and fails on one that names it, its user name, the group of its namespace's
+  accounts, every account or every authenticated caller. That is the tree; Kubernetes' own default
+  bindings give every authenticated caller discovery, its own reviews and public information, and
+  every account the issuer's discovery documents and cluster trust bundles, and neither secrets nor
+  pods (`ClusterRoleBindings` in `plugin/pkg/auth/authorizer/rbac/bootstrappolicy/policy.go` of
+  Kubernetes v1.37.1). The rights check's pods reach the API server in either mode, by
+  `escape-canary-rights-api-server`, so that its answer is the authorisation's.
+- **The images**, each by its tag and the digest of its index, which Renovate's kubernetes manager
+  reads from the CronJobs: busybox 1.38.0, the drill's check's and Robot Framework's report server's,
+  for the network check, whose `sh`, `nc`, `nslookup` and `timeout` are its applets; and the Flux CLI
+  image OpenBao's guard runs, `ghcr.io/fluxcd/flux-cli`, of the `flux2` pin of `mise.toml`, which the
+  test holds it to and Renovate's group Flux moves with the pin, for the rights check, as its
+  `kubectl` verifies the API server's certificate: busybox's `wget` validates no certificate
+  (`networking/wget.c`: "TLS certificate validation not implemented" without `openssl`, which the
+  image does not carry) and would hand the token to whatever answered at the API server's address.
+  Both run as user and group 65534, which the pods set, busybox's image naming no user and the Flux
+  CLI image that one, with a read-only root; `kubectl` keeps its caches under
+  `HOME`, a memory-backed `emptyDir` of 16Mi, 20 KiB in the local run. Both pods pass the
+  restricted level with no entry, and the tree's admission rules, in both engines. The network
+  container requests 1m of CPU and 8Mi of memory and is limited to 32Mi, the drill's check's figures
+  for the same image; the rights container requests 10m and 64Mi and is limited to 128Mi, where the
+  local run of both requests peaked at 24 MiB against a stand-in API server whose discovery is far
+  smaller than the cluster's. None is measured on the cluster.
+- **The alerts**, each a warning with its section in [the runbook](runbooks/alerts.md), read
+  kube-state-metrics' CronJob and Job metrics for the namespace `escape-canary`:
+  `EscapeCanaryStale` once a CronJob's last success is more than 3 hours old, or it was created more
+  than 3 hours ago and has never succeeded, for 5 minutes: three runs in a row that did not
+  succeed, whatever stopped them; and `EscapeCanaryUnexpectedResult` once a CronJob owns a Job that
+  failed with `BackoffLimitExceeded`, which with a `backoffLimit` of 0 is a pod that exited non-zero,
+  a result not the table's or the check's own error, and that started after the CronJob's last
+  success, or it has none, for 5 minutes, until a later run succeeds. A Job that failed with
+  `DeadlineExceeded` raises the second never. Every failed Job of the canary, scheduled or made by
+  hand, also raises the monitoring chart's `KubeJobFailed`, a warning, 15 minutes after it failed and
+  for as long as the Job exists, which a later success does not end: the CronJob keeps its three
+  newest failed Jobs, and deleting one once its pods' lines are read ends it.
+- **Falco** records the canary's attempts at the API server, on purpose, with no exception
+  ([Tuning](#tuning)).
+- **In the record.** While the cluster audits, each attempt a policy would drop is an `AUDIT` line of
+  `just network-audit` ([The record of what policy drops](#the-record-of-what-policy-drops)): for
+  each pod of the network check, six of `NAMESPACE` `escape-canary`, egress, one for each attempt but
+  the resolver's, reported by the pod's node, so their `SOURCE` is
+  `escape-canary/CronJob/escape-canary-network`, and one of `NAMESPACE` `demo`, `hello`'s ingress,
+  reported by `hello`'s node, whose `SOURCE` is that when the pod runs there and
+  `escape-canary/<pod>` when it runs on another; a run made by hand names its Job,
+  `escape-canary/Job/<name>`. The recorder writes an `AUDIT` line once for a connection, and the
+  recipe prints one line a group with its `COUNT`, so a run of the network check shows as six lines
+  of `escape-canary`, one for each attempt, each of `COUNT` 3, one for each pod, and one to three
+  lines of `demo`, as the flows another node reports are split by the pod's name: `COUNT`s summing
+  to about 21 a run. A window of an hour holds one or two of the hourly runs, and any made by hand.
+  The rights check's flows are allowed and make none. Once the cluster enforces, the same attempts
+  are `DROPPED` lines with `POLICY_DENIED` of `NAMESPACE` `escape-canary` alone, as the canary's
+  egress drops each before it reaches `hello`, two for each packet, the SYN and its one or two
+  retransmissions within `nc`'s 3 seconds, so four to six an attempt and `COUNT`s summing to 72 to
+  108 a run. `just network-drops` shows the same flows among each agent's recent ones.
+- **What only the cluster shows**: that the metadata address answers a pod's connection while the
+  cluster audits; that Flux applies the policies after `cilium` and the rule after
+  `prometheus-operator-crds`, as `dependsOn` orders them; that the API server takes the
+  anti-affinity term, which the pinned schemas accept; what busybox and the Flux CLI image do at
+  start in a pod under user 65534 and a read-only root, which the local runs showed off the cluster;
+  the `AUDIT` lines Hubble writes at `demo`'s ingress; what Falco records; and whether the kubelet,
+  the API server and OpenBao log a TLS handshake error for each of the network check's connections
+  to them, which close once the TCP handshake completes, before any TLS, three of each a run. A live
+  result that differs from the table is a finding, never a reason to change the table.
 
 ## Variables
 
@@ -1173,10 +1882,11 @@ image adds ([cluster.md](cluster.md#the-node-image)), with the handler the exten
 gives: `gvisor`, handler `runsc`, and `kata`, handler `kata`, which also carries the overhead of
 Kata's virtual machine from that README, counted on top of a pod's requests. A RuntimeClass is
 cluster-scoped, so the application's `targetNamespace`, `kube-system` as for the resource
-definitions, gives it none. A pod selects one with `runtimeClassName`; none does. Flux applies them
-whatever image the nodes run, and a pod that selects one on a node whose image lacks its handler
-does not start. `tests/baseline.bats` builds the application as Flux applies it and checks the two
-classes and their handlers.
+definitions, gives it none. A pod selects one with `runtimeClassName`. No workload of the tree
+selects one; `just runtime-check` runs pods under the class it is given while it checks it (below).
+Flux applies them whatever image the nodes run, and a pod that selects one on a node whose image
+lacks its handler does not start. `tests/baseline.bats` builds the application as Flux applies it
+and checks the two classes and their handlers.
 
 **Pods under a sandbox runtime reach Services.** Serving Services in place of kube-proxy, Cilium by
 default translates a Service's address to a backend's where a socket connects or sends, in hooks on
@@ -1212,7 +1922,8 @@ against exposing a backend through more than one address. A pod under `kata` has
 Kata's networking besides
 ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/Documentation/network/kubernetes/kata.rst#limitations)):
 Kata copies the MTU of the pod's interface into its virtual machine and not the lower MTU that
-Cilium sets on the pod's default route for the tunnel's overhead, so its connections with other
+Cilium sets on the pod's default route for the tunnel's and WireGuard's overhead
+([Encryption between nodes](#encryption-between-nodes)), so its connections with other
 pods can see fragmentation or dropped packets until the pod lowers that route's MTU itself. The
 value is one of the settings in `cilium-config`, so a change of it restarts every agent, at most
 two at a time, and the operator ([Service addresses](#service-addresses)).
@@ -1227,6 +1938,93 @@ the runtime classes Flux builds, in the applications and besides them, are exact
 renders no chart but Cilium's, so a class another chart would render goes unseen), the value is
 set, the agents' rendered configuration holds it beside kube-proxy replacement, and one paragraph,
 in this section, opens with the first sentence of the paragraph above.
+
+**Whether a runtime class can host a sandbox.** `just runtime-check <class> [cluster]`, for
+`kata`, `gvisor` or `none` (the default runtime), says check by check whether a pod under that class
+could host an OpenShell sandbox, whose runtime confines its agent with Landlock, seccomp user
+notification and reads of the task's memory and fails closed without them. It runs three pods on
+one node. `probe` runs OpenShell's own capability probe, the sandbox runtime of the image
+`openshell_sandbox_image` pins run as `capability-probe`, under the class and with the security
+context OpenShell 0.1.9 gives a sandbox's workload pod: user and group 10001, `fsGroup` 10001 and no
+other supplementary group (`supplementalGroupsPolicy: Strict`), the runtime's seccomp profile, the
+sysctl `net.ipv4.ip_unprivileged_port_start=0`, no privilege escalation and every capability
+dropped, with a `/tmp` of its own, as the image has none. `net`, under the class, and `reference`,
+under the default runtime on `net`'s node, run a script in the Cilium agents' image
+(`cilium_agent_image`). The recipe prints a line naming the class, the node, the kernel release and
+the LSMs `net` saw, then `pass` or `FAIL`, with the reason, for each of four checks. `kernel`:
+whether the probe exited 0 with a report that says qualified; the line names, of what the probe
+found, the Landlock ABI, seccomp user notification with its descriptor hand-over and the copy of a
+task's memory, facilities
+[OpenShell's support matrix](https://github.com/NVIDIA/OpenShell/blob/v0.1.9/docs/about/support-matrix.mdx#kernel-requirements)
+requires; otherwise it shows the exit code and the end of the probe's diagnostic. `name`: whether
+`kube-dns.kube-system.svc` resolves within 10 seconds; `service`: whether a TCP connection to the
+address it gave opens on port 53 within 5. Both go to the resolver's Service address, which every
+pod off the host network relies on, so they fail where Service addresses are not translated for
+pods under the class. `mtu`: whether the MTU of `net`'s default route, the route's own or else its
+device's, is `reference`'s. Cilium's CNI gives a pod's device the device MTU and its default route
+that MTU less the overhead of the tunnel, 50 for VXLAN over IPv4, and of WireGuard, 95
+(`pkg/mtu/mtu.go`, `plugins/cilium-cni/cmd/cmd.go`,
+[Encryption between nodes](#encryption-between-nodes)), and, Cilium's guide says, Kata copies the
+device's MTU into its virtual machine and not the route's
+([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/Documentation/network/kubernetes/kata.rst#limitations)).
+gVisor's `runsc`, at the release the node image's extension ships, gives its network stack each
+route's MTU as it finds it in the pod's network namespace (`runsc/sandbox/network.go`), but that
+stack reports no route MTU and serves no `/sys/class/net`, so under `gvisor` neither can be read and
+`mtu` fails on what it cannot read in the pod, not on a route MTU that differs. A pod that does not
+start or end fails the checks it feeds, with what it says of itself and the namespace's Warning
+events for it. The run exits non-zero when a check fails, and it judges no class. Its pods run in
+the namespace `runtime-check`, which it makes and deletes however it ends, naming it when it stays,
+and saying, when its create got no answer and none is there, that one may yet come of it; the
+namespace enforces the `restricted` level and holds the tree's default deny and one policy of its
+own, which lets `net` and `reference` reach the resolver on 53, UDP and TCP, and nothing else, so
+whether the cluster audits or enforces network policy changes nothing for these flows. An earlier
+run's namespace, known by the label `app.kubernetes.io/managed-by: runtime-check`, is deleted first,
+and one without the label is refused. Beside that, the run deletes only what it made: each deletion
+carries the uid of the namespace it means as a precondition the API server checks, the uid the
+create answered with or, when that answer did not come, that of the namespace there if it carries
+the label, which may then be another checkout's run's. A namespace another party made, found when
+the run makes its own or in its place, is left alone, and the run says so. The run judges only the
+pods it made, each known by the uid its create answered with. Before it makes a pod it checks that
+its namespace is the one it made and not being deleted; as a create cannot be made conditional on
+the namespace's uid, another can still take its place in between, and the run then fails. It reads
+its pods' logs by name, so once it has read one it checks that its namespace is still the one it
+made, and when another has taken its place, as when another checkout's run deletes the run's as an
+earlier run's and makes its own, it prints no check and fails. A run whose namespace went without its
+own deletion answered as done fails too, as another party's deletion and a lost answer look alike.
+The run holds the cluster's lock, which binds this checkout's recipes alone, and
+`RUNTIME_CHECK_TIMEOUT` (300 seconds) bounds each of its waits and the pods' own deadline. Run it
+after every change of the node image, a Talos upgrade or a new version of an extension, and after a
+change of Cilium's values.
+
+**A namespace asks for a sandbox tier.** The label `k8s-gitops/sandbox` on a namespace's
+`namespace.yaml` names the isolation every pod of the namespace runs with, one of three values,
+compared exactly: `userns` asks each pod to set `hostUsers: false`, so that it runs in a user
+namespace of its own, its users mapped to unprivileged ones of the node
+([Kubernetes](https://kubernetes.io/docs/concepts/workloads/pods/user-namespaces/)); `gvisor` asks
+for `runtimeClassName: gvisor`, and `kata` for `runtimeClassName: kata`. Any other value, one of
+these in another case or an empty one, is no tier, and no pod meets it. What each tier rests on:
+the RuntimeClasses `gvisor` and `kata` above, from the node image's extensions
+([cluster.md](cluster.md#the-node-image)), Kata needing nested virtualisation on the node, without
+which a `kata` pod does not start; `userns` needs Kubernetes' user namespaces, generally available
+at the cluster's minor (`UserNamespacesSupport` is GA and locked on from 1.36 in
+`pkg/features/kube_features.go` at v1.37.1, so the API server keeps the field), and the
+`user.max_user_namespaces` sysctl that `talos/patches/all/user-namespaces.yaml` raises on every
+node for gVisor, the one setting Talos' guide to user namespaces asks for. A `userns` pod's volumes
+must be on filesystems that support idmapped mounts, which tmpfs does from Linux 6.3 and NFS does
+not, as Kubernetes' documentation says; the nodes run 6.18. The label is an application's
+namespace's choice, beside its Pod Security level, and no namespace carries it.
+`just pod-security-check` refuses a pod template of the render that does not set its namespace's
+tier ([Pod Security](#pod-security)), and Kyverno refuses such a pod at admission while its webhook
+answers ([The sandbox tier rule](#the-sandbox-tier-rule)). Falco watches the host's kernel, so it
+sees little of what a pod does inside gVisor or a Kata guest: gVisor's Sentry handles the pod's
+system calls itself, and the host calls it makes for them are its own and do not map one to one
+onto the pod's ([gVisor](https://gvisor.dev/docs/architecture_guide/intro/)), and a Kata pod's
+processes run on the guest kernel of a virtual machine, of which the host sees the hypervisor's
+process ([Kata Containers](https://github.com/kata-containers/kata-containers/blob/main/docs/design/architecture/README.md)).
+Falco can read a gVisor sandbox's system calls from gVisor itself, through an engine of its own
+that gVisor must be set up to feed ([Falco](https://falco.org/blog/intro-gvisor-falco/)); the tree
+runs Falco on its modern eBPF probe alone. A `userns` pod runs on the host's kernel, and Falco sees
+it as any other ([Runtime detection](#runtime-detection)).
 
 ## Service addresses
 
@@ -1322,6 +2120,211 @@ into a change of their configuration, and `scripts/install-cilium` passes the sa
 helm, so a cluster built from nothing comes up in audit mode too. `tests/install-cilium.bats`
 fails when this sentence, the value and the agents' rendered configuration disagree.
 
+## Encryption between nodes
+
+**Traffic between pods on different nodes is encrypted.** Cilium's values set
+`encryption.enabled: true`, `encryption.type: wireguard`, where the chart's own default type is
+`ipsec`, and `encryption.nodeEncryption: false`, which the chart renders into two keys of the
+ConfigMap `cilium-config`, `enable-wireguard: "true"` and `wireguard-persistent-keepalive: "0s"`,
+the chart's default of no keepalive
+([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/install/kubernetes/cilium/templates/cilium-configmap.yaml#L749-L774));
+read it from the cluster with
+`kubectl -n kube-system get configmap cilium-config -o jsonpath='{.data.enable-wireguard}'`,
+which prints `true`. Every Cilium agent then makes a WireGuard device, `cilium_wg0`, in its node's
+kernel, and every packet between pods on different nodes passes through that device and crosses
+the node network encrypted, with nothing for an application to change
+([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/Documentation/security/network/encryption-wireguard.rst)).
+The decision, and why node-to-node encryption and strict mode stay off, is
+[ADR 0022](adr/0022-pod-traffic-between-nodes-is-encrypted-with-wireguard.md).
+`rollOutCiliumPods` and `operator.rollOutPods` restart the agents and the operator into a change of
+the values, and `scripts/install-cilium` passes the same file to helm, so a cluster built from
+nothing encrypts from its first agents. `tests/install-cilium.bats` fails when this sentence, the
+values and the agents' rendered configuration disagree, and when the chart rendered with these
+values differs from its render without encryption in anything but those two keys, the checksum of
+the ConfigMap that restarts the agents and the operator, and the certificates the chart makes anew
+on every render. It also fails when the agents' rendered configuration leaves tunnel mode over
+VXLAN or kube-proxy replacement, names a load-balancing mode such as DSR, turns on XDP
+acceleration or the host firewall, translates a pod's Service addresses at its socket, sets an MTU,
+or changes the monitor aggregation from the chart's `medium`, as what follows rests on each.
+
+- **The keys.** Each agent makes its own key pair and keeps the private key in its state directory,
+  as `/var/run/cilium/state/cilium_wg0.key`, which lies in the agent's run directory, a path of the
+  node itself, so an agent that restarts loads the key it had
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/pkg/wireguard/agent/agent.go#L757-L776),
+  [the run directory](https://github.com/cilium/cilium/blob/v1.20.4/install/kubernetes/cilium/templates/cilium-agent/daemonset.yaml#L886-L889)).
+  It publishes the public key on its node's `CiliumNode`, as the annotation
+  `network.cilium.io/wg-pub-key`, before it publishes the node, and every agent gives its device a
+  peer for each other node that has published a key, whose endpoint is the address that node is
+  registered with, on UDP 51871
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/pkg/wireguard/agent/agent.go#L489-L618)).
+  On Talos 1.14.6, `/var/run` is a link to `/run`
+  ([Talos](https://github.com/siderolabs/talos/blob/v1.14.6/internal/app/machined/pkg/controllers/block/internal/volumes/volumeconfig/system_volumes.go#L510-L526)),
+  a file system in memory
+  ([Talos](https://github.com/siderolabs/talos/blob/v1.14.6/internal/pkg/mount/v3/helpers.go#L302-L319)),
+  so the key lasts as long as the node runs: after a reboot, a Talos upgrade, which reboots the
+  node, or a reset, the agent makes a new pair and publishes the new public key, and the other
+  agents replace the node's peer with one for it
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/pkg/wireguard/agent/agent.go#L517-L529)).
+  An agent writes its key into its `CiliumNode` when it starts and when its own node changes, and
+  leaves the object alone otherwise
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/pkg/nodediscovery/nodediscovery.go#L108-L158),
+  [the write](https://github.com/cilium/cilium/blob/v1.20.4/pkg/nodediscovery/nodediscovery.go#L297-L306),
+  [its own object ignored](https://github.com/cilium/cilium/blob/v1.20.4/pkg/k8s/watchers/cilium_node.go#L121-L128)),
+  so a restore of etcd from a snapshot older than a worker's last reboot gives back that worker's
+  `CiliumNode` with a key the worker no longer holds, which the other agents then encrypt to, and
+  pod traffic to and from the worker stops until its agent restarts or its node next changes. The
+  [restore's runbook](runbooks/etcd-restore.md#afterwards) restarts the agents.
+  Talos builds WireGuard into its kernel
+  ([Talos](https://github.com/siderolabs/pkgs/blob/e6ad19d/kernel/build/config-amd64#L2610)), so
+  the agent, which may load no module, needs none.
+- **The device and its port.** `cilium_wg0` listens on UDP 51871 on the node's addresses, which
+  every node's firewall admits from the nodes' own addresses alone
+  ([cluster.md](cluster.md#what-each-node-admits)). A packet decrypted there is handed to the
+  node's network stack, the overlay's VXLAN packet among them
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/bpf/bpf_wireguard.c#L272-L289)), which
+  the overlay's own rule then admits to UDP 8472, as Talos matches a rule's sources and ports on
+  every interface but its own trusted ones
+  ([Talos](https://github.com/siderolabs/talos/blob/v1.14.6/internal/app/machined/pkg/controllers/network/nftables_chain_config.go#L129-L143),
+  [the rules](https://github.com/siderolabs/talos/blob/v1.14.6/internal/app/machined/pkg/controllers/network/nftables_chain_config.go#L286-L305)).
+- **What is encrypted.** These values route in tunnel mode, over VXLAN, replace kube-proxy and
+  translate a Service's address at each pod's interface ([Runtime classes](#runtime-classes)),
+  without DSR or XDP acceleration (the rendered `cilium-config` holds
+  `bpf-lb-acceleration: "disabled"` and no `bpf-lb-mode`), and leave node-to-node encryption off.
+  In tunnel mode an agent sends every packet its overlay carries to another node into the
+  WireGuard device, whatever the packet holds
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/bpf/lib/wireguard.h#L76-L82)). Cilium's
+  table of what is encrypted gives, for these values, every connection between pods on different
+  nodes, directly or through a `ClusterIP` Service, and the hop on which a worker forwards a
+  connection from outside the cluster to a pod on another node, for kube-proxy replacement over the
+  overlay without DSR or XDP
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/Documentation/security/network/encryption-wireguard.rst#which-traffic-is-encrypted)),
+  as the public Gateway's proxies' Service, with `externalTrafficPolicy: Cluster`, has it do
+  ([The public Gateway](#the-public-gateway)). The table lists a connection between pods through a
+  Service of another type, a `LoadBalancer` one included, only for translation at the socket and
+  for kube-proxy, and these values use neither: that it is encrypted here rests on Cilium's source
+  at this version, not on the table. The agent translates the Service's address to a backend's at
+  the pod's interface
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/bpf/bpf_lxc.c#L90-L96)), so the packet
+  reaches the overlay as one to a pod on another node.
+  A packet to an address in another node's pod range enters the overlay even before the agent knows
+  that pod, as each node's pod range is in the agents' table with that node as its tunnel endpoint
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/pkg/node/manager/manager.go#L776-L792)).
+- **What Hubble shows.** Hubble records a pod's flows at the pod's interface, before the overlay and
+  WireGuard on the way out and after them on the way in, so `hubble observe --unencrypted` lists
+  them and `hubble observe --encrypted` does not. That flag selects flows whose trace carries the
+  reason the agent gives a WireGuard packet at the node's device
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/bpf/bpf_host.c#L1235-L1245),
+  [the way out](https://github.com/cilium/cilium/blob/v1.20.4/bpf/bpf_host.c#L1610-L1618)), and at
+  the chart's default monitor aggregation, `medium`, the agents report no trace of a packet that
+  arrives from the network and none at the device of a packet without connection-tracking state,
+  which a WireGuard packet there has none of
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/bpf/lib/trace.h#L178-L207)). Hubble
+  therefore does not show whether a flow crossed the node network encrypted; the device's
+  counters do, each peer's `transfer-tx` and `transfer-rx` in an agent's
+  `cilium-dbg debuginfo --output json`.
+- **What other layers cover.** Packets between pods on one node never leave it, and are not
+  encrypted. Traffic from and to the nodes' own addresses is what node-to-node encryption would
+  cover, and these values leave it off
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/Documentation/security/network/encryption-wireguard.rst#node-to-node-encryption-beta)).
+  Cilium's table counts a pod on the host network as a node, and gives a node to a pod on another
+  node, a pod to another node and a node to another node to node-to-node encryption alone
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/Documentation/security/network/encryption-wireguard.rst#which-traffic-is-encrypted)):
+  pods on the host network, LINSTOR's satellites among them, DRBD's replication between the
+  workers' kernels, the kubelets, the API servers and etcd, which carry TLS of their own, a node's
+  or a host-network pod's connection to a pod on another node, and a pod's connection to a node's
+  address, which leaves its node through the node's interface ([cluster.md](cluster.md#sources)).
+  Cilium's source at this version sends a node's packets to a pod on another node into the overlay
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/bpf/bpf_host.c#L854-L874)), and so
+  through the device. Such a connection, unless its socket is bound to another address, leaves the
+  node from the address of Cilium's own device there, `cilium_host`, as Cilium routes each other
+  node's pod range through that device from that address
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/pkg/datapath/linux/node.go#L374-L424)),
+  and that address has a tunnel endpoint without node-to-node encryption too
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/pkg/node/manager/manager.go#L577-L584)),
+  so the pod's replies go back through the overlay and the device as well
+  ([the replies](https://github.com/cilium/cilium/blob/v1.20.4/bpf/bpf_lxc.c#L1283-L1333)). That
+  the device carries such a connection rests on Cilium's source at this version, not on the table.
+  Between a client outside the cluster and the worker it reaches, which the edge routers send, a
+  request is not encrypted by Cilium either: over HTTPS the Gateway's TLS covers it, which the
+  `https` listener terminates at a proxy ([The public Gateway](#the-public-gateway)). The handshakes
+  the devices exchange on UDP 51871 are WireGuard's own protocol, not traffic it carries.
+- **Turning it on, and back.** A change of the values is a change of `cilium-config`, so it
+  restarts every agent, at most two at a time by the chart's update strategy, and the operator
+  ([Service addresses](#service-addresses)). While some agents encrypt and others do not yet, an
+  agent that encrypts sends every packet of its overlay into its device, and the device has a peer
+  only for the nodes whose agents have published a key and drops a packet for any other, answering
+  its own node with an ICMP host unreachable
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/bpf/lib/wireguard.h#L76-L82),
+  [the keys](https://github.com/cilium/cilium/blob/v1.20.4/pkg/node/manager/manager.go#L604-L618),
+  [Linux](https://github.com/gregkh/linux/blob/v6.18.63/drivers/net/wireguard/device.c#L137-L232));
+  a node that does not encrypt yet sends its overlay's packets as before, and the other takes them,
+  as no strict mode is on, but answers them into its device. So pod traffic between a node whose
+  agent has restarted and one whose agent has not stops, both ways, until the second restarts:
+  between pods, to a Service's backend across that divide, the resolver among them, and a node's
+  own connections to pods across it, from either side, as a node sends its packets to a pod on
+  another node into the overlay and the pod's replies come back through it, as above. Traffic to
+  the addresses the nodes are registered with, and from them to anything but a pod, is not
+  touched, the storage layer's replication between the workers, a pod's connection to another
+  node, which leaves its node from the node's address, and the workers' BGP sessions with the edge
+  routers among it: without node-to-node encryption such an address has neither a tunnel endpoint
+  nor a key
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/pkg/node/manager/manager.go#L577-L602)),
+  an edge router's is no node's, and a packet outside the overlay goes into the device only when
+  its destination carries a key
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/bpf/lib/wireguard.h#L158-L166)).
+  The drops happen in the kernel's device, after the agent's programs have passed the packet on,
+  so no agent reports one: neither `just network-drops` nor the record of what policy drops shows
+  them, and `cilium-health status` shows the nodes across the divide unreachable through the
+  overlay. The release waits for the roll up to its timeout of 10 minutes and has the root's
+  defaults, from which it does not opt out ([What the root sets](#what-the-root-sets)): an upgrade
+  whose roll is not done by then fails, and its remediation rolls the release back, which rolls
+  the agents again into the values before, with the same divide until the last has restarted, and
+  tries again, three times, so pod traffic across the divide stops on each of four tries before
+  the last is rolled back too and the release is Stalled with the reason `RetriesExceeded`. An
+  operator who wants to stop that suspends the release,
+  `flux suspend helmrelease cilium --namespace kube-system`, and resumes it with
+  `flux resume helmrelease cilium --namespace kube-system`. Turning WireGuard off is the same in
+  reverse: an agent that restarts without it deletes its device
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/pkg/wireguard/agent/agent.go#L148-L154))
+  and sends its overlay's packets as before, and what the nodes that still encrypt send it through
+  their devices is lost until they restart too. The key file stays in the state directory until
+  the node reboots, and an agent that turns WireGuard on again before then loads it. The way back
+  is a change that sets the values back, with the scenario, test and docs that follow them, and
+  leaves `talos/firewall.yaml` and `node-firewall-exceptions.yaml` as they are, so every node keeps
+  admitting UDP 51871, where nothing then listens. A revert of the whole change takes the rule out
+  of the tree too, while the nodes keep it until `just infra-apply sto2/cluster` and
+  `just cluster-talos` roll out a configuration without it ([cluster.md](cluster.md#the-way-back)).
+- **MTU.** The agent derives every MTU, and nothing in the tree sets one. The node network's MTU is
+  the cloud's, read and never set (`infra/openstack/modules/network/outputs.tf`), and an agent
+  takes the lowest MTU of its node's devices as its base
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/pkg/mtu/manager.go#L49-L80)). It gives
+  `cilium_wg0` the base less WireGuard's 95 bytes
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/pkg/wireguard/agent/agent.go#L335-L368)),
+  keeps the base on the pods' interfaces, and gives the pods' default route the base less
+  WireGuard's 95 bytes and VXLAN's 50
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/pkg/mtu/mtu.go#L121-L173)). When it starts,
+  and whenever its base changes, it writes that MTU into the default route in the network
+  namespace of every pod on its node, and the base onto each pod's interface on the node's side
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/pkg/mtu/endpoint_updater.go#L98-L170),
+  [the routes](https://github.com/cilium/cilium/blob/v1.20.4/pkg/mtu/endpoint_updater.go#L215-L339)),
+  and Cilium's CNI plugin gives a new pod the same route MTU
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/Documentation/network/kubernetes/kata.rst#limitations)),
+  so no workload restarts for it. gVisor copies a pod's interfaces, with their MTU, and its routes,
+  with each route's MTU, the default route's included, into its own network stack when the sandbox
+  starts
+  ([gVisor](https://github.com/google/gvisor/blob/release-20260831.0/runsc/sandbox/network.go#L303-L416),
+  [the routes](https://github.com/google/gvisor/blob/release-20260831.0/runsc/sandbox/network.go#L584-L650)),
+  so a pod under `gvisor` takes the route MTU its namespace holds at that moment. A pod under
+  `kata` keeps the MTU of its interface, as [Runtime classes](#runtime-classes) says.
+- **Watching it.** `just cluster-check` asks every agent whether it encrypts with WireGuard and has
+  a peer for each other node ([cluster.md](cluster.md#recipes)). It counts the peers and does not
+  match them to the nodes, which `cilium-health status` does by reaching each node through the
+  overlay. Cilium 1.20.4 exposes no metric of
+  WireGuard
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/Documentation/observability/metrics.rst)),
+  so no alert watches it; a peer that cannot be reached shows in `cilium-health status` as a node
+  unreachable through the overlay.
+
 ## External Secrets
 
 `apps/base/external-secrets/external-secrets/` runs the External Secrets operator in its own
@@ -1398,7 +2401,9 @@ every namespace, and evaluates the chart's default alerting and recording rules.
 - the silence operator, through its chart's PodMonitor ([Silences](#silences));
 - Falco on every node, through its chart's ServiceMonitor ([Runtime detection](#runtime-detection));
 - the OpenFeature Operator's manager, through its application's PodMonitor
-  ([OpenFeature Operator](#openfeature-operator)).
+  ([OpenFeature Operator](#openfeature-operator));
+- the public hostnames, through the blackbox exporter and the Probes that applications declare
+  beside their routes ([Probes](#probes)).
 
 It does not scrape:
 
@@ -1521,7 +2526,8 @@ records (`piraeus-operator-templates`) and `tests/monitoring.bats` holds equal t
 cluster runs.
 
 - A ServiceMonitor, `linstor-controller`, scrapes the controller's `api` port, 3370, at `/metrics`,
-  over plain HTTP, as the `LinstorCluster` sets no TLS for its REST API: LINSTOR's own state,
+  over plain HTTP, which the controller keeps serving there while its API takes only client
+  certificates on 3371 ([Who may call LINSTOR](#who-may-call-linstor)): LINSTOR's own state,
   `linstor_node_state` (2 for a satellite that is online), the storage pools' free and total
   capacity, `linstor_storage_pool_capacity_free_bytes` and `linstor_storage_pool_capacity_total_bytes`,
   with the labels `node`, `nodetype`, `storage_pool`, `driver` and `backing_pool`, and for a node
@@ -1533,8 +2539,12 @@ cluster runs.
   DRBD resource, which is the volume's `pvc-<id>`), `volume`, `minor` and the state, and
   `drbd_device_quorum` and `drbd_device_client`, which is 1 for a device that is diskless on purpose, a
   client or a tiebreaker (`doc/prometheus.md` and `src/plugin/prometheus.rs` of drbd-reactor). The
-  monitor names the job `linstor-satellite` and adds the node. The satellites run on the pod
-  network, so no rule of the nodes' firewall is involved.
+  satellites run on their node's network
+  ([Replication between the nodes](#replication-between-the-nodes)), so the reactor serves 9942 on
+  the node's address, which the rule `drbd-reactor` of the nodes' firewall admits from the nodes and
+  the pod range ([cluster.md](cluster.md#what-each-node-admits)), and a target's `instance` is the
+  node's address. The monitor names the job `linstor-satellite` and adds the node, from the pod's
+  node name.
 
 The operator publishes alert rules of its own, `config/extras/monitoring/alerts.yaml` in its
 repository, to be applied by hand. They are not loaded: they set no summary and no runbook, and some
@@ -1621,7 +2631,7 @@ The own alerts, each with its runbook section in [docs/runbooks/alerts.md](runbo
 | `PostgresBackupTooOld` | A PostgreSQL cluster's newest base backup is older than 36 hours, or it has none and its oldest instance is older than that, for 30 minutes. | warning | [PostgresBackupTooOld](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#postgresbackuptooold) |
 | `LogCollectorOutsizedShare` | One node's collector sends at least ten times the median node's rate of events, and at least 10 a second, for 30 minutes. | info | [LogCollectorOutsizedShare](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#logcollectoroutsizedshare) |
 | `LogCollectorDiscardingEvents` | A collector's component discards events it was not set to drop, for 15 minutes. | warning | [LogCollectorDiscardingEvents](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#logcollectordiscardingevents) |
-| `LogCollectorSendFailing` | A collector's sink to the store reports errors for 15 minutes. | warning | [LogCollectorSendFailing](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#logcollectorsendfailing) |
+| `LogCollectorSendFailing` | A collector's sink has sent requests to the store and had none accepted, for 15 minutes. | warning | [LogCollectorSendFailing](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#logcollectorsendfailing) |
 | `ExternalDNSSyncStale` | external-dns' last successful sync with the DNS provider is more than 10 minutes old, or no external-dns reports one, for 5 minutes. | warning | [ExternalDNSSyncStale](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#externaldnssyncstale) |
 | `FluxRootSyncNotReady` | One of the root sync's three objects, the Kustomizations `flux-system` and `cluster` and the OCIRepository `flux-system`, has not been Ready for 10 minutes. | critical | [FluxRootSyncNotReady](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#fluxrootsyncnotready) |
 | `FluxApplierNotReady` | A Kustomization or HelmRelease other than the root sync has not been Ready for 15 minutes, for a reason other than waiting for a dependency. | warning | [FluxApplierNotReady](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#fluxappliernotready) |
@@ -1642,6 +2652,15 @@ The own alerts, each with its runbook section in [docs/runbooks/alerts.md](runbo
 | `KyvernoAdmissionControllerDown` | Kyverno's admission controller has had no available replica for 10 minutes. | warning | [KyvernoAdmissionControllerDown](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#kyvernoadmissioncontrollerdown) |
 | `GatekeeperControllerManagerDown` | Gatekeeper's controller manager has had no available replica for 10 minutes. | warning | [GatekeeperControllerManagerDown](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#gatekeepercontrollermanagerdown) |
 | `CrowdSecLocalAPIDown` | CrowdSec's local API's target has not answered its scrape for 10 minutes, or has no series. | warning | [CrowdSecLocalAPIDown](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#crowdseclocalapidown) |
+| `RestoreDrillStale` | No check of an application's restore drill has passed for 36 hours. | warning | [RestoreDrillStale](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#restoredrillstale) |
+| `RestoreDrillJobFailing` | The latest scheduled check of an application's restore drill has not passed after 30 minutes. | warning | [RestoreDrillJobFailing](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#restoredrilljobfailing) |
+| `PublicEndpointDown` | The probe of a public hostname through the Gateway gets no answer for 5 minutes. | critical | [PublicEndpointDown](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#publicendpointdown) |
+| `PublicEndpointWrongStatus` | The probe of a public hostname is answered with a status it does not accept for 5 minutes. | critical | [PublicEndpointWrongStatus](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#publicendpointwrongstatus) |
+| `PublicCertificateExpiring` | The certificate the Gateway serves for a public hostname expires within 14 days, and not within 3, for 10 minutes. | warning | [PublicCertificateExpiring](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#publiccertificateexpiring) |
+| `PublicCertificateExpiryImminent` | The certificate the Gateway serves for a public hostname expires within 3 days, for 5 minutes. | critical | [PublicCertificateExpiryImminent](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#publiccertificateexpiryimminent) |
+| `ProbeNotRunning` | A declared probe of a public hostname has not been scraped through the exporter for 10 minutes. | warning | [ProbeNotRunning](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#probenotrunning) |
+| `EscapeCanaryStale` | A CronJob of the escape canary has not succeeded for 3 hours, or was created more than 3 hours ago and never has, for 5 minutes. | warning | [EscapeCanaryStale](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#escapecanarystale) |
+| `EscapeCanaryUnexpectedResult` | A CronJob of the escape canary owns a Job that failed because a pod exited non-zero, started after its last success, for 5 minutes. | warning | [EscapeCanaryUnexpectedResult](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#escapecanaryunexpectedresult) |
 
 The alerts read only what Prometheus scrapes: kube-state-metrics' pod readiness for OpenBao's
 members, its Deployment availability for the Flux Operator, its nodes' roles, which tell the
@@ -1653,16 +2672,28 @@ Operator's state of Flux's resources, the Cilium agents' BGP session state, LINS
 the DRBD reactor's, Falco's counter of the matches of each rule, external-dns' gauge of its last
 successful sync and its absence, the metrics of the PostgreSQL instances and the Barman Cloud
 plugin, which the component's PodMonitor scrapes, with kube-state-metrics' creation times of their
-pods ([PostgreSQL](#postgresql)), and Prometheus' own `up` of CrowdSec's local API. The
+pods ([PostgreSQL](#postgresql)), Prometheus' own `up` of CrowdSec's local API, and the blackbox
+exporter's probe metrics ([Probes](#probes)). The
 PostgreSQL alerts, on the archive and the base backups and on the dumps, are written once, in the
 `cloudnative-pg` application's `app/`, whose tests are `tests/rules/cloudnative-pg.yaml`. The dump
 alerts select the CronJobs by their names' suffix, `-pgdump`: kube-state-metrics exposes no CronJob
-label unless its chart is told to, so a label the component set would not reach the metrics. `tests/rules-check.bats` fails when an alert reads a metric that
-no monitor of the render scrapes, or whose monitor selects nothing of the Service or pod that
-serves it.
+label unless its chart is told to, so a label the component set would not reach the metrics.
+`tests/rules-check.bats` fails when an alert reads a metric that no monitor of the render scrapes,
+or whose monitor selects nothing of the Service or pod that serves it.
 
 The two policy engines' alerts read kube-state-metrics' Deployment availability for each engine's
 admission controller ([Admission policy](#admission-policy)).
+
+The escape canary's alerts read kube-state-metrics' CronJob and Job metrics for its two CronJobs,
+selected by their namespace, `escape-canary`, which holds the canary alone: their last success and
+creation, and each Job's start, owner and the reason of its failure
+([The escape canary](#the-escape-canary)). They are written in the `escape-canary` application's
+`app/`, whose tests are `tests/rules/escape-canary.yaml`.
+
+The restore drill's alerts read kube-state-metrics' CronJob metrics for the check job of every
+application that takes the drill ([The restore drill](#the-restore-drill)). They are written once,
+in the `volsync` application's `app/`, whose tests are `tests/rules/volsync.yaml`, and select the
+CronJobs by their names' suffix, `-drill-check`, as the dump alerts select theirs.
 
 What no alert covers, and why:
 
@@ -2081,7 +3112,7 @@ where Grafana lists it.
 | Cilium Metrics (`cilium-agent`) | The agents' processes, API, BPF, datapath, policy, endpoints, controllers and Kubernetes client | `cilium-monitoring` | `files/cilium-agent/dashboards/cilium-dashboard.json` of the Cilium chart at 1.20.4; Apache-2.0 | Cilium | Prometheus |
 | Cilium BGP sessions (`cilium-bgp`) | The sessions established against those configured for each node, each session's state, the routes advertised and the agents scraped | `cilium-monitoring` | Written for this tree; Apache-2.0 | Cilium | Prometheus |
 | Piraeus Datastore (`piraeus`) | LINSTOR's pools, nodes, resources and error reports, the volumes' read and write rates, and DRBD's connections, quorum and out-of-sync data | `linstor-monitoring` | `config/extras/monitoring/piraeus-dashboard.json` of the Piraeus operator's repository at v2.12.1, the release the pinned chart deploys; Apache-2.0 | Storage | Prometheus |
-| CloudNativePG (`cloudnative-pg`) | A PostgreSQL cluster's instances, their health, configuration, activity, storage, write-ahead log, replication and checkpoints, and the operator's reconciles | `cloudnative-pg`, and the clusters of `n8n`, `backstage` and `kguardian` | `charts/cluster/grafana-dashboard.json` of the CloudNativePG chart, where it is the chart `cluster` at 0.0.5; Apache-2.0 | PostgreSQL | Prometheus |
+| CloudNativePG (`cloudnative-pg`) | A PostgreSQL cluster's instances, their health, configuration, activity, storage, write-ahead log, replication and checkpoints, and the operator's reconciles | `cloudnative-pg`, and the clusters of `n8n`, `backstage`, `ascender` and `kguardian` | `charts/cluster/grafana-dashboard.json` of the CloudNativePG chart, where it is the chart `cluster` at 0.0.5; Apache-2.0 | PostgreSQL | Prometheus |
 | Falco (`falco`) | The rules that matched, by rule, source and priority, Falco's memory and CPU, the events it reads and drops, and the versions and engines that run | `falco` | `dashboards/falco-dashboard.json` of the Falco chart at 9.2.2; Apache-2.0 | Falco | Prometheus |
 | external-dns (`external-dns`) | The age of the last successful sync and of the last attempt, the endpoints of the sources and of the registry, their errors and the verified records by type | `external-dns` | Written for this tree; Apache-2.0 | external-dns | Prometheus |
 | Silence operator (`silence-operator`) | Whether the operator is scraped, its reconciles and errors by controller, the reconcile time and the queue depth | `silence-operator` | Written for this tree; Apache-2.0 | Silences | Prometheus |
@@ -2089,14 +3120,16 @@ where Grafana lists it.
 The `Grafana`'s `spec.preferences.homeDashboardUid` names the home dashboard's `uid`, which is how
 the operator sets an instance's home. VolSync exposes whether a volume is out of sync and how many
 scheduled syncs were missed, and no time of the last sync, so those are what the home shows of a
-backup's age. It has no panel of the public Gateway, which no monitor scrapes, or of Flux, which has
-a dashboard of its own: Flux's alerts are among the firing alerts it counts.
+backup's age. It has no panel of the public Gateway, whose proxies no monitor scrapes and whose
+hostnames the probes' alerts read ([Probes](#probes)), or of Flux, which has a dashboard of its
+own: Flux's alerts are among the firing alerts it counts.
 
 **Scraped, without a dashboard.** The tree holds no dashboard of these applications; what their
 monitors scrape is in Prometheus, where a query reads it:
 
 | Application | Scraped by |
 | --- | --- |
+| `blackbox-exporter` | Its chart's ServiceMonitor, of the exporter itself; what it probes reaches Prometheus through the Probes ([Probes](#probes)) |
 | `crowdsec` | Its chart's two ServiceMonitors, of the local API and the agent ([CrowdSec](#crowdsec)); the chart carries no dashboard, and CrowdSec's `grafana-dashboards` repository, under MIT, has no tag to pin and says its newest dashboards are for v1.5 releases, older than the one the chart runs |
 | `descheduler` | Its chart's ServiceMonitor |
 | `gatekeeper` | The application's own PodMonitor, of the audit pod and the controller managers ([Admission policy](#admission-policy)) |
@@ -2109,6 +3142,7 @@ monitors scrape is in Prometheus, where a query reads it:
 | `open-feature-operator` | The application's own PodMonitor, of the manager ([OpenFeature Operator](#openfeature-operator)); the operator's repository, under Apache-2.0, and its chart hold no Grafana dashboard at the pinned version |
 | `reloader` | Its chart's PodMonitor |
 | `spegel` | Its chart's ServiceMonitor |
+| `vmauth` | The application's own PodMonitor, of its internal port 8426 ([Who may call the log store](#who-may-call-the-log-store)) |
 | `vpa` | Its chart's PodMonitor, of the recommender |
 
 **Missing a scrape or an upstream.** Each of these has no dashboard, because it would show "No
@@ -2336,11 +3370,11 @@ namespace is privileged too, for node-exporter and the log collector. The own na
 enforces `restricted`, and is one more entry in the set of namespaces that carry the label, which
 `tests/gateway.bats` pins. A cluster selects kromgo with two entries of its overlay, the namespace
 directory and the application's `ks.yaml`; the application waits for the Prometheus Operator's
-definitions, the Gateway and Cilium, whose kind its network policy is, and is Ready once both pods
-are (`wait: true`), which is once kromgo has read its configuration and listens: a configuration it
-refuses keeps the application from Ready. It queries the stack's Prometheus at each request, not at
-start, so a badge answers with an error until Prometheus does, and the stack's application is not
-waited for.
+definitions, the Gateway, Cilium, whose kind its network policy is, and the blackbox exporter, which
+answers its route's `Probe`, and is Ready once both pods are (`wait: true`), which is once kromgo
+has read its configuration and listens: a configuration it refuses keeps the application from Ready.
+It queries the stack's Prometheus at each request, not at start, so a badge answers with an error
+until Prometheus does, and the stack's application is not waited for.
 
 **What it may reach.** The namespace denies ingress and egress by default, and the policy beside
 the application, `app/ciliumnetworkpolicy.yaml`, lets kromgo's flows through and no other
@@ -2419,9 +3453,283 @@ with one it cannot compile passes the test and keeps both pods, and so the appli
 **Limits.** kromgo does not limit requests and keeps no result, so every badge request that reaches
 it runs one query on Prometheus; only a cache downstream of kromgo saves one. The edge routers admit
 only the networks the edge stack allows
-([The edge routers](infrastructure.md#the-edge-routers)), which bounds who can ask. A rate limit on
-the route would be a `BackendTrafficPolicy`, which `tests/gateway.bats` would have to admit: it holds
-the Gateway's `ClientTrafficPolicy` to be the one policy on the Gateway or on a route attached to it.
+([The edge routers](infrastructure.md#the-edge-routers)), which bounds who can ask. The route takes
+`components/ratelimit` at its default, 300 requests a minute on each proxy, so up to 600 a minute
+reach kromgo through the two, for every client together ([Rate limits](#rate-limits)); a request
+beyond it is answered 429 by the proxy and runs no query. Its own `Probe` asks two a minute. A badge
+is fetched by whatever shows it, such as GitHub's image proxy for a page GitHub renders, at most once
+for each view of the page: `config.yaml` serves eight, so a view that shows every one asks for eight
+at most, and it takes some 37 such views a minute to reach the limit on one proxy, before a cache
+serves any repeat from the five minutes a badge may be kept.
+
+### Probes
+
+`apps/base/monitoring/blackbox-exporter/` runs the Prometheus community's blackbox exporter in
+`monitoring`, from its chart on the community's OCI registry, for the checks of what the cluster
+serves to the outside. It names `prometheus-operator-crds`, for its `ServiceMonitor` and
+`PrometheusRule` and the `Probe` kind of the applications that declare one, and `cluster-ca`, for
+the certificate below, in `dependsOn`, and sets `wait`, so what declares a `Probe` and names it
+starts once the exporter runs. Two replicas, never on one worker, under a budget of one; small
+requests and no limits; the restricted Pod Security level, from the chart's defaults and the
+runtime's seccomp profile; its own metrics through the chart's `ServiceMonitor`. Its chart's tag is
+a pin Renovate moves.
+
+**What waits for the exporter.** `gateway-public` and every application that declares a `Probe` name
+`blackbox-exporter` in `dependsOn`, and `external-dns` waits for the Gateway. Flux reads a
+dependency's readiness when the dependent reconciles, at its interval or on a change, and applies
+the dependent only while what it names is Ready. While the exporter's Kustomization is not, as when
+its release has failed or its chart cannot be fetched, no change to the Gateway or to an
+application with a route is applied from its next reconcile, and none to `external-dns` once
+`gateway-public` has reconciled since: each reports `DependencyNotReady` and keeps what it has
+applied, so nothing that runs is stopped, and a cluster built from nothing has no Gateway until the
+exporter runs. A release that fails is retried three times
+([What the root sets](#what-the-root-sets)) and is then Stalled until its failure count is reset,
+which helm-controller does when the release's chart or values change, and
+`flux reconcile helmrelease blackbox-exporter -n monitoring --reset` does by hand.
+
+The exporter has three modules, and the chart's own `http_2xx` is switched off:
+
+- `public_https`: a GET over TLS that must be answered 200, is not redirected, and fails when the
+  answer is not over TLS or its certificate does not verify against the trust of the cluster's
+  issuer, which under staging verifies nothing (**Trust**, below).
+- `public_https_signin`: the same, for a route behind the cluster's sign-in, but the answer must be
+  302, the redirect that starts a sign-in, which it does not follow (**Behind sign-in**, below).
+- `public_http_redirect`: a GET over plain HTTP that must be answered 301, which it does not follow.
+
+**What is probed, and from where.** An application declares a `Probe` beside its route ([Giving an
+application a public hostname](#giving-an-application-a-public-hostname)): `hello-route` has one for
+`hello.${CLUSTER_DOMAIN}`, `n8n` one for `n8n.${CLUSTER_DOMAIN}` at n8n's health endpoint
+`/healthz`, kromgo one for `kromgo.${CLUSTER_DOMAIN}` at the badge `/badges/cluster_node_count`,
+`open-webui` one for `open-webui.${CLUSTER_DOMAIN}` at Open WebUI's readiness endpoint `/health/db`,
+which answers 200 without a session once its database does, `dex` one for `dex.${CLUSTER_DOMAIN}`
+at its discovery document `/.well-known/openid-configuration`, which dex serves on its http port
+without a session once it runs with its configuration, `oauth2-proxy` one for
+`auth.${CLUSTER_DOMAIN}` at its readiness endpoint `/ready`, which it answers before it looks for a
+session and which, with the cookie session store, checks no connection, `backstage` one for
+`backstage.${CLUSTER_DOMAIN}` at Backstage's readiness endpoint `/.backstage/health/v1/readiness`,
+a `GET` its route admits, which answers 200 without a session once every plugin has started, each
+having migrated its schema in the database, `ascender` one for `ascender.${CLUSTER_DOMAIN}`
+at its ping endpoint `/api/v2/ping/`, which answers 200 without a session once the
+web pod reads the database, `hello-sso` one for `hello-sso.${CLUSTER_DOMAIN}` at
+`/`, `victoria-logs-route` one for `logs.${CLUSTER_DOMAIN}` at the interface `/select/vmui/` and
+`locust-route` one for `locust.${CLUSTER_DOMAIN}` at Locust's interface `/`,
+each with the module that expects the sign-in redirect (**Behind sign-in**, below), and
+`gateway-public` one for the redirect, which is probed for the apex of the domain, as the redirect
+takes any host. Backstage's endpoint does not ask the database again once Backstage has started, so
+its probe proves the database at Backstage's start, not since. kromgo's
+route sends only the badge paths, and kromgo answers a badge in its SVG form with a 200 whether its
+query succeeds or not, an id it does not serve included ([Status badges](#status-badges)), so its
+probe proves the route and kromgo, not Prometheus, and
+`tests/probes.bats` holds the badge to one the configuration serves; each probe runs that badge's
+query once. Every `Probe` sets the job name `public-endpoints`, which the alerts
+select, names the exporter's Service as its prober, and has one target, the Gateway's proxies'
+Service by its cluster name, with the hostname as a label, which a relabeling turns into the URL
+parameter `hostname`. For that parameter the exporter sets the `Host` header and, as no module has
+a `server_name`, the name the TLS handshake asks for and verifies. So the request is the one a
+client of the hostname makes, and it reaches the proxies by the cluster's DNS and the Service's
+address, without the hostname being resolved at all: nothing leaves the cluster, nothing depends on
+public DNS, the edge routers or the floating addresses, and no address is written anywhere. The
+proxies' Service is the one Envoy Gateway makes, named
+`envoy-<namespace>-<name>-<the first 8 characters of the SHA-256 of "<namespace>/<name>">` after the
+Gateway's namespace and name, in the controller's own namespace whichever namespace the Gateway is
+in, here `envoy-envoy-gateway-system-public-5ea56ca9` in `envoy-gateway-system`; the controller
+derives the name, `tests/probes.bats` derives it again, the namespace from the controller's
+Deployment in the render, and fails when a `Probe` names another, and the `EnvoyProxy` could not set
+a name of its own without changing what `tests/gateway.bats` pins of its Service. The controller
+makes the Service at run time, so no render holds its name: the test's rule for it was read in the
+controller's source at the version the test records, and for a controller of another version, or one
+configured to deploy the proxies in each Gateway's namespace, where they take another name, the test
+fails until the rule is read again there, as one that named the Service otherwise would pass every
+other check and fail every probe at the name's resolution. The two other ways were weighed
+and left: a cluster-internal resolution of the public hostnames to the Gateway would be a rule in
+the cluster's DNS for every hostname, which no application of the tree owns, or the Service's
+address written into the exporter's pods, which the tree does not write; and the hostname as the
+target alone goes out through public DNS. That shape, the exporter as the prober and the proxies'
+Service as every target, with the one relabeling, is the one the node firewall's test accepts of a
+`Probe`, as it refuses any other ([cluster.md](cluster.md#the-node-firewall)).
+
+**What it proves, and what it does not.** A passing probe of a route proves the Gateway's proxies
+are up and take connections on 443, the listener serves a certificate that verifies for the
+hostname, the route is accepted and its backend answers 200. It proves the redirect on 80 the same
+way. It does not prove the way in from outside: the edge routers, their translation to the Gateway's
+address, BGP, the Service's external address and public DNS, which stay `just gateway-check`'s
+([Checking the public Gateway](#checking-the-public-gateway)). The probe goes to the Service's
+cluster address, not the announced one. Each probe is a connection of its own, which the Service
+gives to one of the proxies, so a probe proves one proxy at a time: with one of the two failing
+while it is still Ready, about every other probe fails and the others pass. An alert that needs
+every probe to fail for 5 minutes then fires only on a run of failures that long, which comes by
+chance and rarely, and resolves at the next probe that passes.
+
+**Behind sign-in.** A route that a `SecurityPolicy` with external authorisation targets
+([Sign-in](#sign-in)) is probed with `public_https_signin`. The probe has no session, so the
+proxies ask oauth2-proxy, which answers with the 302 to dex that starts a sign-in, as
+`skip_provider_button` is set and the probe's request is no AJAX one (`Proxy` and `doOAuthStart` in
+`oauthproxy.go` of the pinned v7.15.6), and the proxies send that answer back. A passing probe
+proves the proxies, the certificate, the route, the policy in its path and oauth2-proxy answering;
+not the backend behind it, which `hello-route`'s probe of the same backend covers, and for Locust's
+master the stock alerts on its pods ([Locust](#locust)), nor dex, which dex's own probe covers. The
+day the policy is lost and the backend answers anyone, the answer is a 200 and
+`PublicEndpointWrongStatus` fires. So the probe asks for a path the backend answers 200: `/` of
+`hello-sso`, the interface of `logs`, not its root, which the route itself redirects with a 302 that
+would pass the probe with the policy lost, and `/` of `locust`, Locust's page, which it answers to
+anyone. The sign-in paths on the same host, the routes `hello-sso-oauth2`, `logs-oauth2` and
+`locust-oauth2` that `components/sso` adds and no policy covers, are covered by the host's one
+`Probe`: the probes are of hostnames, and the probe meets the route the policy covers.
+
+**While an application is not running**, the probe of its route fails, and it is
+`PublicEndpointWrongStatus` that fires, not `PublicEndpointDown`: the proxies answer the probe
+themselves, 503 for a backend with no pod ready, and 403 for a route behind sign-in while
+oauth2-proxy cannot answer, as the policy does not fail open. A `Probe` is applied with its route,
+by its application's Kustomization, which Flux applies once those it names in `dependsOn` are Ready.
+So on a new cluster the alert fires for an application whose pods wait for a secret the owner writes
+to the store, from 5 minutes after it is applied until the secret is there: n8n, for its encryption
+key ([n8n](#n8n)); dex, for the GitHub client; and after dex oauth2-proxy, for the list of
+identities, as its route and its `Probe` are applied only once dex is Ready. `hello-sso`,
+`victoria-logs-route` and `locust-route` wait for oauth2-proxy in the same way, so their probes meet
+the redirect from their first run
+([What the owner does, in order](#what-the-owner-does-in-order)). A route whose application takes
+longer than the alert's 5 minutes to start, as Backstage on its database's first start, raises it
+until it answers.
+
+**Its way through network policy.** The exporter's pod resolves the Service's cluster name with the
+cluster's resolver and connects to its cluster address; the Cilium agents translate that address to
+a proxy's before policy applies and keep the pod as the source, so the proxies see the exporter's
+pod in `monitoring`, not `world`, on the container port of the listener: 10443 for https, 10080 for
+the redirect. `envoy-gateway-system` denies by default, and the proxies' policy `public-proxy` takes
+the exporter's pods on those two ports, by the labels the exporter's chart gives them, in a rule of
+their own beside the world's; from there the proxies reach the backend by the rule of its route, as
+for any client ([What the namespaces let through](#what-the-namespaces-let-through)). `monitoring`
+is listed, so the exporter's own egress is open and Prometheus' requests to it pass.
+`tests/network-policy.bats` reads the ports from the target of every `Probe` of the render and the
+exporter from their prober's Service, and fails unless the exporter's pods reach the proxies on each
+and no other pod of the render or of the operators is taken there. While the cluster audits, a line
+of `just network-drops` from a `monitoring/blackbox-exporter-…` pod to an
+`envoy-gateway-system/envoy-envoy-gateway-system-public-…` pod on `10443/tcp` or `10080/tcp` means
+that rule does not match the exporter's pods, as after its chart changed their labels; once the
+cluster enforces, such a flow is dropped and every probe raises `PublicEndpointDown`.
+
+**The PROXY protocol.** The listeners accept a PROXY protocol header as `optional` ([The public
+Gateway](#the-public-gateway)), and the exporter writes none: its connection begins with the TLS
+handshake or the HTTP request, which the listeners serve with the exporter's pod as the client. The
+probes are a sender the rule above admits that writes no header, which is one reason the header
+stays optional: a policy that required it would reset every probe, and `tests/probes.bats` fails,
+saying the probes would be cut, when the Gateway's `ClientTrafficPolicy` requires the header while a
+`Probe` reaches the listeners from inside the cluster. Before the header is required, the probes
+must reach the listeners another way, through the edges, which write it.
+
+**Trust.** The probe verifies the certificate against the trust of the issuer the cluster chooses
+for the Gateway's certificate ([Choosing the public Gateway's
+issuer](#choosing-the-public-gateways-issuer)), the cluster's own CA or production, and does not
+verify it under staging, whose chain no client trusts. The `HelmRelease` adds to the exporter's
+shared values those of that issuer, the key `<issuer>.yaml` of a ConfigMap made from `app/trust/`,
+which the variable `PROBE_ISSUER` names, `cluster-ca` when it is not set. A cluster that chooses an
+issuer sets `PROBE_ISSUER` to the same name in a patch of the Kustomization `blackbox-exporter` in
+its overlay, beside the patch of `gateway-public` that sets `PUBLIC_ISSUER`. The name is written
+twice, as a patch reaches one Kustomization and a replacement from the Gateway's would break the
+overlays that leave the Gateway out; `tests/probes.bats` fails for every cluster of the tree whose
+render has the Gateway's certificate from one issuer and the probes trusting another.
+
+- `cluster-ca`, the default: the `ca_file` of both modules over https is the authority's public
+  certificate, which reaches the exporter through a `Certificate` of its own application, issued by
+  the same issuer: cert-manager puts the issuing authority's certificate in the `ca.crt` of the
+  Secret it makes for it, and the exporter mounts that one key, never the Secret's private key, and
+  never `cert-manager`'s Secret of the authority, whose key does not leave that namespace. The
+  `Certificate` itself is for nothing. Reflector, which would copy a whole Secret, key included, and
+  a trust bundle controller, which the tree does not have, are the other ways, and neither is
+  simpler.
+- `letsencrypt-production`, which `lab-sto2` chooses: the system's roots of the exporter's image, as
+  a client outside has them. The modules name no CA of their own and nothing is mounted; the
+  exporter's `Certificate` is applied all the same, as the application is the same on every cluster,
+  and nothing reads its Secret.
+- `letsencrypt-staging`, which a new cluster starts on: none. No client trusts its chain, so its
+  values make both modules over https skip verification, `insecure_skip_verify: true`, their one
+  setting, and nothing is mounted. The probe still needs a TLS answer from the proxies with the
+  status the module takes, and the exporter still reads the expiry of the certificate served:
+  `probe_ssl_earliest_cert_expiry` is the earliest end among the certificates the proxies send,
+  whether verified or not (`prober/http.go` and `getEarliestCertExpiry` in `prober/tls.go` of the
+  pinned v0.29.1), so `PublicEndpointDown`, `PublicEndpointWrongStatus` and both certificate
+  alerts hold. What the probe does not catch under staging is a wrong certificate: Go skips the
+  check of the name with that of the chain, so a certificate of any issuer, a self-signed one or
+  one for another name is accepted. Under the cluster's own CA or production, a certificate for
+  another name, or one the probe's trust does not verify, fails the handshake and raises
+  `PublicEndpointDown`; that trust is the one authority under the cluster's own CA and every public
+  one under production, where a certificate another public authority issued for the name passes, as
+  for any client. So a wrong name or an untrusted chain is caught once the cluster moves to
+  production.
+
+No module skips verification under the cluster's own CA or production; under staging the values of
+the two modules over https hold that one setting and no other module skips it. `public_https_signin`
+verifies as `public_https` does under every issuer, and `tests/probes.bats` fails when their
+`tls_config` differs. `just kubernetes-check` refuses a cluster that enables the exporter while the
+Gateway's issuer or the probes' is one with no values in `app/trust/`, and names the file to add;
+the release, which would find no values for it, fails rather than probe without them.
+`tests/probes.bats` reads the issuer, the modules and the pod from what `scripts/render` makes of
+the tree, `lab-sto2` as it is and copies that choose the cluster's own CA and staging.
+
+**Every route has its probe.** `tests/probes.bats` reads the routes, the `Probe`s and the policies
+from what `scripts/render` makes of the tree: every application the overlay enables as Flux builds
+it, components and substitutions included, and every release as its chart renders it. A route or a
+`Probe` that a chart makes from a release's values is therefore read as one a manifest declares, in
+its release's namespace where the chart names none, and an object with a list of items, as a `List`
+a chart renders, as those items, each an object, as Helm installs them; a route that a controller
+makes at run time is in no render, and is not seen. The test fails, naming the route, when an
+`HTTPRoute` of the public Gateway's https listener has a hostname that no `Probe` names, has no
+hostname at all (it would serve every name under the listener), or the redirect has none. A `Probe`
+counts when its job is `public-endpoints`, it goes to the exporter at the address of the Service its
+release renders, it uses the module of its listener and hostname, its one target is the proxies'
+Service and it sends its `hostname` label on as the parameter as it is: the last relabeling that
+writes `__param_hostname` copies the label with the default regex and replacement, and no relabeling
+writes another label, maps or drops labels, or keeps or drops the target. It counts only in the
+shape `hello`'s has, those fields and no other, as each thing more is a way for a `Probe` that is
+there not to probe: a path or a scheme of the prober asks the exporter for something else than a
+probe, or over TLS it does not serve; an interval, a scrape timeout or metric relabelings of its own
+can stretch the probe to once a day, cut every scrape short or drop its series; a second target can
+leave the cluster; a label beside `hostname` can be one Prometheus reads as a setting of the scrape;
+and a relabeling to another label, which runs after the operator's own, can send the scrape or the
+probe elsewhere or take it out of the job the alerts read. The module of a hostname on the https
+listener is `public_https_signin` when a route of that hostname is the target, by `targetRefs` or
+`targetRef`, of a `SecurityPolicy` with external authorisation, and `public_https` otherwise;
+`tests/gateway.bats` refuses a policy that selects routes by label and any policy on the Gateway but
+its `ClientTrafficPolicy`. The rule keys on hostnames: one `Probe` covers every route of its
+hostname, so without the `Probe` of a host behind sign-in both its routes are named. A `Probe` of
+such a host for 200 is refused, naming it, even beside the right one, as it would pass only once the
+policy were lost; and so is a `Probe` of the redirect for a host no such policy covers, which could
+never pass. A fixture for each of these proves the rule, a release whose chart renders a route from
+its values among them. The test also fails when an application of the render that holds an object of
+kind `Probe`, one of its manifests, however the file spells the kind, or one its chart renders, does
+not name `blackbox-exporter` in the `dependsOn` of its Kustomization, and `just kubernetes-check`,
+which refuses a `dependsOn` on an application the overlay does not enable, then refuses a cluster
+that lists the application without the exporter, as it does `hello-route` without the Gateway.
+
+**Alerts.** Five, in the exporter's `prometheusrule.yaml`, with their runbooks ([Alerts](#alerts)).
+Each reads the series of the job `public-endpoints` alone, the one the `Probe`s set, so a probe of
+another job raises none of them: `tests/probes.bats` holds every selector of the rules the render
+applies to that job, and each alert's unit test holds a probe of another job in the failing state.
+`PublicEndpointDown` is a failing probe with no response at all, `probe_http_status_code` being 0
+when none came; `PublicEndpointWrongStatus` a failing probe that was answered, with a status the
+module does not accept, so the two never fire together. `PublicCertificateExpiring` is the served
+certificate's expiry within 14 days and not within 3, and `PublicCertificateExpiryImminent` within
+3, one alert for each severity, as the rules check names alerts once. The expiry is
+`probe_ssl_earliest_cert_expiry`, the earliest end among the certificates the proxies send: the
+listener's certificate while the intermediates of its chain outlive it, and an intermediate that
+ends sooner raises the alerts as well. The series of the verified chain,
+`probe_ssl_last_chain_expiry_timestamp_seconds`, is not read: under staging no chain is verified,
+and it then holds Go's zero time (`getLastChainExpiry` in `prober/tls.go`), which
+`PublicCertificateExpiryImminent` would take for an expired certificate. They read the certificate
+the proxies serve, where cert-manager's `CertManagerCertificateExpiringSoon` reads the one
+cert-manager stored ([cert-manager](#cert-manager)): a renewal that fails raises both warnings for
+the Gateway's certificate, and only the probes' see a stored certificate the proxies do not serve,
+or an expiry while cert-manager is not scraped, and only they turn critical. `ProbeNotRunning` is a
+declared `Probe` whose scrape through the exporter has failed for 10 minutes, Prometheus' own `up`
+of the job being 0: the exporter is gone, the `Probe` names another prober or a module the exporter
+does not have, or the probe outlasts the scrape. A cluster that declares no `Probe` has no such
+scrape, so it cannot fire there; nor does it see a `Probe` Prometheus does not select, which
+`tests/monitoring.bats` holds against the stack's selectors. Alertmanager's configuration is
+unchanged: the alerts have no destination yet.
+
+`tests/probes.bats` reads the render of the tree and of copies of it, checks the modules, the trust,
+the routes and the `Probe`s as above, and renders the exporter's pinned chart with the values of
+each issuer to check the pods.
 
 ## Grafana
 
@@ -2464,18 +3772,56 @@ plugin of the VictoriaLogs datasource ([Logs](#logs)): Grafana does not ship it.
 it to Grafana's container as `GF_INSTALL_PLUGINS`, `victoriametrics-logs-datasource` at the exact
 version in `grafanadatasource-victoria-logs.yaml`, which Renovate moves, and `grafana.yaml` sets
 `GF_INSTALL_PLUGINS_FORCE=true` on the container. With that set the Grafana image's entrypoint runs
-`grafana cli plugins install victoriametrics-logs-datasource <version>` at every start, into a data
-directory that starts empty. That makes two requests to grafana.com's plugin API
+`grafana cli plugins install victoriametrics-logs-datasource <version>` at every start of the
+container, into a data directory that starts empty with each pod. The plugin comes from
+grafana.com's plugin catalogue, through two requests that a new pod makes
 (`pkg/plugins/repo/service.go` in Grafana v13.1.3): `GET
-https://grafana.com/api/plugins/victoriametrics-logs-datasource/versions`, the plugin's versions, of
-which it takes the one asked for, and `GET
+https://grafana.com/api/plugins/victoriametrics-logs-datasource/versions`, the catalogue's listing
+of the plugin's versions, of which it takes the one asked for, and `GET
 https://grafana.com/api/plugins/victoriametrics-logs-datasource/versions/<version>/download`, which
 grafana.com redirects to that version's archive in its catalogue's storage on
-`storage.googleapis.com`. Grafana's own server would install the plugin only with its
-preinstalled-plugins list on, which stays off. The entrypoint runs under `set -e`, so a failed
-request stops Grafana from starting until grafana.com answers. Grafana loads the plugin only if its
-signature verifies against the public key Grafana ships. Nothing else is fetched, and
-`tests/grafana.bats` fails when any other datasource or dashboard asks for a plugin.
+`storage.googleapis.com`. A container that restarts in its pod finds that version in the data
+directory already and makes neither (`pkg/cmd/grafana-cli/commands/install_command.go`). Grafana's
+own server would install the plugin only with its preinstalled-plugins list on, which stays off.
+Grafana loads the plugin only if its signature verifies against the public key Grafana ships.
+Nothing else is fetched, and `tests/grafana.bats` fails when any other datasource or dashboard asks
+for a plugin.
+
+The entrypoint runs under `set -e` and starts Grafana only once the install has succeeded. In a new
+pod, a request that fails stops Grafana from starting until grafana.com answers it. A version the
+listing does not hold stops it until the pin names one it holds: the CLI exits 1 with
+"victoriametrics-logs-datasource v<version> was not returned by the Grafana.com catalog. …", the
+entrypoint stops before Grafana starts, and the container restarts in a loop and never becomes
+ready. A version the catalogue lists as incompatible with the Grafana that runs fails the same way,
+with "victoriametrics-logs-datasource v<version> is not compatible with your Grafana version: …":
+the version's `grafanaDependency` decides it, which the catalogue answers as `isCompatible` only to
+a request that names a Grafana version, as the CLI's does. So does a version the listing holds
+without a package for the node's system or for `any`, with "… is not supported on your system …".
+When the listing holds no version compatible with the Grafana that runs, the CLI fails before it
+looks for the pinned one, with "victoriametrics-logs-datasource is not compatible with your Grafana
+version: …", which names no version of the plugin. While a new pod cannot install its
+version, the Deployment's default rolling update keeps the pod before it: with one replica it starts
+the new pod beside the old one and removes the old one only once the new one is ready. A reboot that
+leaves the old pod in place starts its container again at the version before, and a drain, a
+deletion or an eviction has its ReplicaSet start another pod at that version, which installs while
+the listing still holds it. A Grafana started afresh has no pod before it, and runs no Grafana until
+the pin is one the listing holds.
+
+The catalogue lists the publisher's GitHub releases later than GitHub does, and some never. So
+Renovate reads the plugin's versions from the same listing the install reads, through the custom
+datasource `grafana-plugins` in `.renovate/managers.json5`, which the pin's `# renovate:
+datasource=custom.grafana-plugins depName=victoriametrics-logs-datasource` comment names: it
+proposes only a version the catalogue lists, and the three days a release waits count from the
+catalogue's `createdAt` for that version. Its request names no Grafana version, so the listing it
+reads says nothing of compatibility, and whether a proposed version's `grafanaDependency` admits the
+Grafana that `grafana.yaml` pins is for the reader of the pull request: nothing else checks it, and
+the auto-merge switch in `.renovate/automerge.json5` makes no exception for the plugin. Moving the
+pin by hand needs a version that listing holds. `tests/logs.bats` checks that the pin, the
+datasource and the records name that listing and that nothing else in the configuration gives the
+lookup another datasource, registry or name, and, where docker runs, that Renovate's own lookup over
+a copy of it finds exactly its versions with their dates. That second check skips where no docker
+daemon answers, as in CI, so a person runs `bats tests/logs.bats` on a machine with docker before
+merging an update of the Renovate image the justfile pins.
 
 The dashboards come from the monitoring stack's own chart. The release `grafana-dashboards` installs
 `kube-prometheus-stack` at the version the monitoring application runs, with everything off but the
@@ -2511,7 +3857,12 @@ runs VictoriaLogs, the store, from
 `oci://ghcr.io/victoriametrics/helm-charts/victoria-logs-single`, and `vector` runs Vector, the
 collector, from `oci://ghcr.io/vectordotdev/helm-charts/vector`, each its publisher's chart.
 Neither installs resource definitions. The store's ServiceMonitor and the collector's PodMonitor
-are on, and both applications name `prometheus-operator-crds` in `dependsOn`.
+are on, and both applications name `prometheus-operator-crds` in `dependsOn`. A third, `vmauth`,
+stands in front of the store: every client of the store reaches it through vmauth, with a
+credential of its own ([Who may call the log store](#who-may-call-the-log-store)). The collector
+names `vmauth` in `dependsOn` too, so on a new cluster it starts only once vmauth is Ready, after
+External Secrets, the Grafana operator and the store's release with its volume: the lines of a pod
+deleted before then go with its log files, uncollected.
 
 What is collected, by a collector on every node, control planes included, from files only:
 
@@ -2615,7 +3966,8 @@ The collector mounts all of `/var/log` read-only, as Talos renames the files it 
 read every file there. On a control plane that includes the API server's audit log in
 `/var/log/audit/kube`, which Talos's default audit policy, the one this cluster runs, writes at the
 `Metadata` level: who did what to which object, and when, without request or response bodies, so
-without Secret values. The collector does not ship it: its file source's patterns, `/var/log/*.log`
+without Secret values, except one a request's URL carries, as an `exec`'s command does
+([Ascender](#ascender)). The collector does not ship it: its file source's patterns, `/var/log/*.log`
 and `/var/log/*.log.1`, match files at the top of `/var/log` only, and its pod-log source reads only
 `/var/log/pods`. The node's own audit log, which every node writes at the top, as
 `/var/log/auditd.log`, matches the patterns and is dropped by `drop_auditd_log` above. What keeps
@@ -2638,26 +3990,35 @@ keeps the last two days, on a 20 GiB claim on the cluster's default storage clas
 replicates. Should the volume still fill, to less than 10 MB free, VictoriaLogs' default
 `-storage.minFreeDiskSpaceBytes`, the store turns read-only: it answers every insert with HTTP 429
 Too Many Requests, and its metric `vl_storage_is_read_only` is 1, while the collectors keep the
-lines in their buffers and retry.
+lines in their buffers and retry. `LogCollectorSendFailing` fires once none of a collector's requests
+of the previous 5 minutes has been accepted for 15 minutes in a row, about 20 minutes after its last
+accepted one, so a store away for less than about 20 minutes, the 5-minute rate window plus `for`,
+raises nothing. A collector tries a store that has failed it again within 30 seconds, its sink's
+`distribution.retry_max_duration_secs`, so it resumes within half a minute of the store's return.
 
 What listens, and where:
 
 - the store: port 9428 of its pod's address, plain HTTP, behind the headless Service
-  `victoria-logs`, for the collectors' inserts, its queries and its web interface, its deletion and
-  storage administration, and `/metrics`, which Prometheus scrapes through the ServiceMonitor, all on
-  that one port;
+  `victoria-logs`. Its clients are vmauth, which forwards to it, with the store's own credential,
+  what each client of the log store may send, and Prometheus, which scrapes its `/metrics` through
+  the ServiceMonitor with the same credential ([Who may call the log
+  store](#who-may-call-the-log-store));
+- vmauth: port 8427 of its pods' addresses, plain HTTP, behind the Service `vmauth`, the paths it
+  forwards to the store, for the collectors, Grafana, the route `logs` and `just logs`, each with a
+  credential of its own; and port 8426, its health, its metrics, which Prometheus scrapes through
+  its PodMonitor, and its `/flags`, `/debug/pprof` and `/-/reload`, each of which asks for a key;
+  the Service does not serve 8426;
 - the collector: port 9598 of its pod's address, plain HTTP, its own metrics only, which Prometheus
   scrapes through the PodMonitor. It uses neither the node's network nor a host port, so it reserves
   no port on the nodes.
 
-Cilium carries pod addresses between the nodes in its VXLAN tunnel, so both ports answer the
-cluster's pods and nodes, and no host outside the cluster has a route to them. Neither chart renders
-an ingress, a route or a Service of type LoadBalancer or NodePort, and the nodes' security group
-admits from outside the cluster only the Talos and Kubernetes APIs. Through the public Gateway,
-behind the cluster's sign-in, the store's interface and its queries are reached and nothing else of
-it, by the route of an application of their own, `victoria-logs-route`
-([The log store's interface](#the-log-stores-interface)); the Kubernetes API's service proxy, which
-`just logs` uses, reaches all of it with the cluster's kubeconfig.
+Cilium carries pod addresses between the nodes in its VXLAN tunnel, and no host outside the cluster
+has a route to them. Neither chart, nor vmauth's application, renders an ingress, a route or a
+Service of type LoadBalancer or NodePort, and the nodes' security group admits from outside the
+cluster only the Talos and Kubernetes APIs. Through the public Gateway, behind the cluster's sign-in,
+the store's interface and its queries are reached and nothing else of it, by the route of an
+application of their own, `victoria-logs-route`, through vmauth ([The log store's
+interface](#the-log-stores-interface)).
 
 Reading the logs, in a browser at `https://logs.<domain>/` once signed in
 ([The log store's interface](#the-log-stores-interface)), or with the cluster's kubeconfig:
@@ -2666,68 +4027,244 @@ Reading the logs, in a browser at `https://logs.<domain>/` once signed in
   matches, from the last 15 minutes and at most 200 unless told otherwise (`--since` is a whole
   number with `s`, `m`, `h`, `d` or `w`), one line each, the oldest first: the time, the namespace
   and pod, or the node for a Talos service's record, and the message, with its newlines made spaces
-  and its control characters, C0 and C1, left out. It asks the Kubernetes API for VictoriaLogs'
-  `/select/logsql/query` through the API's service proxy to the Service `victoria-logs`, so no port
-  is forwarded and none is left behind. Of what kubectl prints it shows only the message of an error
-  the API server or the store answered with, without an address; its warnings and the error of a
-  connection that failed can name the API server's address and are never shown. A query the store
-  refuses fails with the store's own message: kubectl keeps the body of a 400 out of its error, so
-  the recipe asks again with `-v=4` and reads the body from the Status kubectl logs, in a file it
-  never shows. kubectl keeps only a body's first 2048 bytes, and the recipe says so after a message
-  that long. Any other error the store or the API answers with, a store that is away or not ready,
-  a request the cluster's access rules deny or a Status without a reason, shows kubectl's message
-  for it; credentials the API server refuses also point to `just cluster-kubeconfig`. An API that
-  does not answer fails with that said. The query is LogsQL, such as `talos_service:kubelet`,
-  `kubernetes.pod_namespace:monitoring error` or `node:node-1 talos_service:kernel`; a query that
-  ends in a `stats` pipe prints its records as JSON. With the limit, VictoriaLogs answers with the
-  newest records, newest first, unless the query's pipes change the records' order, as `sort` and
-  `stats` do: then with the first the pipes give, in their order. The recipe sorts what it gets by
-  time, oldest first.
+  and its control characters, C0 and C1, left out. It asks VictoriaLogs' `/select/logsql/query`
+  through vmauth as the user `operator`: one `kubectl get secret` reads the key `authorization` of
+  the Secret `vmauth-operator` in `monitoring`, that user's Basic value, into a variable; `kubectl
+  port-forward` forwards a port it chooses on 127.0.0.1 to the Service `vmauth`; and curl asks
+  through it with the value as the header `Authorization`, given through a file descriptor. The
+  value is never printed, never written to a file and never an argument of a command, and the
+  forward is stopped on every exit, Ctrl-C included. So the kubeconfig must be able to read that
+  Secret and forward a port in `monitoring`. A query the store refuses fails with the store's own
+  message, which vmauth relays in its answer's body, whole; a credential vmauth refuses fails
+  saying so and naming the Secret; any other answer vmauth gives, as when the store is away, shows
+  its status and vmauth's message. A Secret the kubeconfig may not read or that is missing, a
+  forward that does not start and a vmauth that does not answer through it each fail with a reason
+  of their own; credentials the API server refuses also point to `just cluster-kubeconfig`, and an
+  API that does not answer fails with that said. Of what kubectl and curl print it shows only those
+  messages, without an address, a URL or a control character; their warnings and the errors of a
+  connection that failed can name an address and are never shown. The query is LogsQL, such as
+  `talos_service:kubelet`, `kubernetes.pod_namespace:monitoring error` or
+  `node:node-1 talos_service:kernel`; a query that ends in a `stats` pipe prints its records as
+  JSON. With the limit, VictoriaLogs answers with the newest records, newest first, unless the
+  query's pipes change the records' order, as `sort` and `stats` do: then with the first the pipes
+  give, in their order. The recipe sorts what it gets by time, oldest first.
 - In Grafana, behind `just grafana`, the datasource VictoriaLogs and the dashboard Logs, in the
   folder Logs: the volume of logs by namespace and by node, and a logs panel for the namespaces and
   pods chosen in the two variables above it. The datasource is the `GrafanaDatasource`
-  `victoria-logs`, of the plugin's type, to the Service's port 9428 through Grafana's server, with
-  the plugin pinned as [Grafana](#grafana) says. The dashboard's JSON is
-  `grafana/app/dashboards/logs.json`, which kustomize makes the ConfigMap the `GrafanaDashboard`
-  `logs` loads.
+  `victoria-logs`, of the plugin's type, to vmauth's Service on 8427 through Grafana's server, as
+  the user `grafana` with the password of the Secret `vmauth-grafana`, with the plugin pinned as
+  [Grafana](#grafana) says. While that Secret is missing, as on a new cluster until vmauth's
+  application writes it, the Grafana operator cannot build the datasource and tries again after a
+  wait that doubles each time, up to about 17 minutes, controller-runtime's default, as its watch of
+  Secrets does not see this one; so on a new cluster the datasource can come that long after the
+  Secret. The dashboard's JSON is `grafana/app/dashboards/logs.json`, which
+  kustomize makes the ConfigMap the `GrafanaDashboard` `logs` loads.
 
-`tests/logs.bats` builds both applications as Flux applies them, renders their pinned charts and
+`tests/logs.bats` builds the applications as Flux applies them, renders their pinned charts and
 checks each of these. `just vector-check` renders the collector's configuration with
-`scripts/vector-config` and has Vector itself, in the image the collector runs, validate it and run
-its unit tests, `tests/vector/talos-lines.yaml`, which hold a line of each format above from each
-service named with it, and one of udevd's, a kernel audit line, the records of one event of the
-node's audit log and a pod's record with many labels, and many of its node's. Vector's unit tests
-cannot see a sink, so `tests/logs.bats` checks that each source reaches a sink along one path only,
-the store's through the transforms the unit tests run, that each scenario's unit test starts at the
-first transform on its path and watches the last, whichever transform that is, and that the unit
-tests find a line of each of those services at the last transform on Talos's path and none of the
-audit log's. `just logs` runs in `tests/logs.bats` against a
-recording kubectl shaped like kubectl v1.37's output. The image
+`scripts/vector-config` and has Vector itself, in the image the collector runs and with the
+environment its DaemonSet gives it, validate it and, with the collector's credential left out of
+that environment, refuse it as a configuration error naming `VMAUTH_PASSWORD`, which shows that
+this Vector fills the sink's placeholder from its environment; the module of `just ci` runs the
+validation and the unit tests, not that refusal, so a person runs `just vector-check` before
+merging an update of the collector's chart. The unit tests are
+`tests/vector/talos-lines.yaml`, which hold a line of each format above from each service named
+with it, and one of udevd's, a kernel audit line, the records of one event of the node's audit log
+and a pod's record with many labels, and many of its node's. Vector's unit tests cannot see a sink,
+so `tests/logs.bats` checks that each source reaches a sink along one path only, the store's
+through the transforms the unit tests run, that each scenario's unit test starts at the first
+transform on its path and watches the last, whichever transform that is, and that the unit tests
+find a line of each of those services at the last transform on Talos's path and none of the audit
+log's. `just logs` runs in `tests/logs.bats` against a recording kubectl shaped like kubectl v1.37's
+output, which reads the Secret and forwards a port, and a recording curl that answers through that
+forward alone, as vmauth does. The image
 is `vector_image` in the justfile, pinned by the digest of its image index under a
 `# renovate: datasource=docker depName=…` comment: Renovate's custom manager for the justfile moves
 its tag and digest, in the same pull request as the chart, and `tests/logs.bats` fails, saying what
 to set, while it is not the image the chart runs.
+
+### Who may call the log store
+
+VictoriaMetrics' guidance for VictoriaLogs is to keep the store on a trusted network and to put
+vmauth in front of it, which authenticates each client, with a credential of its own, and routes it
+by path ([Security and load balancing](https://docs.victoriametrics.com/victorialogs/security-and-lb/),
+[vmauth](https://docs.victoriametrics.com/victoriametrics/vmauth/)). The application `vmauth`
+(`apps/base/monitoring/vmauth/`) does that: vmauth v1.156.0, of VictoriaMetrics, the release
+VictoriaLogs v1.54.0 builds on, its Alpine image pinned by tag and digest, as a Deployment of two
+replicas on different nodes, replaced one at a time with neither down, and a disruption budget that
+keeps one running while a drain evicts the other: every client reaches the store only through
+vmauth, so one pod serves while the other is replaced by a rollout, a restart after a rotation or a
+drain. Its pods meet the restricted
+level, as user and group 65534 with a read-only root, no capability and no token for the API
+server; in a local run of the image, read-only, offline and as that user, it wrote nothing and took
+about 12 MiB serving 200 requests, from which its requests and memory limit are set, not measured on
+the cluster. Its configuration is `app/auth.yml`, which kustomize makes a ConfigMap whose name
+changes with its content, so a change rolls the pods.
+
+What vmauth calls on its own is the store alone. Each call it can make, by the flag or setting that
+turns it on (`app/vmauth/auth_config.go`, `lib/pushmetrics/pushmetrics.go` and
+`lib/flagutil/password.go` of VictoriaMetrics v1.156.0), and its state:
+
+| Call | Variable | State |
+| --- | --- | --- |
+| The store, for each request vmauth forwards, by its Service's name, looked up as a connection opens | `url_prefix` of each entry of `auth.yml` | on: its one backend |
+| The backends' addresses, looked up again every 10 seconds | `-discoverBackendIPs` | off, its default |
+| Its configuration, read from an address | `-auth.config` | a file of the ConfigMap |
+| Its keys, read from an address | `-flagsAuthKey`, `-pprofAuthKey`, `-reloadAuthKey` | files of the Secret `vmauth-keys` |
+| Its metrics, pushed to an address | `-pushmetrics.url` | not set |
+
+The pinned binary ran offline with these arguments and configuration, in a network namespace with
+nothing but a loopback, whose resolver was a listener that logged each query. Through its start, 20
+seconds idle, its health, its metrics, its flags without their key, a request without a credential
+and one on a path its user has no route to, the listener logged no query; each request vmauth then
+forwarded logged a lookup of the store's Service, the call the probe was shown to catch. A person
+loses nothing to what is off: vmauth has no interface of its own.
+
+Every client of the store sends to vmauth's Service, `vmauth` on 8427, with Basic Auth, and vmauth
+forwards to the store's Service, `victoria-logs` on 9428, only the paths it gives that client:
+
+- **Who may insert.** The collector, as the user `vector`, on `/insert/elasticsearch/_bulk` alone,
+  the bulk API its sink sends to.
+- **Who may query.** Grafana, as `grafana`; the route `logs`, as `logs-route`, the credential Envoy
+  Gateway puts in each request the route sends on ([The log store's
+  interface](#the-log-stores-interface)); and `just logs`, and with it `just network-audit`, as
+  `operator`. Each on the interface and its files, `/select/vmui` and the paths under
+  `/select/vmui/`, the query handlers, `/select/logsql/<name>`, the build information,
+  `/select/buildinfo`, and the tenants, `/select/tenant_ids`: what the route sends on, the Grafana
+  plugin asks and `just logs` uses. The store answers `/select/tenant_ids` with 403 for a request
+  that names a tenant, which every request vmauth forwards does (`ProcessTenantIDsRequest` in
+  `app/vlselect/logsql/logsql.go` of VictoriaLogs v1.54.0), so the interface offers fields for a
+  tenant in place of a list of them, and the Grafana plugin gets the store's refusal in place of a
+  list; whatever tenant either names, vmauth sends the default one.
+- **Nothing else, for anyone.** vmauth sends nothing to deletion, storage administration, the
+  internal paths of a cluster of stores or the store's own endpoints, its metrics, flags, profiles
+  and health, nor a writer for a reader or a read for the collector. It matches a path whole, once
+  it has removed dot segments and doubled slashes from it, against each of the user's patterns
+  (`app/vmauth/auth_config.go` and `target_url.go`). It answers an `OPTIONS` request, a browser's
+  CORS preflight, itself, with 204 and nothing forwarded (`lib/httpserver/httpserver.go`); it
+  refuses any other request without a credential with 401, and one with a credential it does not
+  know with 401 after a wait of two to three seconds; it
+  answers a known client on a path it gives that client no route to with 400, a missing route
+  (`app/vmauth/main.go`). There is no user without a credential.
+- **What it sends on.** With every request it forwards, vmauth sets the header `Authorization` to
+  the store's own credential, in place of the client's, and `AccountID` and `ProjectID` to 0, the
+  default tenant, in place of any the client sets, so no client picks a tenant. Prometheus presents
+  the same credential when it scrapes the store, through the ServiceMonitor's `basicAuth`.
+- **Its own endpoints.** On 8426, which the Service does not serve: `/health`, which its probes
+  ask, and `/metrics`, which its PodMonitor scrapes, need no credential; `/flags`, `/debug/pprof/…`
+  and `/-/reload` each ask for their key, a file of the Secret `vmauth-keys`. On 8427 none of them is
+  served, and a request for one is a path like any other.
+- **What it logs and counts.** One JSON line for each request it refuses as a missing route or
+  cannot forward to the store, with the client's address and the path and query it asked, and never
+  a credential; a request it refuses with 401 it does not log, as it does not log the tokens it
+  refuses (`-logInvalidAuthTokens` is off), and its configuration dumps no request and keeps no
+  access log. Its metrics count each user's requests, `vmauth_user_requests_total{username}`, and
+  what it refused, by reason, `vmauth_http_request_errors_total{reason}`: `invalid_auth_token` for a
+  credential it does not know, `missing_route` for a known one on another path.
+- **When a pod goes.** Kubernetes takes a pod out of the Service's ready endpoints as soon as its
+  deletion starts and sends it TERM at the same time; vmauth keeps serving on 8427 for 5 seconds
+  after TERM, `-http.shutdownDelay`, so a request sent before every node has the change still finds
+  it, and then has 7 seconds for what it holds. The delay leaves `/health` of 8426 at 200, so the
+  probes take no part in it.
+
+| Credential | Who makes it | Where it lives | Who reads it, and how | Once its Secret is made again |
+|------------|--------------|----------------|-----------------------|-------------------------------|
+| The collector's, user `vector` | External Secrets' `Password` generator, once, in the cluster; no person | the Secret `vmauth-vector`, key `password`; nothing in the secret store | vmauth and the collector's pods, each from its environment, when they start | restart vmauth, then the collector |
+| Grafana's, user `grafana` | the same | the Secret `vmauth-grafana`, key `password` | vmauth, from its environment when it starts; the Grafana operator, which puts it into the datasource each time it applies it, every minute | restart vmauth; the datasource follows within a minute |
+| The route's, user `logs-route` | the same | the Secret `vmauth-logs-route`, keys `password` and `credential`, its Basic value | vmauth, `password`, from its environment when it starts; Envoy Gateway, `credential`, which it puts in each request the route sends on | restart vmauth; the proxies follow by themselves |
+| The operator's, user `operator` | the same | the Secret `vmauth-operator`, keys `password` and `authorization`, its Basic value | vmauth, `password`, from its environment when it starts; `just logs`, `authorization`, through the kubeconfig at each run | restart vmauth |
+| The store's, user `victoria-logs` | the same | the Secret `victoria-logs-auth`, keys `username`, `password` and `authorization`, its Basic value | vmauth, `authorization`, from its environment when it starts; Prometheus, `username` and `password`, from the configuration the Prometheus operator writes | restart vmauth; the scrape follows by itself |
+| vmauth's keys | the same | the Secret `vmauth-keys`, keys `flags`, `pprof` and `reload` | vmauth, from files it reads again while it runs | nothing to do |
+
+Each value is 32 characters hex-encoded into 64 hexadecimal digits, so none can be read as YAML or
+as one of vmauth's placeholders, and the Basic values are formed by each ExternalSecret's template
+from the generated password, which the template keeps beside them. None is in a ConfigMap, a values
+file, a command line, a Flux variable or the secret store: vmauth's configuration holds a
+placeholder for each, which vmauth fills from its environment, and the Deployment sets each from
+its Secret's key, never optional, so a pod does not start without them; the collector's sink names
+`${VMAUTH_PASSWORD}`, which Vector fills from its environment, with interpolation allowed, which it
+is not by default; Grafana's datasource names `${password}`, which the operator fills from the
+Secret and which the object keeps past Flux's own substitution by opting out of it.
+`tests/log-store-access.bats` builds and renders the five applications and fails on a Secret, a
+value that is not a placeholder or a template, or an argument that carries a credential.
+
+A credential is made once: each ExternalSecret has `refreshPolicy: CreatedOnce`, so External
+Secrets writes its Secret on the first sync and not on a schedule, and writes it again, with a new
+value, only when the Secret is changed or deleted or the ExternalSecret is made again
+(`docs/api/externalsecret.md` of External Secrets v2.15.0). So a credential is rotated by deleting
+its Secret, `kubectl --namespace monitoring delete secret <name>`, and then:
+
+- vmauth and the collector read theirs from their environment when they start, so an operator
+  restarts them: `kubectl --namespace monitoring rollout restart deployment/vmauth`, and
+  `daemonset/vector` for the collector's;
+- the others follow the Secret by themselves: the Grafana operator applies the datasource again
+  every minute, its `resyncPeriod`, reading the Secret each time, as its watch of Secrets sees only
+  those labelled for it, which this one is not (`main.go` of grafana-operator v5.25.0, at its default
+  `ENFORCE_CACHE_LABELS`); Envoy Gateway follows each Secret an `HTTPRouteFilter` names
+  (`internal/provider/kubernetes/predicates.go` of v1.10.0); the Prometheus operator writes
+  Prometheus' configuration again when a Secret of Prometheus' own namespace changes
+  (`pkg/operator/informers.go` of v0.95.2); `just logs` reads its Secret at each run; and vmauth
+  reads its keys' files again while it runs.
+
+Reloader does not apply: it restarts a workload when a Secret's data changes, not when the Secret
+is made ([The kube-system baseline](#the-kube-system-baseline)), and none of these workloads is
+annotated for it. Until both sides of a user's credential hold the new value, vmauth refuses that
+user with 401. For a reader that is a refused request. For the collector's credential it loses lines:
+the sink does not retry a 401, so the lines of each request vmauth refuses are dropped, and counted
+in `vector_component_discarded_events_total` with `intentional="false"`, which
+`LogCollectorDiscardingEvents` reads. The window is shortest when vmauth is restarted first and,
+once both its pods are available, every collector pod is deleted at once, `kubectl --namespace
+monitoring delete pods --selector app.kubernetes.io/name=vector`, so that the DaemonSet starts them
+all again together, where a rollout restart replaces them node after node; a collector that is not
+running loses nothing, as its lines wait in the files.
+
+`tests/log-store-access.bats` builds vmauth, the store, the collector, Grafana and the route as Flux
+applies them and renders their charts, and checks each of these: each client's address and
+credential, the configuration parsed, each user's patterns evaluated anchored, as vmauth matches
+them, against the paths each may and may not reach, the credentials, the pod, and the store's scrape
+and pod. Where a docker daemon answers, it also runs the store and vmauth beside it, each from the
+image the render and the build name, without network and with fresh credentials formed as the
+ExternalSecrets form them, and sends each client's requests to vmauth: what each may do is served
+and the rest refused, as vmauth's metrics count it. Without docker, as under `just ci` and in CI,
+that proof skips, so CI does not show that a newer vmauth or store still serves each client its own
+paths and refuses the rest; `bats tests/log-store-access.bats` where a docker daemon answers does,
+and a person runs it before merging an update of vmauth's image or of the store's chart.
 
 ### The log store's interface
 
 VictoriaLogs' own query interface is at `https://logs.<domain>/`, on the public Gateway's `https`
 listener, behind the cluster's sign-in ([Sign-in](#sign-in)). The application `victoria-logs-route`
 (`apps/base/monitoring/victoria-logs-route/`) holds it, shaped as `demo/hello-sso`: its `app/` holds
-the one `HTTPRoute` `logs`, and its `ks.yaml` adds `components/sso` with `SSO_ROUTE` and
-`SSO_HOSTNAME` both `logs`, so the component makes the `SecurityPolicy` `logs`, which asks
-oauth2-proxy about each request of the route and does not fail open, and the route `logs-oauth2`,
-which sends `/oauth2/` on the same host to oauth2-proxy. Its `targetNamespace` is `monitoring`, the
-store's, which carries `k8s-gitops/gateway: public`, and the `ReferenceGrant` `oauth2-proxy` names
-`monitoring`. It names `gateway-public`, `victoria-logs` and `oauth2-proxy` in `dependsOn` and
-waits; `victoria-logs` waits for its release, so the route is applied once the store answers. Its
-own Ready says that its objects are applied, not that the Gateway took them: an HTTPRoute and a
-SecurityPolicy report their state per parent, where Flux's wait does not read it, so
-`just gateway-check`, which counts the routes the Gateway accepted and names the DNS record of each
-host, is what shows it. The proxies' egress allows the store's pod on 9428 and no other pod or port
-of `monitoring` ([What the namespaces let through](#what-the-namespaces-let-through)), which holds
-once the agents enforce the policies rather than audit them ([Service addresses](#service-addresses)
-says which they do); the route sends nothing else there either way. external-dns publishes the name
-as for every route on the Gateway ([DNS records](#dns-records)).
+the one `HTTPRoute` `logs`, its `HTTPRouteFilter` `logs` and its `Probe` ([Probes](#probes)), and
+its `ks.yaml` adds `components/sso` with `SSO_ROUTE` and `SSO_HOSTNAME` both `logs`, so the component
+makes the `SecurityPolicy` `logs`, which asks oauth2-proxy about each request of the route and does
+not fail open, and the route `logs-oauth2`, which sends `/oauth2/` on the same host to oauth2-proxy.
+Its `targetNamespace` is `monitoring`, the store's, which carries `k8s-gitops/gateway: public`, and
+the `ReferenceGrant` `oauth2-proxy` names `monitoring`. The route sends what it admits to vmauth's
+Service on 8427, through the filter, which puts the value of the key `credential` of the Secret
+`vmauth-logs-route`, the Basic value of vmauth's user `logs-route`, in the header `Authorization` in
+place of any the client sent; Envoy Gateway runs the filter after the sign-in's external
+authorisation, so it has the last word on that header (`internal/xds/translator/httpfilters.go` of
+Envoy Gateway v1.10.0). vmauth admits that user on the interface's and the query paths alone, and
+sends them to the store with the store's own credential ([Who may call the log
+store](#who-may-call-the-log-store)). Without the Secret or its key the filter is invalid, and the
+rule answers 500 and sends nothing on (`internal/gatewayapi/filters.go`). It names `gateway-public`,
+`vmauth`, `oauth2-proxy` and `blackbox-exporter` in `dependsOn` and waits; `vmauth` waits for its
+pods, which start only with every Secret they read, the route's among them. That vmauth admits the
+route's credential rests on that Secret, which the filter and vmauth read alike and which is
+written once, and not on the order: an application's files reach Flux in an artifact of their own
+and its Kustomization, `dependsOn` included, through `cluster`, so a change to both can apply
+either first, and Flux compares a dependency's revision only between Kustomizations of one source
+(`checkDependencies` in kustomize-controller). The collector is in the same case with
+`vmauth-vector`. The route's own Ready says that its objects are applied, not that the
+Gateway took them: an HTTPRoute and a SecurityPolicy report their state per parent, where Flux's
+wait does not read it, so `just gateway-check`, which counts the routes the Gateway accepted and
+names the DNS record of each host, is what shows it. The proxies' egress allows vmauth's pods on
+8427 and no other pod or port of `monitoring` ([What the namespaces let
+through](#what-the-namespaces-let-through)), which holds once the agents enforce the policies rather
+than audit them ([Service addresses](#service-addresses) says which they do); the route sends
+nothing else there either way. external-dns publishes the name as for every route on the Gateway
+([DNS records](#dns-records)).
 
 - **Reaching it.** The first visit signs in through dex and GitHub, as for every route that opts in
   ([Putting a route behind it](#putting-a-route-behind-it)). oauth2-proxy returns the person to
@@ -2741,16 +4278,20 @@ as for every route on the Gateway ([DNS records](#dns-records)).
 - **What is routed, and why each path reads.** The route has two rules, which `tests/logs.bats`
   pins in full. `/`, exactly, is redirected with 302 to `/select/vmui/` and sent nowhere: it is the
   store's help page, which links its metrics and its flags. The other rule sends to the Service
-  `victoria-logs` on 9428, with no filter and no method match, the paths that are, by whole
+  `vmauth` on 8427, through the filter `logs` and with no method match, the paths that are, by whole
   segments, under `/select/vmui` or `/select/logsql`, or exactly `/select/buildinfo` or
-  `/select/tenant_ids`. The store dispatches on the path, with each `//` made `/`, by the same
+  `/select/tenant_ids`; vmauth forwards them to the store, the same paths it gives the user
+  `logs-route`. The store dispatches on the path, with each `//` made `/`, by the same
   literal prefixes and exact paths, and each handler under them only reads, whatever the method,
   the queries taking their arguments from the query string or the form body: `/select/vmui`
   redirects to `/select/vmui/`, under which the store serves the interface's files embedded in it;
   under `/select/logsql/` it runs the queries `query`, `hits`, `facets`, `field_names`,
   `field_values`, `stats_query`, `stats_query_range`, `stream_field_names`, `stream_field_values`,
   `stream_ids`, `streams`, `query_time_range` and `tail`, and answers any other name with an error;
-  `/select/buildinfo` gives its version and `/select/tenant_ids` the tenants that hold logs. A path
+  `/select/buildinfo` gives its version and `/select/tenant_ids` the tenants that hold logs, to a
+  request that names no tenant, where vmauth names the default one, so here the store refuses it,
+  403, and the interface offers fields for a tenant in place of a list ([Who may call the log
+  store](#who-may-call-the-log-store)). A path
   under these that ends in `/favicon.ico` gets the HTTP server's icon. The pinned release's
   interface works out its server from its own address, `window.location.href` with `/select/vmui/…`
   cut off, so it calls its own origin, and it asks only `/select/logsql/…`, with `POST`,
@@ -2779,6 +4320,8 @@ as for every route on the Gateway ([DNS records](#dns-records)).
 
   A path that differs from a routed one in letter case, by a suffix such as `/select/vmuix`, or by
   a trailing slash or more after an exact one, such as `/select/buildinfo/`, matches nothing either.
+  vmauth refuses each of these paths a second time: it gives the user `logs-route` none of them,
+  and answers one as a missing route ([Who may call the log store](#who-may-call-the-log-store)).
 - **Why normalisation cannot turn a routed path into a writer.** The pinned Envoy Gateway, v1.10.0,
   normalises the path before routing on every listener, as RFC 3986 says, removing dot segments
   (`internal/xds/translator/listener.go`), and with the ClientTrafficPolicy's defaults, which the
@@ -2786,8 +4329,10 @@ as for every route on the Gateway ([DNS records](#dns-records)).
   with an escaped slash, `%2F` or `%5C`, with a redirect to the path unescaped, which comes back
   through the Gateway and is normalised and matched again (`escapedSlashesAction:
   UnescapeAndRedirect`, `internal/gatewayapi/listener.go`). The route matches the normalised path,
-  and that is the path the store receives: one that starts with the literal characters of a routed
-  prefix or is a routed exact path. The store resolves no dot segment and dispatches on the same
+  and that is the path vmauth receives, cleans of dot segments and doubled slashes again, matches
+  against the user `logs-route`'s patterns and sends on, so the path the store receives is one that
+  starts with the literal characters of a routed prefix or is a routed exact path. The store
+  resolves no dot segment and dispatches on the same
   literal prefixes, the writers' first, so a path that starts `/select/` never reaches an insert,
   delete or storage handler, whose prefixes it cannot have, and is read or refused.
 - **What a forged cross-site request can do.** oauth2-proxy's session cookie is `Secure`, `HttpOnly`
@@ -2812,9 +4357,11 @@ as for every route on the Gateway ([DNS records](#dns-records)).
   for a route applies: 15 seconds from the end of the request to the end of the answer. A query that
   runs longer, and a live tail, which the store keeps open for as long as the client stays, end at
   the Gateway after 15 seconds, while the store allows a query 30 (`-search.maxQueryDuration`, its
-  default). `just logs` and Grafana do not pass the Gateway.
-- **The other ways in.** `just logs` and Grafana's Logs dashboard, behind `just grafana`, remain,
-  need no sign-in, only the cluster's kubeconfig, and read the store as above.
+  default) and vmauth waits 5 minutes for the store's answer (`-responseTimeout`, its default).
+  `just logs` and Grafana do not pass the Gateway.
+- **The other ways in.** `just logs` and Grafana's Logs dashboard, behind `just grafana`, remain and
+  need no sign-in, only the cluster's kubeconfig; each reads the store through vmauth with a
+  credential of its own, on the same paths ([Who may call the log store](#who-may-call-the-log-store)).
 - **Until the owner has seeded the sign-in** (dex's GitHub client and oauth2-proxy's list, [What the
   owner does, in order](#what-the-owner-does-in-order)), `oauth2-proxy` is not Ready, so
   `victoria-logs-route`, which waits for it, is not applied: there is no route and no DNS record,
@@ -2827,9 +4374,11 @@ as for every route on the Gateway ([DNS records](#dns-records)).
 whole spec, the sign-in route, the grant and the host following the domain; both rules in full, and,
 as Gateway API matches a route, that the interface's requests are sent on and the writers, the
 administration and the server's own paths are not; that no route the tree builds or its charts
-render, and no Grafana, reaches the store past the sign-in, and that no grant of `monitoring` lets
-another namespace's route refer to its Services, as one could through a second Service that selects
-the store's pod; the overlay entry and the refusals without the store, the Gateway or the sign-in;
+render, and no Grafana, reaches the store's or vmauth's Service past the sign-in, that no filter but
+`logs` injects the route's credential, and that no grant of `monitoring` lets another namespace
+refer to its Services or Secrets, as a route could through a second Service that selects the
+store's or vmauth's pods, or a filter take the route's credential; the overlay entry and the
+refusals without vmauth, the Gateway or the sign-in;
 and that the route's header records, in `# victoria-logs-paths:` beside its `Source:` line, the
 release its paths were read from, which must be the `appVersion` of the store's pinned chart. A new
 chart therefore fails it, saying what to read again and what to set, and `.renovate/by-hand.tsv`
@@ -2841,11 +4390,14 @@ the session and the answers, is not proved offline; the first sign-in is the pro
 `apps/base/cert-manager/cert-manager/` installs cert-manager, which issues and renews the TLS
 certificates applications and gateways ask for, from the issuers they name (ADR 0006). The
 namespaced issuers serve their own application alone: `cluster-ca-bootstrap` signs the cluster's
-own CA, below; OpenBao's own issuers sign OpenBao's listener certificate ([OpenBao](#openbao)); and
-the Barman Cloud plugin's self-signed `Issuer` signs the plugin's two certificates
-([PostgreSQL](#postgresql)). The issuers any namespace may name are the cluster's three
-`ClusterIssuer`s: `cluster-ca` and the ACME issuers `letsencrypt-staging` and
-`letsencrypt-production`, below.
+own CA, below; OpenBao's own issuers sign OpenBao's listener certificate ([OpenBao](#openbao)); the
+storage cluster's `linstor-ca-bootstrap` signs the authority of LINSTOR's API and the internal
+authority, `linstor-api-ca` signs, from the first, the certificates of the controller and its
+clients, and `linstor-internal-ca`, from the second, those of the controller and the satellites for
+the link between them ([Who may call LINSTOR](#who-may-call-linstor)); and the Barman Cloud plugin's
+self-signed `Issuer` signs the plugin's two certificates ([PostgreSQL](#postgresql)). The issuers any
+namespace may name are the cluster's three `ClusterIssuer`s: `cluster-ca` and the ACME issuers
+`letsencrypt-staging` and `letsencrypt-production`, below.
 
 It runs in its own namespace, `cert-manager`, at the restricted Pod Security level, from the
 publisher's chart in `oci://quay.io/jetstack/charts`; its leader election leases are there too, so
@@ -2954,7 +4506,9 @@ A `ClusterIssuer` reads its Secrets from the controller's cluster resource names
   broken spends staging's. Production's are trusted by a client with the usual public roots, and its
   limits are the ones a broken setup can exhaust. The procedure for a new cluster is to choose staging first, move to production
   once staging has issued the certificate and `just gateway-check` passes, and go back to staging
-  to test anything again. Both issuers register their account with the CA as soon as they exist.
+  to test anything again. While on staging, the probes of the public hostnames do not verify the
+  certificate, as no client trusts that chain ([Probes](#probes)). Both issuers register their
+  account with the CA as soon as they exist.
 - **Production's rate limits.** Let's Encrypt's [rate limits](https://letsencrypt.org/docs/rate-limits/)
   as Let's Encrypt publishes them: 50 certificates per registered domain every 7 days; 5
   certificates for the exact same set of names every 7 days, which no override raises; and 5
@@ -2979,8 +4533,10 @@ A `ClusterIssuer` reads its Secrets from the controller's cluster resource names
 The `Certificate` `public-wildcard` of `gateway-public` names the `ClusterIssuer` the variable
 `PUBLIC_ISSUER` gives, `cluster-ca` when it is not set, so a cluster that says nothing keeps the
 cluster's own authority. A cluster sets it in one place, a patch in its overlay
-(`apps/overlays/<cluster>/kustomization.yaml`) on the Kustomization `gateway-public`, which in
-`lab-sto2` reads:
+(`apps/overlays/<cluster>/kustomization.yaml`) on the Kustomization `gateway-public`, and repeats
+the name for the probes of its public hostnames, which verify the certificate against the trust of
+its issuer, in a patch on the Kustomization `blackbox-exporter` ([Probes](#probes)). In `lab-sto2`
+they read:
 
 ```yaml
 patches:
@@ -2992,6 +4548,12 @@ patches:
       - op: add
         path: /spec/postBuild
         value: {substitute: {PUBLIC_ISSUER: letsencrypt-production}}
+  - target: {group: kustomize.toolkit.fluxcd.io, kind: Kustomization, name: blackbox-exporter}
+    patch: |-
+      apiVersion: kustomize.toolkit.fluxcd.io/v1
+      kind: Kustomization
+      metadata: {name: blackbox-exporter}
+      spec: {postBuild: {substitute: {PROBE_ISSUER: letsencrypt-production}}}
 ```
 
 It is a patch and not a `cluster-config` key because the choice is part of the tree and reviewed in
@@ -3002,12 +4564,19 @@ a cluster that chooses an issuer other than `cluster-ca` without that dependency
 overlay names the dependency without listing the application.
 
 `lab-sto2` chooses production. A new cluster starts with `PUBLIC_ISSUER: letsencrypt-staging`, and
-once the staging certificate is Ready and `just gateway-check` passes, changes that one line to
-`PUBLIC_ISSUER: letsencrypt-production` in a pull request of its own. cert-manager then issues the
-certificate again from production, with a new private key, into the same Secret, and the listener
-serves the new certificate when it is Ready; the old one is served until then. Going back to
-staging for testing is the same one-line change the other way (the rate limits in [The ACME
-issuers](#the-acme-issuers)).
+`PROBE_ISSUER: letsencrypt-staging` for its probes, and once the staging certificate is Ready and
+`just gateway-check` passes, changes both to `letsencrypt-production` in a pull request of its own.
+cert-manager then issues the certificate again from production, with a new private key, into the
+same Secret, and the listener serves the new certificate when it is Ready; the old one is served
+until then. Going back to staging for testing is the same change the other way (the rate limits in
+[The ACME issuers](#the-acme-issuers)). On staging the probes do not verify the certificate, as no
+client trusts that chain; on production they verify it against the public roots again
+([Probes](#probes)). The two do not change together: the Gateway waits for the exporter, so the
+exporter takes the new issuer's trust first, and the proxies serve the old certificate until the new
+one is issued. A change to production, or to the cluster's own CA, therefore fails the probe of
+every hostname over https in between, as the old certificate does not verify against the new trust,
+and `PublicEndpointDown` fires for each when the issuance takes more than 5 minutes; it clears with
+the new certificate. A change to staging fails none, as the probes then verify nothing.
 
 - **What a client sees.** `lab-sto2` serves the production certificate, which a client with the usual
   public roots trusts with nothing to hand it. With the cluster's own CA or staging, a client outside refuses the
@@ -3130,7 +4699,8 @@ the chart makes no disruption budget. Its chart serves no metrics and has no mon
 Persistent volumes come from LINSTOR, run by the Piraeus operator, on the workers' data volumes
 (ADR 0011). Two applications in `apps/base/piraeus-datastore/` hold it; their namespace admits
 privileged pods, as LINSTOR's satellites, the CSI node plugin, the NFS server and the HA controller
-run privileged with host paths; they are its entries in `pod-security-exceptions.yaml`. The
+run privileged with host paths, and the satellites and the CSI node plugin on the host network;
+they are its entries in `pod-security-exceptions.yaml`. The
 operator's own pod, the only one the render holds, passes restricted, and the LinstorCluster gives
 the LINSTOR controller, the CSI controller and the affinity controller the security context
 restricted requires ([Pod Security](#pod-security)).
@@ -3142,18 +4712,23 @@ restricted requires ([Pod Security](#pod-security)).
   `helm.sh/resource-policy: keep`, so Helm leaves them when the release is uninstalled. Its
   `ks.yaml` sets `wait`: it is Ready once the operator is.
 - `linstor-cluster` holds the storage cluster: the `LinstorCluster`, the
-  `LinstorSatelliteConfiguration`s, the StorageClasses and the VolumeSnapshotClass. It names
-  `piraeus-operator` and `snapshot-controller` in `dependsOn`, as the operator's webhooks validate
-  its objects and every StorageClass of LINSTOR's driver, and the VolumeSnapshotClass needs the
-  snapshot definitions ([Resource definitions](#resource-definitions)). Its `ks.yaml` sets `wait`
-  and health check expressions, as the operator gives these kinds no Ready condition and no
+  `LinstorSatelliteConfiguration`s, the StorageClasses, the VolumeSnapshotClass, and the authorities
+  and the issuers of LINSTOR's API and of the link between the controller and the satellites
+  ([Who may call LINSTOR](#who-may-call-linstor)). It names
+  `cert-manager`, `piraeus-operator` and `snapshot-controller` in `dependsOn`, as its issuers and
+  the authorities' certificates are cert-manager's kinds, the operator's webhooks validate its
+  objects and every StorageClass of LINSTOR's driver, and the VolumeSnapshotClass needs the snapshot
+  definitions ([Resource definitions](#resource-definitions)). Its `ks.yaml` sets `wait` and health
+  check expressions, as the operator gives these kinds no Ready condition and no
   `status.observedGeneration`, so kstatus alone would count them Current at once: it is Ready once
-  what it applies exists, the operator reports the `LinstorCluster` `Available`, its controller
-  answering, and every `LinstorSatelliteConfiguration` `Applied` to the satellites it selects,
-  each at the generation the object holds. That is what the applications that name it in
-  `dependsOn` wait for. It does not wait for every satellite to run, so a node down does not hold
-  them back; a satellite that never starts shows as the storage cluster's `Configured` condition,
-  which the check leaves out, and in the satellite counts of its status. It carries
+  what it applies exists, both authorities are issued and their issuers are Ready, the operator
+  reports the `LinstorCluster` `Available`, its controller answering, which it does only once the
+  certificates those issuers sign for it are issued, and every
+  `LinstorSatelliteConfiguration` `Applied` to the satellites it selects, each at the generation the
+  object holds. That is what the applications that name it in `dependsOn` wait for. It does not
+  wait for every satellite to run, so a node down does not hold them back; a satellite that never
+  starts shows as the storage cluster's `Configured` condition, which the check leaves out, and in
+  the satellite counts of its status. It carries
   `k8s-gitops/timeout: long`: on a first install the storage controller can take longer than the
   root's default 3m to report `Available`, and the health check would fail every minute until it
   does.
@@ -3161,6 +4736,10 @@ restricted requires ([Pod Security](#pod-security)).
 The controller's and the satellites' metrics are scraped, and the replicas, the quorum, the
 satellites and the pools alerted on, by the `linstor-monitoring` application
 ([Storage monitoring](#storage-monitoring)).
+
+Renovate merges no update of anything under `apps/base/piraeus-datastore/` by itself, whatever the
+auto-merge switch says (`.renovate/automerge.json5`): a new version of the operator can restart the
+storage pods on every node, so a person reads the release notes and picks the time.
 
 ### What runs
 
@@ -3177,6 +4756,136 @@ systemd, of the kernel's modules and of its sources, which Talos does not have; 
 configuration from the ConfigMap `talos-lvm-config`, which keeps the metadata backups and archives
 that Talos's own configuration turns off. The satellite writes them under `/var/etc/lvm`, as `/etc`
 is read-only on Talos.
+
+### Replication between the nodes
+
+The satellites run in their node's network namespace: `host-network.yaml` gives every satellite's
+pod the host network and nothing else, as Piraeus' how-to does
+([Piraeus](https://github.com/piraeusdatastore/piraeus-operator/blob/v2.12.1/docs/how-to/drbd-host-networking.md)).
+The satellite calls no API and resolves no cluster name, so its pod keeps the default DNS policy,
+which on the host network is the node's resolver. Once a satellite's pod is ready, the operator
+registers its node in LINSTOR at the pod's address, as the interface `default-ipv4`, and changes that
+interface in place when the address changes
+([Piraeus](https://github.com/piraeusdatastore/piraeus-operator/blob/v2.12.1/internal/controller/linstorsatellite_controller.go#L411-L480),
+[its client](https://github.com/piraeusdatastore/piraeus-operator/blob/v2.12.1/pkg/linstorhelper/client.go#L233-L318)).
+On the host network the pod's address is the node's own, the first of its internal addresses
+([Kubernetes](https://github.com/kubernetes/kubernetes/blob/v1.37.1/pkg/kubelet/kubelet_pods.go#L2024-L2050),
+[the order](https://github.com/kubernetes/kubernetes/blob/v1.37.1/pkg/util/node/node.go#L65-L95)),
+which is its address on the node network (`talos/patches/all/node-ip.yaml`). LINSTOR takes every
+resource's address on a node from that interface, as no `PrefNic` is set and it is the node's only
+one ([LINSTOR](https://github.com/LINBIT/linstor-server/blob/v1.35.3/satellite/src/main/java/com/linbit/linstor/layer/drbd/resfiles/ConfFileBuilder.java#L910-L971)),
+so DRBD replicates between the nodes' own addresses.
+
+DRBD's connections belong to the network namespace that configured them: when a namespace ends,
+DRBD disconnects every connection configured from it and removes its paths
+([DRBD](https://github.com/LINBIT/drbd/blob/drbd-9.3.4/drbd/drbd_main.c#L3208-L3276)). The node's
+namespace never ends, so replacing a satellite's pod, as an update of the operator or a change to a
+satellite configuration does, leaves every connection and every volume's I/O as it is, and the new
+satellite takes them over.
+
+The LINSTOR controller reaches each satellite at its node's address on TCP 3367, over TLS
+([Who may call LINSTOR](#who-may-call-linstor)); DRBD listens at the node's address on a port of
+7000-7999 for each volume on each node that holds it, and its peers connect from theirs; the DRBD
+reactor serves its metrics on 9942. The nodes' firewall admits each
+([cluster.md](cluster.md#what-each-node-admits)).
+
+Taking `host-network.yaml` out does not move the connections back: their paths stay in the node's
+namespace, and DRBD refuses a satellite on the pod network that configures such a connection from
+its own ([DRBD](https://github.com/LINBIT/drbd/blob/drbd-9.3.4/drbd/drbd_nl.c#L5389-L5395)).
+Moving back takes the steps of Piraeus' how-to on every satellite first, `drbdadm suspend-io`,
+`disconnect --force` and `del-path`, after which the configuration goes and the operator replaces
+every satellite; every volume's I/O is suspended from the first of those steps until the satellites
+are back and connected.
+
+### Who may call LINSTOR
+
+The LINSTOR controller serves its API over HTTPS on 3371, the port `secure-api` of its Service, and
+takes a request only from a client that presents a certificate the storage cluster's API authority
+signed: the `LinstorCluster`'s `apiTLS` names the authority's issuer, and the controller's
+truststore holds that authority and nothing else. The authority is made in the namespace by
+cert-manager, in `linstor-cluster`'s `tls.yaml`, as OpenBao's is: the self-signed `Issuer`
+`linstor-ca-bootstrap` signs the `Certificate` `linstor-api-ca`, a CA (`isCA`) of ECDSA P-256,
+valid for ten years and renewed in the last one with its key kept, which cert-manager keeps in the
+Secret `linstor-api-ca`; the `Issuer` `linstor-api-ca`, of kind CA, signs with it. Both issuers are
+namespaced, so no other namespace can ask them for a certificate, and the authority signs the
+storage cluster's API certificates alone, so a client certificate the cluster's own CA or any other
+authority signed is not accepted.
+
+The operator asks that issuer for the controller's certificate, `linstor-api-tls`, and for a client
+certificate for each caller of the API, each in a Secret of the same name, with the authority beside
+it as `ca.crt`:
+
+- the operator itself, `linstor-client-tls`, which the LINSTOR CLI in the controller's pod also
+  uses, so the runbooks' commands, `kubectl --namespace piraeus-datastore exec
+  deployment/linstor-controller -- linstor ...`, work as they are;
+- the CSI controller, `linstor-csi-controller-tls`;
+- the CSI node plugin, `linstor-csi-node-tls`;
+- the affinity controller, `linstor-affinity-controller-tls`;
+- the NFS server, `linstor-csi-nfs-server-tls`.
+
+Each dials `https://linstor-controller:3371`, and the operator
+`linstor-controller.piraeus-datastore.svc:3371`, names the controller's certificate holds. The HA
+controller and the satellites call no API.
+
+Port 3370, the port `api`, serves the controller's metrics at `/metrics` and its health check at
+`/health` over plain HTTP, which the scrape ([Storage monitoring](#storage-monitoring)) and the
+controller's liveness probe read, and answers a request for the API, any path under `/v1`, with a
+redirect to 3371, serving none of it.
+
+Only a holder of the controller's internal certificate commands a satellite. The controller reaches
+each over TLS on 3367, the port the operator registers it with
+([Piraeus](https://github.com/piraeusdatastore/piraeus-operator/blob/v2.12.1/internal/controller/linstorsatellite_controller.go#L460-L465)),
+and each side presents a certificate and takes only one the storage cluster's internal authority
+signed: the controller its client certificate, `linstor-controller-internal-tls`, and each satellite
+its server certificate, `<node>-tls`, each in a Secret of that name with the authority beside it as
+`ca.crt`. The `LinstorCluster`'s `internalTLS` and that of the satellite configuration
+`internal-tls`, which applies to every satellite and is the only one that sets it, name the
+authority's `Issuer`, as Piraeus' how-to sets it up
+([Piraeus](https://github.com/piraeusdatastore/piraeus-operator/blob/v2.12.1/docs/how-to/internal-tls.md)).
+The authority, `linstor-internal-ca`, is made as the API's is, in `tls.yaml`: `linstor-ca-bootstrap`
+signs its `Certificate`, of ECDSA P-256, valid for ten years and renewed in the last one with its key
+kept, which cert-manager keeps in the Secret `linstor-internal-ca`, and the `Issuer`
+`linstor-internal-ca`, of kind CA, signs with it. It signs these certificates alone and is not the
+API's authority, so a certificate for one link is not accepted on the other: each side's truststore is
+the `ca.crt` beside its own certificate, and the controller keeps the two links' truststores apart,
+one made from its API certificate's Secret and one from its internal certificate's
+([Piraeus](https://github.com/piraeusdatastore/piraeus/blob/efb048ef83c26e854b6829ccdf0d34b0120c60c1/dockerfiles/piraeus-server/entry.sh#L80-L95)).
+None of the API's client certificates, which pods across the cluster mount, is one a satellite
+takes. The satellite serves LINSTOR's connector on 3367 alone, over TLS, and requires the client's
+certificate
+([LINSTOR](https://github.com/LINBIT/linstor-server/blob/v1.35.3/satellite/src/main/java/com/linbit/linstor/core/SatelliteNetComInitializer.java#L67-L235),
+[its TLS](https://github.com/LINBIT/linstor-server/blob/v1.35.3/server/src/main/java/com/linbit/linstor/netcom/ssl/SslTcpConnectorPeer.java#L212-L229)).
+The HA controller, the CSI plugins and the DRBD reactor do not connect to a satellite's port. The
+controller also serves LINSTOR's debug connector on 3373, which its `k8s` database enables with the
+key and trust stores of this link
+([LINSTOR](https://github.com/LINBIT/linstor-server/blob/v1.35.3/controller/src/main/java/com/linbit/linstor/dbcp/migration/k8s/crd/Migration_10_v1_19_1_ConsolidatedInit.java#L163-L173));
+it requires the client's certificate as a satellite does, so it takes a connection only from a
+holder of a client certificate the internal authority signed.
+
+cert-manager renews each of these certificates before it expires. The controller loads its own when
+it starts, and its liveness probe restarts it once a certificate on disk is no longer the one it
+loaded. A satellite's liveness probe does the same for its container, and the controller connects to
+the satellite again once it is back; DRBD's connections, on the node's network, stay as they are
+([Replication between the nodes](#replication-between-the-nodes)). The cert-manager alerts cover these
+Certificates as every other ([Alerts](#alerts)).
+Turning `apiTLS` on or off replaces the controller's pod and rolls the CSI controller, the CSI node
+plugin, the affinity controller and the NFS server; volumes in use keep serving meanwhile, and
+provisioning, snapshots, attaching and detaching wait until the controller answers again. Turning
+`internalTLS` on or off replaces the controller's pod and every satellite's pod; volumes in use keep
+serving meanwhile. While a satellite is replaced, the controller cannot reach it until the operator
+registers it again on its new port, and provisioning, attaching and snapshots that involve its node
+wait.
+
+This makes the storage cluster depend on cert-manager. The operator applies these Certificates
+through cert-manager's webhook at each reconcile of the `LinstorCluster`, and a satellite's at each
+reconcile of its `LinstorSatellite`. Each reconcile stops applying at its first error, before it
+deletes what it no longer makes, and is retried, while the rest of it goes on, a satellite's
+registration in LINSTOR among it (`internal/controller/linstorcluster_controller.go`,
+`linstorsatellite_controller.go`), so while the webhook does not answer nothing is deleted, and what
+runs and every volume stay as they are. A satellite's pod starts only once its Secret is issued, so a worker that joins
+while cert-manager cannot issue gets no satellite until it can, and the satellites already running
+keep running. While cert-manager's Kustomization is not Ready, `linstor-cluster` and every
+application that names it in `dependsOn` wait for it.
 
 ### The storage pool
 
@@ -3220,18 +4929,44 @@ Every LINSTOR volume and snapshot lives on the workers' data volumes, which belo
 stack: `just cluster-destroy` destroys them with the stack, and every volume's data with them
 ([cluster.md](cluster.md#recipes)).
 
-`tests/storage.bats` builds the three applications as Flux applies them; applies the satellite
-configuration to the operator's own satellite DaemonSet at the version the pinned chart runs; renders
-the nodes' machine configurations offline to check which nodes LINSTOR selects and which device the
-pool takes; reads the StorageClasses and the VolumeSnapshotClass; and renders the operator's chart
-to check that its definitions are kept.
+`tests/storage.bats` builds the three applications as Flux applies them; applies the operator's
+patch for `internalTLS` and the satellite configurations to the operator's own satellite DaemonSet at
+the version the pinned chart runs, to check that one configuration alone puts the satellites on the
+host network and that no container of their pod dials a cluster name, and reads the operator's source
+at that version to check that it registers each node at the ready pod's address and changes that
+interface in place; reads the ports that pod declares and LINSTOR's default DRBD port range against
+the nodes' firewall inventory, to check that one rule of every node admits each, over the satellite's
+two ports, the reactor's one or the range and no more, from those who use it, and that no file sets
+LINSTOR's port range or preferred interface; renders the nodes' machine configurations offline to
+check which nodes LINSTOR selects and which device the pool takes; reads the StorageClasses and the
+VolumeSnapshotClass; renders the operator's chart to check that its definitions are kept; reads the
+`LinstorCluster`'s `apiTLS`, the issuers and the authority it names, and the operator's source at
+the version the chart runs, to check that every component that calls the API gets a client
+certificate from that issuer and dials HTTPS at a name the controller's certificate holds, and that
+no podTemplate or patch of the storage cluster's objects writes over that wiring; reads the
+`internalTLS` of the `LinstorCluster` and of the satellite configurations, the issuer and the
+authority they name, and the operator's source at that version and LINSTOR's Go client it is built
+with, to check that the controller and every satellite get their certificates from that authority,
+which is not the API's, trust it alone, that each satellite's one connector is TLS on 3367 and is
+registered so, and that no podTemplate or patch writes over that wiring; and, where a docker daemon
+answers, runs the controller and a satellite from the image the chart's image list names, offline,
+with the configuration the operator writes and certificates made as the issuers make them, to check
+that the controller refuses an API request without the authority's client certificate or with
+another authority's, redirects the API on 3370 and keeps serving its metrics and health check there,
+and that the satellite trusts the internal authority alone, completes a TLS handshake on 3367 with
+the controller's certificate of that authority, refuses one without a certificate, with the API's
+client certificate or with another authority's of the same name, and listens on no other port.
+Without docker, as under `just ci` and in CI, those two proofs skip, so CI does not show that a newer
+operator's controller and satellite still refuse such requests; `bats tests/storage.bats` where a
+docker daemon answers does, and a person runs it before merging an update of the operator's chart.
 
 ## Volume backups
 
 VolSync backs an application's volume up to the VolSync bucket
 ([infrastructure.md](infrastructure.md#s3-keys-and-backup-buckets)) with its restic mover, and
 fills the volume from the latest backup when the volume and its restore are created together
-(ADR 0015).
+(ADR 0015). An application that writes a canary into its volume also has its newest backup restored
+and checked every night ([The restore drill](#the-restore-drill)).
 
 `apps/base/volsync-system/volsync/` installs the operator in its own namespace, `volsync-system`,
 at the restricted Pod Security level. Its publisher releases the chart only to a classic Helm
@@ -3409,7 +5144,8 @@ After that Flux does the rest, for as long as the store holds the key. `volsync-
 overlay, is applied once `volsync`, `external-secrets`, `openbao-store` and `linstor-cluster` are
 Ready. The test application
 `apps/base/demo/volsync-demo/` is a pod that holds a 1 GiB volume and writes the time it first found
-it empty. Its ExternalSecret writes the Secret the movers read as soon as the store holds the key,
+it empty, and the canary of its restore drill, a heartbeat every five minutes
+([The restore drill](#the-restore-drill)). Its ExternalSecret writes the Secret the movers read as soon as the store holds the key,
 the ReplicationDestination restores the repository's latest backup, which is empty on the first
 deployment, the claim is made from that snapshot and the pod starts, and the ReplicationSource
 backs the volume up at 03:17 each night. A claim and its restore therefore need no manual step once
@@ -3426,6 +5162,149 @@ repositories, where a new file would make a master that opens none of them
 `tests/volume-backups.bats` builds the applications as Flux applies them and renders the VolSync
 and External Secrets charts to check this section, and `tests/openbao-recipes.bats` runs the
 recipes against fakes of the cluster and of OpenBao.
+
+### The restore drill
+
+A backup that is never restored proves nothing, and a restore from a repository path that holds no
+backup succeeds with an empty volume and no error ([Restoring](#restoring)). The component
+`components/volsync-drill` restores an application's newest backup every night into a scratch claim
+of its own and checks what came back, as
+[ADR 0008](adr/0008-state-and-backups-are-encrypted-before-they-leave.md) asks of every backup. An
+application that writes the canary below takes it beside `components/volsync`, never without it,
+in its `ks.yaml`:
+
+```yaml
+spec:
+  components:
+    - ../../../../../components/volsync
+    - ../../../../../components/volsync-drill
+  postBuild:
+    substitute:
+      APP: <app>
+      VOLSYNC_CAPACITY: 1Gi
+      VOLSYNC_SCHEDULE: "17 3 * * *"
+      VOLSYNC_DRILL_RESTORE_SCHEDULE: "17 4 * * *"
+      VOLSYNC_DRILL_CHECK_SCHEDULE: "17 5 * * *"
+      VOLSYNC_DRILL_MAX_AGE: '"95400"'
+```
+
+The three variables are required: the build fails without any of them. `VOLSYNC_DRILL_MAX_AGE` is
+written with its double quotes, as Flux substitutes after kustomize has dropped a manifest's own
+quotes, and a bare number would reach the check's environment as a number, which the API server
+refuses for a variable's value. The component reads `APP`, `VOLSYNC_CAPACITY`, `VOLSYNC_UID` and
+`VOLSYNC_GID` as `components/volsync` does, and makes:
+
+- the scratch claim `<app>-drill`: `ReadWriteOnce`, of `VOLSYNC_CAPACITY`, on the default
+  StorageClass, made empty;
+- the ReplicationDestination `<app>-drill`, which restores the newest backup straight into the
+  scratch claim on `VOLSYNC_DRILL_RESTORE_SCHEDULE`, with the repository Secret `<app>-volsync`
+  the backups use, so no key gets a new holder. `copyMethod: Direct` takes no snapshot of the claim;
+  `enableFileDeletion` has restic delete the files the backup does not hold, so the claim holds what
+  that backup holds and not every file the volume ever had; `cleanupCachePVC` deletes restic's cache,
+  of VolSync's default 1 GiB, after each restore, so each night's restore starts cold, as a real one
+  does. Its mover runs with the security context `components/volsync` gives its movers;
+- the CronJob `<app>-drill-check`, on `VOLSYNC_DRILL_CHECK_SCHEDULE`, and the ConfigMap
+  `<app>-drill-scripts` of its one script, `scripts/check.sh`. The check runs the busybox the demo's
+  Deployments pin, by that tag and its digest, as `VOLSYNC_UID` and `VOLSYNC_GID` with no `fsGroup`,
+  so it reads the files as the user the mover restored them as and changes nothing on the volume,
+  ownership included. It mounts the scratch claim read-only, holds no token, and takes and opens no
+  connection. Its job is made within 600 seconds of its time and runs at most 600, a failed check is
+  tried once more within that, and two never run at once. A CronJob's name is at most 52
+  characters, so an application that takes the drill has an `APP` of at most 40.
+
+Nothing backs up, snapshots or clones the scratch claim. The mover is one of the namespace's movers,
+with their flows, the resolver and the object storage ([Network policy](#network-policy)).
+
+**The canary.** The application writes a file `heartbeat` at its volume's root: one line, the Unix
+time in seconds and the same moment as `%Y-%m-%dT%H:%M:%SZ`, both UTC, from one `date` call. The
+check reads the first field, so it parses no date, as busybox and coreutils read dates differently;
+a person reads the second. `volsync-demo`'s pod rewrites it every `HEARTBEAT_SECONDS`, 300: it
+writes a new file of the same directory, syncs it to disk and then renames it over the last. A
+backup's snapshot holds what is on disk at its moment, as after a crash, and the kernel writes a
+file's data to disk later than its name, so a snapshot can hold a file renamed before it was synced
+as an empty one; synced first, the heartbeat in a snapshot is the last one or the new one, whole.
+Only an application that writes the canary takes the drill: without one, every check fails on the
+missing heartbeat. n8n and Open WebUI write none, and their volumes have no drill.
+
+**The check.** It reads `DRILL_DIR`, the claim's mount, and `DRILL_MAX_AGE_SECONDS`, the largest
+age, and writes one line to the job's log that names the case. It passes, printing the heartbeat's
+age and the bound, when the heartbeat is at most as old as the bound. It fails, with its reason on
+standard error and status 1, when the claim holds nothing, or nothing but `lost+found`: the restore
+brought nothing back; when it holds files and no `heartbeat`; when the heartbeat's first field is
+not a whole number of seconds, or lies in the future; when the heartbeat is older than the bound;
+and when either variable is missing or wrong. It writes nothing.
+
+**The largest age**, worked out here and nowhere else. For `volsync-demo` the backup runs at 03:17,
+the restore at 04:17 and the check at 05:17, and
+
+    95400 = 86400 + 7200 + 1800
+
+86400 is the backup's interval; 7200 the time from the backup's schedule to the check's; 1800 the
+margin: 300, `HEARTBEAT_SECONDS`, as the heartbeat in a snapshot is up to that much older than the
+snapshot, 600 and 600, the check's `startingDeadlineSeconds` and `activeDeadlineSeconds`, as a check
+can read the volume that late after its time, and 300 for clocks, a slow write and a rename not yet
+on disk when the snapshot is taken, which leaves the heartbeat before it in the snapshot.
+`tests/volume-backups.bats` reads the three schedules, the bound, the canary's interval and the two
+deadlines from what is built and fails unless they hold to this sum, and holds the restore to an hour
+after the backup and the check to an hour after the restore, at minutes of the day no other
+application backs up or drills at. A healthy night's check finds a heartbeat from a little under
+7200 seconds old, as the snapshot is taken some seconds after the backup's minute, to about 8700.
+So a drill passes on the newest backup and on the one before it: one missed night is the backup
+alerts' to report ([Alerts](#alerts)), and the drill fails on the second. A night whose restore did
+not run, or found no snapshot, leaves the previous night's files in the scratch claim, which pass
+once more and then fail.
+
+**What a pass proves.** That the repository opens with the password derived for the application,
+that restic restores its newest backup, and that the data in it is recent. Not that the application
+starts on it. The empty case is the silent failure of a wrong repository path: under a path that
+holds no repository, restic creates an empty one and the restore succeeds with nothing, as after a
+change of `APP` or `BACKUP_BUCKET_PREFIX`, and the check names it. A path that changes once the
+claim holds files leaves those files there, which fail on their age the second night.
+
+**The first deployment.** VolSync synchronizes a new ReplicationDestination at once, then at each
+time of its schedule. The scratch claim stays Pending until the mover's pod is scheduled, as the
+default StorageClass makes a volume for its first pod, and the mover waits, as the backups' do, for
+the repository Secret ([What an operator does once](#what-an-operator-does-once-and-what-then-happens-by-itself)).
+Nothing in the application's Kustomization waits for the claim, so a Pending claim holds nothing up.
+A check after a restore of a backup that holds no heartbeat, as one taken before the application
+wrote it or before its first backup, fails, until a restore after a backup that holds one. A check
+before any restore has used the claim, as when the repository Secret comes only after the check's
+time, is the claim's first user: the claim is made empty for it, and the check fails on the empty
+volume until a restore has run.
+
+**The claim in turn.** The claim is `ReadWriteOnce`: the mover uses it while it restores, VolSync
+deletes the mover's Job once the restore ends, and the check uses it an hour later. Any worker
+reaches a volume of the default StorageClass, so the check need not run where the mover ran. A check
+that starts while a restore still runs reads, on the mover's node, a tree restic is still writing,
+which can hold the previous night's heartbeat or none; on any other node it waits for the volume,
+attached to the mover's node, until its deadline fails it. The restore's `status.lastSyncDuration`
+says how long a restore takes, against the hour before the check.
+
+**UTC.** Both schedulers count in UTC. The CronJob controller reads a schedule that names no
+`timeZone` in kube-controller-manager's zone, and VolSync's controller reads a cronspec in its own
+(`internal/controller/statemachine/machine.go` at the pinned version); neither image sets `TZ` or
+holds `/etc/localtime`, and Talos mounts no zone into the control plane's pods, so Go counts in UTC
+in both. The hours between the backup, the restore and the check therefore hold, and no CronJob of
+the tree sets `timeZone`.
+
+**What it costs.** Room: the scratch claim at its capacity, a replica on each of two workers, and,
+while a restore runs, restic's cache of 1 GiB, the same: at most `VOLSYNC_CAPACITY` and 1 GiB on one
+worker, 2 GiB for `volsync-demo` ([The storage pool](#the-storage-pool)). A nightly download from the
+object storage: the repository's index and the backup's tree, as the cache starts empty, and the
+parts of files that differ from what the scratch claim holds, as restic checks the files already
+there and fetches only what does not match; the whole backup the first time and whenever the claim
+is made again. A mover's pod and a check's pod a night.
+
+[`RestoreDrillJobFailing`](runbooks/alerts.md#restoredrilljobfailing) fires when the latest check has
+not passed half an hour after its time, longer than its two deadlines together, and
+[`RestoreDrillStale`](runbooks/alerts.md#restoredrillstale) when no check has passed for 36 hours
+([Alerts](#alerts)); [the runbook](runbooks/volume-backups.md#checking-the-first-drill) says what to
+read to check the first drill. A check's job that failed also raises the stock `KubeJobFailed` for
+as long as the job exists, past later passes, as the CronJob keeps its three newest failed jobs for
+their logs: it clears once the job is deleted, after its log is read.
+`tests/volume-backups.bats` builds the component as Flux applies it and runs the check's script and
+the canary's command as their containers run them, and `tests/network-policy.bats` evaluates the
+flows of the drill's mover and its check on the render.
 
 ## Envoy Gateway
 
@@ -3464,9 +5343,11 @@ and build both applications offline to check the rest of this section.
 
 `gateway-public`, an application of the same namespace, runs the one Gateway, `public`, of the
 GatewayClass `envoy-gateway`. It names `envoy-gateway`, `cluster-ca` (the issuer,
-[cert-manager](#cert-manager)) and `cilium-bgp` in `dependsOn`, so it starts once the controller
-runs, an issuer signs and the pool and the BGP objects exist; a cluster that chooses an ACME issuer
-for its certificate adds `acme-issuers` ([Choosing the public Gateway's
+[cert-manager](#cert-manager)), `cilium-bgp` and `blackbox-exporter` (which probes the redirect,
+[Probes](#probes)) in `dependsOn`, so it starts once the controller runs, an issuer signs, the pool
+and the BGP objects exist and the exporter answers, and takes no change while the exporter's
+Kustomization is not Ready ([Probes](#probes)); a cluster that chooses an ACME issuer for its
+certificate adds `acme-issuers` ([Choosing the public Gateway's
 issuer](#choosing-the-public-gateways-issuer)). It is Ready, with the 10 minute
 timeout, once its certificate is issued and the controller reports the Gateway programmed, which it
 does once the proxies' Service holds an address and the proxies are available. A cluster whose
@@ -3510,14 +5391,16 @@ cannot be listed without it: `just kubernetes-check` refuses the dependency.
   and no backend: plain HTTP is never forwarded. `tests/gateway.bats` builds every application the
   overlay enables and fails when a route of any kind other than the redirect names `http`, by its
   section or its port, when a route in the Gateway's namespace names the Gateway without a section,
-  which would attach it to `http` as well, or when the redirect is anything but that rule.
+  which would attach it to `http` as well, or when the redirect is anything but that rule. The
+  application's `Probe` `https-redirect` asks the proxies for the 301 from inside the cluster, and
+  `hello-route`'s `Probe` for the demo's 200 ([Probes](#probes)).
 - **Who may attach.** To `https`, `HTTPRoute`s of the namespaces that carry the label
   `k8s-gitops/gateway: public`, and of no other: the listener's `allowedRoutes` select them by that
   label and name the one kind. A route in a namespace without it is not accepted, which is the
   Gateway API's rule and the controller's to apply; it shows in the route's status, which
   `just gateway-check` reads, and `tests/gateway.bats` proves the selector on the objects. `demo`,
-  `ai-system`, `kromgo`, `sso-system`, `backstage` and `monitoring` are the namespaces that carry
-  the label, and `tests/gateway.bats` pins that set.
+  `ai-system`, `kromgo`, `sso-system`, `backstage`, `monitoring` and `ascender` are the namespaces
+  that carry the label, and `tests/gateway.bats` pins that set.
 - **The certificate.** The `Certificate` `public-wildcard` asks the `ClusterIssuer` the cluster
   chose, `cluster-ca` by default, for an ECDSA P-256 certificate for `*.${CLUSTER_DOMAIN}` and
   `${CLUSTER_DOMAIN}`, with a new private key at each renewal and the same Secret, so the listener
@@ -3527,7 +5410,8 @@ cannot be listed without it: `just kubernetes-check` refuses the dependency.
   little. A `Certificate` rather than the Gateway annotation cert-manager reads, as the annotation
   makes a certificate for each listener's hostname only, so it would leave out the domain itself.
 - **TLS.** A `ClientTrafficPolicy` sets 1.2 as the least version a client may use, the
-  controller's default stated rather than relied on. The same policy sets the PROXY protocol, below.
+  controller's default stated rather than relied on. The same policy sets the PROXY protocol and
+  what one connection may hold, below.
 - **The client's address.** The policy accepts the PROXY protocol on both listeners, as `optional`:
   a connection that begins with a header takes the header's source as the client's address, and one
   that begins with anything else, a TLS handshake or an HTTP request, is served with the
@@ -3546,11 +5430,13 @@ cannot be listed without it: `just kubernetes-check` refuses the dependency.
   whoever writes the first bytes of a connection to a proxy can name any address, which a client
   cannot through an edge router that writes its own header and can through a sender that forwards
   plain TCP. Of senders inside the cluster, `public-proxy`
-  ([What the namespaces let through](#what-the-namespaces-let-through)) admits none to the
-  listeners, but only once the agents enforce it rather than audit it
-  ([Service addresses](#service-addresses)), and the local host of a proxy's node reaches that
-  proxy whatever the policies say; the access log's `peer_address` is the socket's own, so a claim
-  shows beside its sender. The trust model is in
+  ([What the namespaces let through](#what-the-namespaces-let-through)) admits the blackbox
+  exporter's pods alone to the listeners, for the probes of the public hostnames, but only once the
+  agents enforce it rather than audit it ([Service addresses](#service-addresses)), and the local
+  host of a proxy's node reaches that proxy whatever the policies say; the access log's
+  `peer_address` is the socket's own, so a claim shows beside its sender. The probes write no
+  header, which `optional` serves, so they are one reason it stays: if the header is ever required,
+  the probes go another way, through the edges, first ([Probes](#probes)). The trust model is in
   [ADR 0020](adr/0020-the-client-address-reaches-the-gateway-in-a-proxy-protocol-header.md).
 - **Access log.** The `EnvoyProxy` sets one JSON line per request to standard output, which the
   collector reads with the container's other lines ([Logs](#logs)): `client_address`, the address
@@ -3577,6 +5463,75 @@ cannot be listed without it: `just kubernetes-check` refuses the dependency.
 - **Where the records point.** The Gateway's annotation `external-dns.kubernetes.io/target` holds
   `${EDGE_PUBLIC_ADDRESS_1},${EDGE_PUBLIC_ADDRESS_2}`, which external-dns publishes for every route
   that attaches to it ([DNS records](#dns-records)).
+- **What one connection may hold.** Each edge router's proxy runs in TCP mode: for each client
+  connection it opens one connection of its own to the Gateway, which carries a PROXY protocol
+  version 2 header naming the client, and copies bytes, never reading HTTP, pooling or sharing a
+  connection between clients (`mode tcp` in HAProxy 3.0's configuration manual, a full-duplex
+  connection between the client and the server with no layer 7 examination; `http-reuse` exists
+  in HTTP mode alone; [The edge routers](infrastructure.md#the-edge-routers)). The proxies' Service
+  hands each connection to one proxy, as for the probes ([Probes](#probes)). So at a listener one
+  client connection is one edge connection to one proxy, and what a connection may hold is what
+  one client may. The `ClientTrafficPolicy` sets it, on both listeners, each value stated where it
+  is a default so that a change of the default does not change it, and none of them cuts a
+  long-lived connection an application keeps open (the last item below):
+  - `connection.connectionLimit.value: 8000`, off by default: each edge's `maxconn`, 4000, times
+    the two edges the annotation above names, so a proxy refuses no connection the edges admit even
+    while it is the only one running, and no sender, through an edge or not, can make a proxy hold
+    more. Envoy Gateway v1.10.0 puts Envoy's connection limit filter first in each filter chain of a
+    listener (`addHCMToXDSListener` in `internal/xds/translator/listener.go`): one count of the
+    chain's active connections, which every worker of the proxy process shares, and a connection
+    beyond it is closed at once, as no `closeDelay` is set. Each filter chain counts its own (the
+    filter's documentation), so `http` and `https` hold up to 8000 each on a proxy, the probes'
+    connections from inside the cluster among them, and a chain that an update replaces counts
+    afresh while the old one drains. A refused connection counts in
+    `connection_limit.<listener>.limited_connections`, the listener being `https-10443` or
+    `http-10080`.
+  - `connection.bufferLimit: 32Ki`: the controller's default (`tcpListenerPerConnectionBufferLimitBytes`)
+    and Envoy's value for an edge, where Envoy's own is 1 MiB. It is what one connection may hold
+    buffered, and each HTTP/1.1 request on it as well; an HTTP/2 stream buffers up to its window, the
+    controller's 64 KiB (Envoy's flow control FAQ). A body a filter holds whole beyond that, as the
+    firewall's on `hello` ([What the Core Rule Set does at its defaults](#what-the-core-rule-set-does-at-its-defaults)),
+    is answered 413; raising it raises what every connection may hold.
+  - `http2.maxConcurrentStreams: 100`: the controller's default, the least RFC 9113 recommends
+    (section 6.5.2) and Envoy's value for an edge, where Envoy's own is 1024. One HTTP/2 connection
+    holds at most 100 streams, each buffering up to its 64 KiB window.
+  - `timeout.http.requestHeadersReceivedTimeout: 10s`, off by default: Envoy marks the field as
+    one to configure for downstreams it does not trust (`request_headers_timeout` in its
+    `http_connection_manager.proto`), and 10 seconds is the value chosen. It runs from a request's
+    first header byte to its last, so it cuts a client that dribbles its headers and touches no idle
+    keep-alive connection, upgraded websocket, stream or upload body.
+  - `timeout.http.idleTimeout: 4m`, one hour by default: a connection with no active request is
+    closed after 4 minutes, an HTTP/2 one with a GOAWAY first (`idle_timeout` in Envoy's
+    `protocol.proto`), before an edge's own 5 minutes with nothing sent (`timeout client` and
+    `timeout server` in `haproxy.cfg.tftpl`) would cut it without one. A connection that carries an
+    upgraded websocket or an open stream has an active request, so it is not idle.
+  - `timeout.http.streamIdleTimeout: 5m`: Envoy's default, stated, and the limit of every route, as
+    none sets an idle timeout of its own. It ends a stream, an upgraded websocket included, with
+    nothing sent either way for 5 minutes, as long as an edge already lets such a connection live,
+    so it is never stricter than an edge.
+  - Nothing else: no `requestReceivedTimeout`, which bounds a whole request and would cut a slow
+    upload; no `tcp` timeouts; no `http1`, `headers` or keepalive settings; no `closeDelay`,
+    `maxConnectionDuration`, `maxRequestsPerConnection` or `maxStreamDuration`, the last three of
+    which would close or reset a websocket or a stream.
+  - The long-lived connections the applications keep are never idle that long: each is a websocket
+    whose server pings it, n8n's push connection every 60 seconds (`abstract.push.ts` of n8n
+    2.47.7, its default backend being the websocket), Open WebUI's socket.io connection every 25
+    (`WEBSOCKET_SERVER_PING_INTERVAL` of v0.11.4), which also carries a chat's streamed answer, as
+    the chat runs as a task of the server and its tokens reach the browser as socket events,
+    Ascender's after 20 seconds without a message (daphne's default `--ping-interval`, as the
+    image's `supervisord_web.conf` starts it), and Backstage's signals every 30 (`SignalManager` of
+    1.55.2). An upload sends its body as it goes, and a stream with bytes moving is not idle.
+
+  `tests/gateway.bats` pins the values, reads `maxconn`, `timeout client` and `timeout server` from
+  `haproxy.cfg.tftpl` and the edges from the annotation, and fails, naming both files, when the
+  connection limit is not their product, the idle timeout is not below the edges' timeout or the
+  stream idle timeout is above it. It also fails when a route or a `BackendTrafficPolicy` of any
+  application the overlay enables, as Flux builds it, sets a request or idle timeout of its own,
+  which none does: the controller gives such a route an idle timeout from its request timeout, and
+  leaves that out once the listener sets a stream idle timeout (`idleTimeout` in
+  `internal/xds/translator/route.go`), which would make 5 minutes its limit. Every change of the
+  policy replaces the filter chains of both listeners, which drains their connections ([What
+  applying it drains](#what-applying-it-drains)).
 
 #### Checking the public Gateway
 
@@ -3595,7 +5550,8 @@ answer and curl 15, and curl reads no `.curlrc`, uses no proxy and follows no re
 request through the edges trusts what the `cluster CA` or `issuer trust` line names, and the
 lookups of DNS records go to a public resolver (below) and trust the system's public trust store
 as curl has it; the variables that add trust, `CURL_CA_BUNDLE`, `SSL_CERT_FILE` and
-`SSL_CERT_DIR`, reach neither, as the recipe unsets them. It needs curl 7.88 or newer. A failure
+`SSL_CERT_DIR`, reach neither, as the recipe unsets them. It needs curl 7.88 or newer, built with
+HTTP/2. A failure
 that is none of the checks, such as an answer it cannot read, names the step it happened in, and
 so does Ctrl-C or SIGTERM, which stops the run there.
 
@@ -3638,6 +5594,12 @@ so does Ctrl-C or SIGTERM, which stops the run there.
   the routes. A route in such a namespace is reported by the controller as not accepted, which is
   the Gateway API's rule; this line reads that status for every route.
 - `http listener`: the Gateway reports one route on `http`, the redirect.
+- `rate limit`: the `BackendTrafficPolicy` `demo/hello` is read
+  (`kubectl get backendtrafficpolicies.gateway.envoyproxy.io --namespace=demo -- hello`), targets
+  the `HTTPRoute` `hello` alone, is Accepted by every ancestor at its generation, and has one local
+  rule without client selectors whose unit is `Second` and whose figure, N, is a whole number from
+  1 to 20 ([Rate limits](#rate-limits)); a FAIL says which of these does not hold. N is read from
+  the cluster, never assumed, and the edge lines below send their bursts over it.
 
 Then, for each edge router, by its name; while the edge stack has no outputs, one line, `edges`,
 says they are skipped, and it fails when they cannot be read:
@@ -3656,9 +5618,23 @@ says they are skipped, and it fails when they cannot be read:
 - `<edge> hello`: the demo answers 200 with the page of its ConfigMap `demo/hello`.
 - `<edge> unrouted host`: a host under the domain that no route serves,
   `gateway-check-unrouted.${CLUSTER_DOMAIN}`, answers 404.
+- `<edge> rate limit`: one curl call through the edge's address, with `--resolve` and the trust the
+  issuer's line names, sends 2N+1 requests for `https://hello.${CLUSTER_DOMAIN}/` with `--http2
+  --parallel --parallel-max 2N+1`, each body discarded, and writes out each one's status and
+  `%{num_connects}`. curl waits for the first connection and multiplexes the other requests on it,
+  as it does unless told `--parallel-immediate`, so they reach one proxy, whose bucket holds N, all
+  at once. The line passes when the connects add up to one and the statuses are 200 and 429 alone,
+  at least one of each, and a FAIL says which of these did not hold. Until that proxy's bucket holds
+  a token again, about a fifth of a second at 5 a second, a scrape of hello's `Probe` that reaches
+  it is answered 429 too, and `probe_success` for hello reads 0 for that one sample;
+  `PublicEndpointWrongStatus` fires only after 5 minutes of it, so nothing fires.
+- `<edge> after the limit`: then, after `sleep 2`, twice the unit, one request answers 200 with the
+  demo's page: the route answers again once its bucket has filled.
 
-The last two are skipped when TLS fails. Then, with the edge stack's outputs, the names the routes
-publish ([DNS records](#dns-records)), none of which is looked up while the edge lines are skipped:
+The last four are skipped when TLS fails, and the last two also when the demo's line did not pass or
+the `rate limit` line did not, which they would only repeat. Then, with the edge stack's
+outputs, the names the routes publish ([DNS records](#dns-records)), none of which is looked up
+while the edge lines are skipped:
 
 - `DNS records`: one line, in place of the two below, when there is nothing to look up: skipped
   when the cluster does not select external-dns, which is whether its Kustomization exists in
@@ -3693,8 +5669,8 @@ its own, verified against the system's public trust store with nothing added. A 
 minute ago can still be missing from the resolver for as long as the answer it gave before was to
 be cached, which the FAIL says.
 
-`tests/gateway-check.bats` runs the recipe against fakes of kubectl, curl and the edge stack, every
-answer holding addresses.
+`tests/gateway-check.bats` runs the recipe against fakes of kubectl, curl, sleep and the edge stack,
+every answer holding addresses.
 
 #### Giving an application a public hostname
 
@@ -3703,7 +5679,10 @@ answer holding addresses.
    `https` listener, and whose `hostnames` are under the domain: `<name>.${CLUSTER_DOMAIN}`. The
    listener and the certificate cover that domain only, so a name outside it is not served, and
    external-dns makes no record for one. Name at least one host: a route without a hostname would
-   publish the listener's wildcard.
+   publish the listener's wildcard. Add the route's name to the names that
+   `tests/external-dns.bats` pins for the tree, which `dns_published_names` (`scripts/lib/dns.sh`)
+   lists for the edge stack's destroy ([DNS records](#dns-records), Removal): the test fails on
+   that pin first.
 3. Name `gateway-public` in the `dependsOn` of the application that holds the route, so a cluster
    without the Gateway cannot enable it: an application of its own, as `apps/base/demo/hello-route/`
    is, or the application that owns the Service, as `ai-system/n8n` does
@@ -3716,12 +5695,25 @@ answer holding addresses.
    in each labelled namespace, exactly the ports the routes send to there.
    In a namespace with the default deny, the backend also takes the proxies on that port
    ([Declaring an application's flows](#declaring-an-applications-flows)).
+5. Declare the route's `Probe` in that application, beside the route: copy `hello-route`'s
+   `probe.yaml`, change its name and its `hostname` label to the route's hostname, and the path of
+   its target to one the application answers 200 without a session where `/` does not, and nothing
+   else, as a `Probe` with a field, a target, a label or a relabeling more does not count; list it
+   in the application's `kustomization.yaml`, and add `blackbox-exporter` to its `dependsOn`, so a
+   cluster without the exporter cannot enable it ([Probes](#probes)). A route behind the cluster's
+   sign-in copies `demo/hello-sso`'s instead, whose module `public_https_signin` expects the
+   redirect to sign-in. Add the route's name to the routes, and the `Probe`'s path to the paths,
+   that `tests/probes.bats` pins for the tree: it fails on those pins first, and then, naming the
+   route and the hostname, when a route has no `Probe` for a hostname with the module it needs. A
+   route the application's chart renders from its release's values is held to the same, as the test
+   reads the render.
 
 The record for the name is made by external-dns within a minute or two of the route being accepted,
 and removed when the route is; there is no DNS step to do by hand ([DNS records](#dns-records)).
 
 A route is put behind the web application firewall with one more component in the same `ks.yaml`
-([Web application firewall](#web-application-firewall)).
+([Web application firewall](#web-application-firewall)), and takes a request rate limit with
+`components/ratelimit` ([Rate limits](#rate-limits)).
 
 `hello`, the demo's workload, answers this way at `hello.${CLUSTER_DOMAIN}`: two replicas of
 busybox's web server, spread over the workers and held by a disruption budget of one, as an
@@ -3806,7 +5798,17 @@ removing the application leaves them, as Helm never deletes what `crds/` install
   would leave its record at the edges, naming a host no route serves, for good. `sync` is safe
   here because the registry confines what it deletes to this owner's records. Removing the
   application itself deletes nothing: it stops, and the records and their TXT entries stay in the
-  zone, to be taken over by an instance with the same owner or deleted by hand.
+  zone, to be taken over by an instance with the same owner or deleted by hand. What takes a
+  cluster's records out is `just cluster-dns-remove`, which a teardown runs while the cluster still
+  runs, before the cluster and the edge stack go ([runbooks/rebuild.md](runbooks/rebuild.md#taking-it-down)):
+  it stops external-dns and runs it once in the cluster, as a Job with the Deployment's owner id,
+  registry, policy, filter and token, against the source `empty`, which asks for no record, so its
+  sync deletes every record whose TXT entry names this cluster's owner, and that entry, and nothing
+  else ([cluster.md](cluster.md#recipes)). The edge stack's destroy, `just infra-destroy sto2/edge`,
+  refuses while a name the tree's routes publish still resolves to one of the edges' addresses
+  at the public resolver ([infrastructure.md](infrastructure.md#recipes)): the names are those
+  `dns_published_names` (`scripts/lib/dns.sh`) lists from what `just kubernetes-check` builds,
+  every application enabled or not, and each is looked up as `just gateway-check` looks them up.
 - **The token.** An `ExternalSecret` in `external-dns` reads the key `api-token` of
   `cert-manager/cloudflare` from the ClusterSecretStore `openbao`, which serves every namespace
   ([How an application gets a secret out](#how-an-application-gets-a-secret-out)), into the Secret
@@ -4086,18 +6088,19 @@ login in front of it, and no application brings its own. Two applications in the
   public name, so it needs neither a route out and back through the edge nor trust in the Gateway's
   certificate. Its one callback is `https://auth.${CLUSTER_DOMAIN}/oauth2/callback`, whichever host a
   person starts from, so dex has one redirect URI and an opting application adds none.
-- Two routes opt in: `demo/hello-sso`, `hello-sso.${CLUSTER_DOMAIN}`, a second hostname on the
-  `hello` backend, and `monitoring/victoria-logs-route`, `logs.${CLUSTER_DOMAIN}`, the log store's
-  interface ([The log store's interface](#the-log-stores-interface)). No other application is
+- Three routes opt in: `demo/hello-sso`, `hello-sso.${CLUSTER_DOMAIN}`, a second hostname on the
+  `hello` backend, `monitoring/victoria-logs-route`, `logs.${CLUSTER_DOMAIN}`, the log store's
+  interface ([The log store's interface](#the-log-stores-interface)), and `locust/locust-route`,
+  `locust.${CLUSTER_DOMAIN}`, Locust's interface ([Locust](#locust)). No other application is
   behind it.
 
 Each is its own Kustomization, with `wait`, that nothing but the routes that opt in names in
-`dependsOn` (oauth2-proxy names dex): `hello-sso` and `victoria-logs-route` wait on oauth2-proxy,
-and nothing waits on either route. A cluster that lists neither application builds none of it, and
-a cluster whose overlay lists a route that opts in without them is refused. The namespace enforces
-the restricted Pod Security level, and `just pod-security-check` evaluates their pods. It denies
-traffic by default, and each application's `ciliumnetworkpolicy.yaml` lets its flows through
-([What the namespaces let through](#what-the-namespaces-let-through)).
+`dependsOn` (oauth2-proxy names dex): `hello-sso`, `victoria-logs-route` and `locust-route` wait on
+oauth2-proxy, and nothing waits on any of those routes. A cluster that lists neither application
+builds none of it, and a cluster whose overlay lists a route that opts in without them is refused.
+The namespace enforces the restricted Pod Security level, and `just pod-security-check` evaluates
+their pods. It denies traffic by default, and each application's `ciliumnetworkpolicy.yaml` lets
+its flows through ([What the namespaces let through](#what-the-namespaces-let-through)).
 
 ### Who is admitted
 
@@ -4181,9 +6184,14 @@ Until the first two exist the ExternalSecret `dex-github` reports the missing ke
 in `CreateContainerConfigError`, and the Kustomization `dex` is not Ready, with the pods' state as its
 reason. Until the third exists the Secret `oauth2-proxy-allowed-emails` does not exist, the pods
 of oauth2-proxy stay in `ContainerCreating`, and the Kustomization `oauth2-proxy` is not Ready, and
-neither are `hello-sso` and `victoria-logs-route`, which wait for it and are not applied until it
-is. Nothing else of the cluster waits on any of them, and the generated secrets are made as soon as
-External Secrets runs.
+neither are `hello-sso`, `victoria-logs-route` and `locust-route`, which wait for it and are not
+applied until it is. Nothing else of the cluster waits on any of them, and the generated secrets are
+made as soon as External Secrets runs. Until the first two exist the probe of `dex` under the domain
+fails, and `PublicEndpointWrongStatus` fires for it; then, until the third exists, the probe of
+`auth` does. The routes and `Probe`s of oauth2-proxy, of `hello-sso`, of `victoria-logs-route` and
+of `locust-route` are applied with their applications, each once the one it waits for is Ready, so
+the probe of `auth` is not there while dex waits, and the probes of `hello-sso`, of `logs` and of
+`locust` meet the redirect from their first run ([Probes](#probes)).
 
 The wait is not open-ended. Each release's install times out after 10 minutes and is retried three
 times (the root's release defaults, [What the root sets](#what-the-root-sets)); after that
@@ -4225,7 +6233,10 @@ namespace of what is referred to, and Flux's target namespace would put one made
 into the application's own. A namespace not in the grant cannot refer to oauth2-proxy's Service;
 the Gateway API says so and the controller applies it. The grant names the one Service, never a
 namespace that has not opted in. No network policy changes for sign-in: the proxies already reach
-oauth2-proxy, and the route's own backend needs the rules every public hostname needs.
+oauth2-proxy, and the route's own backend needs the rules every public hostname needs. The route's
+`Probe`, which every public hostname needs, uses the module `public_https_signin`, which expects
+the redirect to sign-in that a request without a session gets, and `tests/probes.bats` refuses one
+that expects a 200 there ([Probes](#probes)).
 
 For each request to the route, Envoy first asks oauth2-proxy over HTTP, sending the request's host,
 method and cookie (Envoy always adds `Authorization`, which oauth2-proxy does not read here), and
@@ -4701,6 +6712,203 @@ the requests above through each edge, the proxies' memory over a day
 `Retry limit exceeded` or `Plugin coraza failed to load` means it serves `hello` without the
 filter ([It fails open](#it-fails-open)).
 
+## Rate limits
+
+A route on the public Gateway can take a request rate limit, which the Gateway's own proxies hold:
+Envoy's local rate limit filter, which Envoy Gateway configures from a `BackendTrafficPolicy`, with
+no rate limit service and no store behind it, and no flow of the network policies added or changed.
+A route opts in with one component, `components/ratelimit`. Three routes take it, and no other:
+
+- `kromgo/kromgo`, 300 requests a minute, the default: every badge request runs a query on
+  Prometheus, and kromgo keeps no result and limits nothing itself ([Status badges](#status-badges)).
+- `demo/hello`, 5 a second: low enough that `just gateway-check` sends a burst of 11 over it through
+  each edge and sees 429, and the route answer again two seconds later, whatever the bucket's
+  refill ([Checking the public Gateway](#checking-the-public-gateway)). Nothing real is behind the
+  demo, so the low figure costs nothing.
+- `demo/hello-sso`, 300 a minute: a route behind the sign-in that takes a limit, to see on the
+  cluster that a limited route signs in.
+
+### Taking it
+
+The application's `ks.yaml` adds the component, its variables and the health check, beside the
+`HTTPRoute` its own manifests define; `components/ratelimit/kustomization.yaml` gives the block:
+
+```yaml
+components:
+  - ../../../../../components/ratelimit
+postBuild:
+  substitute:
+    RATELIMIT_ROUTE: <the HTTPRoute's name>
+    RATELIMIT_REQUESTS: "<the figure>" # 300 when not set
+    RATELIMIT_UNIT: <Second, Minute, ...> # Minute when not set
+wait: true
+healthCheckExprs:
+  - apiVersion: gateway.envoyproxy.io/v1alpha1
+    kind: BackendTrafficPolicy
+    current: >-
+      has(status.ancestors) && size(status.ancestors) > 0 && status.ancestors.all(a,
+      a.conditions.exists(c, c.type == 'Accepted' && c.status == 'True' && c.observedGeneration
+      == metadata.generation))
+    failed: >-
+      has(status.ancestors) && status.ancestors.exists(a, a.conditions.exists(c, c.type ==
+      'Accepted' && c.status == 'False' && c.observedGeneration == metadata.generation))
+```
+
+The component makes the `BackendTrafficPolicy` named after the route, in its namespace, which
+targets that `HTTPRoute` by `targetRefs` and nothing else, with one local rule and no client
+selector: `limit.requests` is `${RATELIMIT_REQUESTS:=300}` and `limit.unit`
+`${RATELIMIT_UNIT:=Minute}`. `RATELIMIT_ROUTE` has no default: `just kubernetes-check`, which
+builds each application with Flux's strict substitution, refuses a route that takes the component
+and names none, and on the cluster, where kustomize-controller substitutes an unset variable with
+nothing, such a policy has no name and its apply fails. The figure is a string among Flux's
+variables, so it is quoted in the `ks.yaml`, and unquoted in the policy, so what Flux substitutes is
+the integer the definition requires; the unit is one of its enum, `Second`, `Minute`, `Hour`,
+`Day`, `Week`, `Month` or `Year`, which `just kubernetes-validate` holds the built policy to. The
+health check is the firewall's, for this kind, whose status has the same shape: an `Accepted`
+condition for each ancestor, the Gateway's listener the route attaches to. A policy the controller
+cannot translate is reported not accepted, and its route answered 500
+(`internal/gatewayapi/backendtrafficpolicy.go` of Envoy Gateway v1.10.0), which the check makes the
+Kustomization's failure. The policy's kind is `envoy-gateway-crds`', which `gateway-public`, named
+in every route's `dependsOn`, waits for through `envoy-gateway`; the controller's ClusterRole, which
+its chart renders, lets it watch `backendtrafficpolicies` and write their status.
+
+`tests/gateway.bats` fails unless the component is that policy and nothing else, with those three
+variables and no other; the routes that take it are the three above, at their figures, each
+waiting with those expressions; the policies, built as Flux builds them, have an integer figure and
+target a route of their build; and no file under `kubernetes/` or object of the render, the charts'
+included, holds another `BackendTrafficPolicy`, or one that targets a Gateway or a ListenerSet or
+selects its targets.
+
+### What is counted
+
+- **A bucket for each Envoy route, in each proxy.** Envoy Gateway takes the rule without client
+  selectors as the route's default bucket (`buildLocalRateLimit` in
+  `internal/gatewayapi/backendtrafficpolicy.go`) and sets it on each Envoy route the `HTTPRoute`
+  makes, in the route's own filter configuration, with `max_tokens` and `tokens_per_fill` both the
+  figure and `fill_interval` the unit (`patchRoute` in `internal/xds/translator/local_ratelimit.go`).
+  A route of one rule and one match, as hello's, kromgo's and hello-sso's are, is one Envoy route
+  and one bucket. `local_rate_limit_per_downstream_connection` is not set, so the bucket is the
+  proxy process's, shared by all its workers (Envoy's local rate limit filter documentation).
+- **Refilled evenly.** Envoy 1.40.2, the version Envoy Gateway v1.10.0 runs where the `EnvoyProxy`
+  names no image, adds the figure to the bucket over each unit at an even rate and keeps no more
+  than the figure (`RateLimitTokenBucket` in
+  `source/extensions/filters/common/local_ratelimit/local_ratelimit_impl.cc`): hello lets a burst
+  of 5 through and then one about every 200 milliseconds. A bucket starts full whenever the proxy
+  takes a new route configuration for the listener, as each route's filter configuration owns its
+  bucket (`FilterConfig` in `source/extensions/filters/http/local_ratelimit/local_ratelimit.cc`).
+- **For each proxy, up to twice the figure in all.** Each of the two proxies of the `EnvoyProxy`
+  holds its own bucket, and a connection reaches one of them, so the route answers up to twice the
+  figure in a unit, and a client whose connections reach both gets up to that. While a rollout
+  replaces the proxies, a new one runs beside the two before an old one stops (the Deployment's
+  rolling update, which the `EnvoyProxy` leaves at Envoy Gateway's default), and an old one serves
+  its open connections while it drains, each with a bucket of its own, so for that while the route
+  answers more than twice the figure.
+- **For the route, not for a client.** With no client selector, every client of the route spends
+  from one bucket: a client that sends more than the figure has the others answered 429 as well.
+  A limit for each client, rules by network, and anything that tells clients apart are other
+  changes.
+- **The answer.** A request that finds the bucket empty is answered 429 by the proxy and never
+  reaches the backend, with `Retry-After`, the seconds until the bucket's next token and at least
+  one, and the `x-ratelimit-limit`, `x-ratelimit-remaining` and `x-ratelimit-reset` headers: Envoy
+  Gateway turns them on unless a `ClientTrafficPolicy` turns them off, and none does
+  (`local_ratelimit.go`). Every answer of a request the bucket counted carries those three, a 200
+  as well as a 429, as the filter adds them to the response of each request it took a token for or
+  refused (`encodeHeaders` in Envoy's `local_ratelimit.cc`), so the figure shows to any client; it
+  is public in this repository anyway. An answer a filter before it gave, such as the sign-in's
+  302, carries none. The 429 carries no `x-envoy-ratelimited`: Envoy's documentation of the local
+  filter names it, but at 1.40.2 only the global rate limit filter sets it (`sendLocalReply` in
+  `source/extensions/filters/http/local_ratelimit/local_ratelimit.cc`).
+
+### In front of what
+
+Envoy Gateway orders a listener's HTTP filters itself: external authorisation at 6, Wasm from 200,
+the local rate limit at 302 and the router last, at 312 (`newOrderedHTTPFilter` in
+`internal/xds/translator/httpfilters.go`), unless an `EnvoyProxy` sets `filterOrder`, which the
+tree's does not and `tests/gateway.bats` holds. A request reaches the rate limit only once the
+filters before it let it through:
+
+- **Behind the sign-in**, the external authorisation filter stops the request while it asks
+  oauth2-proxy and answers a refusal itself, the 302 to sign-in of a request without a session among
+  them (`decodeHeaders` and `onComplete` in Envoy's `source/extensions/filters/http/ext_authz/ext_authz.cc`).
+  A signed-out request therefore costs `hello-sso` no token, and the probe's `public_https_signin`
+  gets its 302 whatever the bucket holds; a signed-in one spends one.
+- **Behind the firewall**, a request the Wasm filter refuses on its headers or query string, the
+  rule set's phase 1, is answered 403 by the filter, which then holds the request
+  (`handleInterruption` in coraza-proxy-wasm 0.6.0's `wasmplugin/plugin.go`), so it costs `hello` no
+  token. One it lets through on its headers spends one, a request it then refuses on its body, in
+  phase 2, among them.
+- **Beside each other.** The three kinds on one route do not override one another: the controller
+  translates each kind in a pass of its own (`internal/gatewayapi/translator.go`) into a part of the
+  route's configuration of its own, `Traffic` for a `BackendTrafficPolicy`, `Security` for a
+  `SecurityPolicy` and `EnvoyExtensions` for an `EnvoyExtensionPolicy`, and each filter is turned on
+  for the route in the route's own filter configuration. Precedence settles policies of one kind on
+  one target, by age (the controller's documentation, Precedence); `tests/gateway.bats` fails when
+  a route is the target of two policies of one kind, and when the sign-in paths, the route
+  `hello-sso-oauth2` that `components/sso` adds, are the target of any, so they are never limited.
+
+The order and the source lines above are those of Envoy Gateway v1.10.0 and Envoy 1.40.2. No test
+here holds the order the controller builds, only that the `EnvoyProxy` sets none, so an update of
+Envoy Gateway is checked again on the cluster once its proxies run: twice `hello-sso`'s figure of
+signed-out requests, one after another on one connection through an edge, are each answered 302 to
+sign-in, none 429 and none with the `x-ratelimit` headers, as they would not be if the limit counted
+them first.
+
+### Seeing a limited request
+
+A limited request's access log line ([The public Gateway](#the-public-gateway), Access log) has the
+status 429 and the response flag `RL`, which the filter sets ("rate-limited locally", Envoy's
+access log formatting), so the limit's answers are told from a backend's own 429. Find them, and
+count them by host:
+
+```sh
+just logs 'kubernetes.pod_namespace:envoy-gateway-system kubernetes.container_name:envoy client_address | unpack_json fields (host, status, response_flags) | filter status:=429 response_flags:=RL'
+just logs 'kubernetes.pod_namespace:envoy-gateway-system kubernetes.container_name:envoy client_address | unpack_json fields (host, status, response_flags) | filter status:=429 response_flags:=RL | stats by (host) count()'
+```
+
+There is no alert on them: a 429 is the limit doing its work, and the log is where it shows.
+
+### The probes
+
+A route's `Probe` spends its tokens like any client: one request each scrape, every 30 seconds,
+the default of the Prometheus definition, as the cluster's `Prometheus` sets no interval and a
+`Probe` sets none of its own ([Probes](#probes)), by each replica of the `Prometheus`, of which it
+runs one. `tests/probes.bats` counts, from the render, the requests the `Probe`s of each
+rate-limited route make in one unit of its limit, at least one for each replica, and fails when they
+are more than a fifth of its figure, or a `Probe` of such a route sets an interval of its own:
+hello's one in a second against 5, kromgo's and hello-sso's two a minute against 300.
+
+### What applying it drains
+
+- **The first limit on a listener.** Envoy Gateway adds the local rate limit filter to the HTTP
+  connection manager of the `https` listener when the first of its routes takes a limit, and leaves
+  it out when none does (`patchHCM` in `local_ratelimit.go`). Either replaces the listener's filter
+  chain, which drains every connection of every route on it, as the firewall's change does
+  ([How it reaches the proxies](#how-it-reaches-the-proxies)): Envoy tells each to close at its next
+  response from the start of its 60 seconds of drain time, and resets an upgraded websocket, n8n's
+  and Open WebUI's among them, when it drains the rest in the last third of that time (Envoy's
+  documentation, Draining).
+- **Every change of the `ClientTrafficPolicy`.** The connection limit and the connection manager's
+  timeouts are part of each listener's filter chain, so a change of the policy replaces the chains
+  of both listeners and drains them.
+- **A drain for each update.** The proxies drain a listener for each update of its filter chain
+  that reaches them. The `ClientTrafficPolicy` is `gateway-public`'s and a route's limit its own
+  application's, Kustomizations Flux reconciles on their own, so a change of both, such as the
+  policy's limits arriving with the first routes that take a limit, reaches the proxies as one
+  update or as two: the `https` listener drains once or twice, and an upgraded websocket opened
+  again after the first drain is reset by the second.
+- **A later route, or another figure.** With the filter in the chain, a route that takes a limit
+  later, or a figure or unit changed, is a change of the route configuration, which the proxies
+  take over RDS (`Rds` in `addHCMToXDSListener`, `internal/xds/translator/listener.go`): nothing
+  drains, and each limited route of the listener starts again with a full bucket.
+
+The tests prove what the files and the render hold. What only the cluster shows: the controller
+accepting the three kinds on one route, the order of the filters, the 302 and the 403 before the
+limit, the limit's 429 through each edge (`just gateway-check`), the drain at apply, HTTP/2 between
+a client and the proxies through an edge, where the client's TLS handshake, and with it the choice
+of protocol, reaches the proxies whole (Envoy Gateway offers `h2` and `http/1.1` on an HTTPS listener
+whose TLS overlaps no other listener's, as the Gateway's one HTTPS listener does not,
+`buildALPNProtocols` and `addHCMToXDSListener` in `listener.go`), and the connection limit's count.
+
 ## PostgreSQL
 
 Applications get PostgreSQL from the CloudNativePG operator, which runs each database as a
@@ -4778,7 +6986,22 @@ spec:
       CNPG_CLUSTER_NAME: <app>-db
       CNPG_NAMESPACE: <the Kustomization's targetNamespace>
       CNPG_STORAGE_SIZE: 10Gi  # each instance's volume; 5Gi when unset
+      # CNPG_BACKUPS_SUSPENDED: "true"  # only while the database is restored; false when unset
 ```
+
+`CNPG_BACKUPS_SUSPENDED: "true"` holds a database for its restore onto a rebuilt cluster
+([rebuild.md](runbooks/rebuild.md#building-it-again)): it sets `suspend` on the dump CronJob
+`<name>-pgdump` and on the ScheduledBackup `<name>`, which then make no dump and no base backup, the
+ScheduledBackup's immediate one included, and changes nothing else, the WAL archiver, the
+`ObjectStore` and its retention among them; unset, both carry `suspend: false`. A rebuilt cluster
+makes the Cluster again under its old name, empty, and without the hold its dumps would rotate the
+real ones out of the old path and a base backup of it could become the newest of the old archive. It
+is set in a pull request before Flux first applies the application, as Flux follows `main`, and
+released in the pull request that switches the application to its restored database, never before
+it. While it is set, `PostgresDumpStale` fires once the dump job has had no success for 36 hours,
+which on a rebuilt cluster is 36 hours after the CronJob is made, and `PostgresBackupTooOld` once the
+newest base backup the plugin reports for the cluster is 36 hours old ([Alerts](#alerts)), so a hold
+left in place does not go unseen.
 
 `CNPG_NAMESPACE` is the namespace the application is applied to: a component cannot read
 `targetNamespace`, and the namespace is a level of the cluster's archive path. The Cluster's
@@ -4794,7 +7017,11 @@ neither.
 
 The cluster has three instances of PostgreSQL 18, from the operator's standard image, whose tag names
 a minor version that Renovate moves. The publisher rebuilds the image under that tag and a node keeps
-the build it pulled first, so instances can run different builds of one minor version. Each instance
+the build it pulled first, so instances can run different builds of one minor version. A new major is
+an upgrade in place by the operator of every database the component makes, all at once: Renovate
+proposes it in a pull request of its own, labelled `postgresql-major`, that never merges itself, and
+`tests/postgresql.bats` fails that pull request until the archive's server name moves with the image
+([postgres-restore.md](runbooks/postgres-restore.md#moving-to-a-new-postgresql-major)). Each instance
 must run on a different worker, and requests and is limited to 500m CPU and 512Mi memory. The
 operator's disruption budgets move the primary away by switchover before its worker is drained, and
 let drains take one replica at a time. A PodMonitor scrapes every instance, and labels their series
@@ -4804,14 +7031,20 @@ nothing defines, which is why the check is the guard. The apply of a name longer
 fails as well: the dump job's CronJob, `<name>-pgdump`, is named in at most 52, and Flux applies an
 application whole or not at all. The operator creates the database `app`, owned by the user
 `app`, whose password and connection URI are in the Secret `<name>-app`; the Services `<name>-rw`,
-`<name>-ro` and `<name>-r` reach the primary, the replicas and any instance. The dump job
-([Dumps](#dumps)) takes its S3 key through an ExternalSecret too, so it needs nothing in `dependsOn`
+`<name>-ro` and `<name>-r` reach the primary, the replicas and any instance. An application
+whose patch names a Secret of its own in `bootstrap.initdb` makes that Secret, and the
+operator then makes none: Ascender's `ascender-db-app` comes from External Secrets, with
+the keys Ascender reads and no URI ([Ascender](#ascender)). The dump job ([Dumps](#dumps))
+takes its S3 key through an ExternalSecret too, so it needs nothing in `dependsOn`
 beyond what the backups need.
 
 A patch in the application's own `kustomization.yaml` changes anything else, as it applies after the
-component. It targets the Cluster by kind alone: Flux substitutes after the build, so when the patch
-applies the Cluster is still named `${CNPG_CLUSTER_NAME}`, and a target by the name the application
-gives it matches nothing and is skipped without an error.
+component. It targets the Cluster by kind: Flux substitutes after the build, so when the
+patch applies the Cluster is still named `${CNPG_CLUSTER_NAME}`, and a target by the name
+the application gives it matches nothing and is skipped without an error. A patch that
+must reach the component's Cluster and no other, as a restore may add one beside it in
+`app/`, names it by that name as a regular expression, `name: \$\{CNPG_CLUSTER_NAME\}`, as
+Ascender's does ([Ascender](#ascender)).
 
 ```yaml
 patches:
@@ -4834,7 +7067,22 @@ level, with no storage host holding two instances of a cluster, which the placem
 The cost is that an instance cannot move: while its worker is down the cluster runs on two. When the
 worker or its data volume is lost for good, the instance's PersistentVolumeClaim and then its pod
 are deleted, which removes the instance, and the operator clones a new one from the primary. With
-three workers, the new one waits for a worker without an instance.
+three workers, the new one waits for a worker without an instance. A WAL segment that fails to
+archive stays on the primary's volume until it is archived, and PostgreSQL stops when the volume is
+full, so each volume holds the WAL of an archive outage as well as the data: at least 4Gi, sixteen
+hours of the 16MiB segment that the operator's default `archive_timeout` closes every five minutes
+while there is any activity (192 segments, 3Gi), besides 1Gi for the data and the WAL a running
+primary keeps, a floor `tests/postgresql.bats` holds every database of the overlay to. A larger
+`CNPG_STORAGE_SIZE` reaches the `Cluster` once the application's Kustomization reconciles, which
+Flux does only while every Kustomization it names in `dependsOn` is Ready. The operator then grows
+every instance's claim to it, but only once its pass over the cluster reaches the volumes, which it
+does not while, among others, it cannot reach the Barman Cloud plugin, an instance's pod is not
+active (pending, finished or being deleted, as one is while its worker is down), an instance is
+being made or a switchover or failover is under way; then no claim grows, and the primary's is
+grown by hand ([alerts.md](runbooks/alerts.md#postgreswalarchivingfailing)). As
+`linstor-node-local` allows expansion, the LINSTOR CSI driver grows a claim's volume and its XFS
+file system in place, while the pod runs; no volume can be shrunk, as the operator's webhook
+refuses a smaller size.
 
 ### Backups and restores
 
@@ -4847,23 +7095,31 @@ component adds an `ObjectStore`, a `ScheduledBackup` and an ExternalSecret.
 
 - **Where.** The postgres bucket, `<BACKUP_BUCKET_PREFIX>-postgres`
   ([infrastructure.md](infrastructure.md#s3-keys-and-backup-buckets)), at the endpoint of
-  `cluster-config`, under `<CLUSTER_NAME>/<namespace>/<name>`: the Kubernetes cluster's name, which
-  `cluster-config` holds as `CLUSTER_NAME`, from the directory name of `clusters/<cluster>`, the
-  namespace and the database's `CNPG_CLUSTER_NAME`. The plugin keeps `base/` and `wals/` there, and
-  the daily dumps are the files directly in that directory, whose retention lists and deletes only
-  those ([Dumps](#dumps)). Two databases never share a path, and a restored cluster writes under its
-  own name.
+  `cluster-config`, under `<CLUSTER_NAME>/<namespace>/`: the Kubernetes cluster's name, which
+  `cluster-config` holds as `CLUSTER_NAME`, from the directory name of `clusters/<cluster>`, and the
+  namespace. The plugin keeps `base/` and `wals/` under the database's server name there, its
+  `CNPG_CLUSTER_NAME`, `<name>`, while it runs PostgreSQL 18 and `<name>-pg<major>` after a move to a
+  later major ([postgres-restore.md](runbooks/postgres-restore.md#moving-to-a-new-postgresql-major)).
+  The daily dumps stay in `<name>/`, the files directly in that directory, whose retention lists and
+  deletes only those ([Dumps](#dumps)). Two databases never share a path, and a restored cluster
+  writes under its own name.
 - **How often.** A base backup is taken at 02:47 UTC every day, and one as soon as the
-  `ScheduledBackup` is made. The minute is one that no other backup uses: the etcd snapshots run at
-  minute 17, the volume backups at minutes of their own, and the dumps start at 02:00 and end by
-  their deadline at 02:45, and 02:47 is a quiet hour for the databases, so a base backup's reads and
-  its upload meet no other job's. WAL is archived as each segment fills.
+  `ScheduledBackup` is made. Every database's base backup starts at 02:47, the component's one
+  schedule, so the base backups of the databases run together. The minute is one that no backup of
+  another kind uses: the etcd snapshots run at minute 17, the OpenBao snapshots at minute 43, the
+  volume backups at minutes of their own, and the dumps start at 02:00 and end by their deadline at
+  02:45, and 02:47 is a quiet hour for the databases, so a base backup's reads and its upload meet no
+  dump that starts on schedule, and no backup of another kind starts with them. A dump the CronJob
+  starts late, as it may within the hour of its `startingDeadlineSeconds`, can still be running.
+  WAL is archived as each segment fills or, five minutes after the last switch with any activity
+  since, as the operator's default `archive_timeout` closes it.
 - **How long.** Base backups and WAL are kept for a recovery window of 30 days, so a database can
   be restored to any moment of the last 30 days. After each base backup the plugin deletes what
-  falls outside the window, with the delete right of the key it holds, which is the cluster's S3
-  key and reaches every bucket of the project: a workload that holds it can delete the archive as
-  well, the residual risk [ADR 0008](adr/0008-state-and-backups-are-encrypted-before-they-leave.md)
-  states for every backup. Base backups and WAL are compressed with gzip.
+  falls outside the window from the archive of the current server name, with the delete right of
+  the key it holds, which is the cluster's S3 key and reaches every bucket of the project: a
+  workload that holds it can delete the archive as well, the residual risk
+  [ADR 0008](adr/0008-state-and-backups-are-encrypted-before-they-leave.md) states for every
+  backup. Base backups and WAL are compressed with gzip.
 - **The credentials.** An ExternalSecret in each database's namespace, `<name>-backup`, reads the
   cluster's S3 key from the secret store's key `volsync`, only its two key fields as the etcd
   snapshot job does, so nothing new is seeded for it and the restic master never reaches the
@@ -4904,9 +7160,19 @@ component adds an `ObjectStore`, a `ScheduledBackup` and an ExternalSecret.
   component makes. [postgres-restore.md](runbooks/postgres-restore.md) restores one database to a
   point in time into a new cluster beside the old one, switches the application over, and says
   what the old archive needs so that two clusters never write to one path; it also restores a daily
-  dump, the way back when the archive cannot be read. The component has no
+  dump, the way back when the archive cannot be read. Either restore adds its new cluster as one
+  file named for it beside the component's `Cluster`, in the application's own `app/`, which
+  archives through the old cluster's `ObjectStore` under its own name, and then makes it the
+  component's by `CNPG_CLUSTER_NAME`; until then the new cluster has no `ScheduledBackup`, dump
+  job or `PodMonitor`. The file's image is a pin no Renovate manager reads there, so the pull
+  request lists it in `.renovate/by-hand.tsv` until the file goes; the dump restore's also
+  suspends the old cluster's dump job by a patch in `app/kustomization.yaml`, so that it does
+  not rotate the real dumps out, as resuming the application's Kustomization would undo a
+  suspension made with `kubectl`. In a namespace with the default deny the database's policies
+  select every cluster of the namespace, so the restore's pull request adds no allow
+  ([What the namespaces let through](#what-the-namespaces-let-through)). The component has no
   recovery input: a `bootstrap` section would change nothing for a cluster that is not restoring,
-  but it is a field of the `Cluster` and not a value, so the runbook gives the manifest.
+  but it is a field of the `Cluster` and not a value, so the runbook gives the manifests.
 - **Alerts.** `PostgresWALArchivingFailing` and `PostgresBackupTooOld`
   ([Alerts](#alerts)), quiet on a healthy cluster and on one less than a day and a half old.
 
@@ -4920,9 +7186,42 @@ one reads, with certificates made as the plugin's issuer makes them, and checks 
 the cluster's CA would issue end it with `certificate required`; builds applications that
 take a cluster from the component, one that does not name it and two that patch it, by kind and by
 name, as Flux applies them, and checks their archive paths, schedule, retention, encryption and
-credentials; checks each field of the `Cluster`, the `ObjectStore` and the `ScheduledBackup`
-against the pinned charts' definitions and the restore runbook's manifest against the `Cluster`'s;
-and checks the `StorageClass` against LINSTOR's. Its handshake runs the system's `openssl`, which
+credentials; holds every database of the overlay, built from its Kustomization as the overlay makes
+it, to the server name of its image's major, its name at PostgreSQL 18 and `<name>-pg<major>` above
+it, and its dump job to an image of that major, on the tree and on copies whose component names the
+next major, failing the copy whose server name is left as it is or whose dump image stays behind,
+and reads Renovate's four configuration files: it requires the rule that labels a major of the
+image `postgresql-major` and holds it for a person, and fails a rule after it that turns auto-merge
+on, a rule or setting that puts the image in a group or its majors with its minors, and a preset it
+has not read; holds the volume of every `Cluster` an
+application of the overlay with a database builds, the component's and any beside it, built from
+its Kustomization as the overlay makes it, to the 4Gi floor above, computed in the test from its
+sources, and fails for one that sets a WAL volume, a segment size, an `archive_timeout` or a
+`wal_keep_size` of its own, turns `resizeInUseVolumes` off or names a class that does not allow
+expansion; checks each field of the `Cluster`, the `ObjectStore` and the `ScheduledBackup` against
+the pinned charts' definitions and the restore runbook's point-in-time manifest, the one that
+bootstraps by recovery, against the `Cluster`'s; and checks the `StorageClass` against LINSTOR's.
+`tests/postgres-restore.bats` makes
+both of the runbook's restores for every database the overlay builds as their pull requests make
+them, each manifest a file of the application's own `app/` named for its new cluster, with its row
+of `.renovate/by-hand.tsv`, the dump restore's suspension of the old dump job and, for a database
+whose `Cluster` names its owner's Secret, as Ascender's does, the runbook's copy of that Secret's
+`Password` and `ExternalSecret` for the new cluster ([Ascender](#ascender), Restoring the
+database), on a copy of what git would commit, in a repository of its own with one commit; it
+holds the dump restore's manifest to the point-in-time one, to the `Cluster`'s definition and to an
+archive under its own name, the runbook's copy, made for the old cluster, to the tree's two
+objects, every old dump job to its suspension, a boolean `true`, in the render and every such copy
+to the new cluster's name and host there, and runs on the copy, side by side,
+`just check-literals`, `just check-conflict-markers`, the YAML half of `just lint`,
+`just renovate-pins`, `just signatures-check`, `just secrets-scan`, `scripts/kubernetes-check`, the
+render, `scripts/network-policy-check` over it, `just pod-security-check`,
+`scripts/scenarios-check` and the copy's own tests that hold a rule over every application or
+database, named one by one, run in processes of their own on clones of the copy; the renders after
+the first take the charts it pulled. Over the same render it evaluates every flow of the new
+clusters' pods against the old cluster's, in each namespace with the default deny, the flows side
+by side. Its nested `just` finds the pinned tools through a mise that trusts the copy by
+`MISE_TRUSTED_CONFIG_PATHS` alone. The handshake of `tests/postgresql.bats` runs the system's
+`openssl`, which
 `mise.toml` does not pin: the CI tools image has the one its base image comes with, which
 `versions.yaml` pins by digest, and an `openssl` that is missing or behaves otherwise fails the test
 rather than passing it. `tests/postgres-dumps.bats` builds applications that
@@ -4954,7 +7253,8 @@ that has its tool, so no image is built:
    retry has less time than the first attempt did and a long dump can fail until the next night. The image is the Cluster's own, which carries `pg_dump`: the same registry
    path and PostgreSQL major as the Cluster's `imageName`, pinned by tag and digest in the CronJob,
    so the tool is never older than the server, which `pg_dump` refuses. `tests/postgres-dumps.bats`
-   fails when the majors differ; Renovate moves the CronJob's image with the Cluster's, which share a package.
+   and `tests/postgresql.bats` fail when the majors differ; Renovate moves the CronJob's image with
+   the Cluster's, which share a package, a new major in the same pull request.
 3. `encrypt` encrypts the plain dump with age to the Talos age key's recipient, the one
    `just cluster-snapshot` and the etcd job encrypt to, and removes the plain file. The recipient is
    in the manifest as the default of `CNPG_DUMP_AGE_RECIPIENT`, and the test holds it to
@@ -5098,14 +7398,21 @@ A CronJob takes a snapshot of the raft storage every six hours and uploads it en
 ### How it unseals
 
 OpenBao's static seal unseals each member at every start with a 32-byte key from a file, without a
-person. The key is in the Secret `openbao-seal-1` in `openbao`, mounted into the servers alone, not
-into the chart's test pod. External Secrets makes it, once: its `Password` generator gives 32
-characters of letters, digits and symbols, about 190 bits, hex-encoded into the 64 hexadecimal
-digits the seal reads, and the ExternalSecret `openbao-seal-1` writes them into the Secret when it is
-first synced and never again (`refreshPolicy: CreatedOnce`). The Secret has no owner, so deleting the
-ExternalSecret or the application leaves it, and it is immutable, so nothing changes the key; an
-ExternalSecret made again later finds it and keeps its key. Nothing in the repository holds it,
-encrypted or not.
+person. The seal stanza names the key by a permanent id, `current_key_id`, and after a rotation the
+key before it too, `previous_key_id`: the seal seals with the current key, stamping its id on what it
+seals, and opens what was sealed with either by the id it carries, and with no other key
+([static seal](https://openbao.org/docs/configuration/seal/static/#key-rotation)). Each key is in
+the Secret of its id in `openbao`, `openbao-seal-1` today, mounted into the servers alone, at
+`/openbao/userconfig/<id>/key`, not into the chart's test pod. External Secrets makes each, once: a
+`Password` generator of that name gives 32 characters of letters, digits and symbols, about 190
+bits, hex-encoded into the 64 hexadecimal digits the seal reads, and the ExternalSecret of that name
+writes them into the Secret when it is first synced and never again (`refreshPolicy: CreatedOnce`).
+The Secret has no owner, so deleting the ExternalSecret or the application leaves it, and it is
+immutable, so nothing changes the key; an ExternalSecret made again later finds it and keeps its key.
+Nothing in the repository holds it, encrypted or not. The recipes take the ids from the stanza of
+the checkout they run from, and `tests/openbao.bats` holds every id it names to that convention. A
+rotation adds a key and makes the current one the previous one
+([runbook](runbooks/openbao.md#rotating)).
 
 The key protects OpenBao's storage and every copy of it, such as a volume or its snapshot, read
 outside the cluster: without the key it is ciphertext. It does not protect against whoever can read
@@ -5199,14 +7506,20 @@ token holds cluster-admin, and with it the seal Secret and every Secret the stor
 Self-initialisation makes no recovery keys. Right after the first reconcile, `just bao-recovery <file>`
 makes them, through OpenBao's authenticated rotation as the role `operator`: five shares, any three
 of which make a short-lived root token when the roles no longer reach what has to be fixed. It writes
-them, with the seal key, to `<file>`, a new file outside the repository, encrypted with age to the
-Talos age key's recipient in `talos/.sops.yaml`, a key the cluster does not hold; opens it again with
-the operator's Talos age key and compares it with what it wrote; and has OpenBao commit the shares
-only then. A rotation it starts and does not complete is cancelled and its file removed; one left in
-progress by an earlier run is cancelled first; a file made at the path meanwhile is never replaced.
-Nothing of the shares or the key is printed or passed as an argument. OpenBao makes recovery keys
-only while none exist, so the recipe refuses once they do: the file holds the only copy. The operator
-keeps it outside the cluster, with the Talos age key.
+them, with the seal keys the servers mount, to `<file>`, a new file outside the repository, encrypted
+with age to the Talos age key's recipient in `talos/.sops.yaml`, a key the cluster does not hold;
+opens it again with the operator's Talos age key and compares it with what it wrote; and has OpenBao
+commit the shares only then. A rotation it starts and does not complete is cancelled and its file
+removed; one left in progress by an earlier run is cancelled first; a file made at the path meanwhile
+is never replaced. Nothing of the shares or the keys is printed or passed as an argument. OpenBao
+makes recovery keys only while none exist, so the recipe refuses once they do: the file holds the
+only copy. The operator keeps it outside the cluster, with the Talos age key.
+
+The file holds `{cluster, created, recovery, seal}`: `seal` is the current seal key as
+`{secret, key_id, key}`, and after a rotation of the seal key `previous_seal`, of the same shape,
+holds the previous one. A rotation's custody file is a new one, which `just bao-seal-keep` writes
+from the file before it ([The recipes](#the-recipes)); the older files stay with the operator, as
+they hold the keys before the previous one.
 
 ### The recipes
 
@@ -5220,9 +7533,15 @@ with the Talos age key from `SOPS_AGE_KEY_FILE`, or `SOPS_AGE_KEY`, into memory 
 - A custody file is read only where no one but the operator can have written it, as age does not say
   who wrote a file and the recipient is public: the file is the operator's and writable by no one
   else, and each directory above it, on its path and as it resolves, is the operator's or root's and
-  writable by no one else unless its sticky bit is set. A recipe that writes one, `bao-recovery` or
-  `bao-seed-volsync`, writes it only to such a place, which is a directory only the operator can
-  write, beside the Talos age key.
+  writable by no one else unless its sticky bit is set. A recipe that writes one, `bao-recovery`,
+  `bao-seal-keep` or `bao-seed-volsync`, writes it only to such a place, which is a directory only the
+  operator can write, beside the Talos age key.
+- The ids of the seal keys come from the seal stanza in the checkout's
+  `apps/base/openbao/openbao/app/values.yaml`, as the tree is what a rebuild applies and the servers'
+  ConfigMap does not exist before OpenBao is installed: its `current_key_id` and, after a rotation,
+  its `previous_key_id`, each the name of the Secret that holds the key. The stanza of the ConfigMap
+  `openbao-config`, which the servers run, is the check, read by `bao-seal-restore --check` and
+  `bao-recovery`: a recipe run from a checkout whose stanza differs refuses, naming both.
 - A recipe refuses to run while the shell traces its commands, as bash would print every secret it
   reads: under `bash -x`, with `SHELLOPTS=xtrace` or a `BASH_ENV` that sets `-x`. A command it
   starts, such as the one `bao-root` or `bao-volsync-password` runs, gets no `BASH_ENV` or `ENV`.
@@ -5237,8 +7556,11 @@ with the Talos age key from `SOPS_AGE_KEY_FILE`, or `SOPS_AGE_KEY`, into memory 
   the two arguments, and a refusal repeats none of them, so a value typed where an argument goes is
   not printed. The value travels only in the body of the write; the recipe prints the path and the
   key.
-- `just bao-recovery <file> [cluster]` makes the recovery keys once, as above; it also reads the
-  Secret `openbao-seal-1`.
+- `just bao-recovery <file> [cluster]` makes the recovery keys once, as above. Before it asks OpenBao
+  for anything, it reads the ConfigMap `openbao-config` and the Secret of each seal key its stanza
+  names, and refuses, sending no request, when the stanza is not the checkout's, a Secret is missing
+  or its key is not 64 hexadecimal digits; it writes the current key as `seal` and the previous one
+  as `previous_seal`.
 - `just bao-root <file> <command> [argument...]` makes a root token from three shares of the file,
   mints with it an orphan token of the root policy that lasts fifteen minutes at most, and revokes
   the root token before the command runs; if minting fails, it revokes the root token and runs
@@ -5250,12 +7572,26 @@ with the Talos age key from `SOPS_AGE_KEY_FILE`, or `SOPS_AGE_KEY`, into memory 
   else; when OpenBao does not revoke a token, it names the token by its accessor, which serves to
   look up, renew or revoke a token but not to act as it, prints the step that revokes it by that
   accessor, and fails even when the command succeeded. No command runs while the root token lives.
-- `just bao-seal-restore <file> [--replace]` writes the seal key from the file back into the Secret
-  `openbao-seal-1`, immutable; a Secret that holds the same key is left alone, and one that holds
-  another key is replaced only with `--replace`. Before deleting it, `--replace` keeps its key in a
-  new file `<file>.replaced-<time>.age` beside the file, encrypted to the same recipient and opened
-  again with the operator's key, and deletes nothing when it cannot. It needs no port-forward, only
-  to read, create and, with `--replace`, delete that Secret.
+- `just bao-seal-restore <file> [--replace|--check]` writes the seal keys from the file back into
+  the Secrets of the keys the stanza names, each immutable: the file's `seal` must be the current key
+  and, after a rotation, its `previous_seal` the previous one, and a file of an older key is refused,
+  naming the custody file to give. A Secret that holds the same key is left alone, and one that holds
+  another key is replaced only with `--replace`; without it nothing is written. Before deleting any,
+  `--replace` keeps their keys in a new file `<file>.replaced-<time>.age` beside the file, encrypted
+  to the same recipient and opened again with the operator's key, and deletes nothing when it cannot.
+  `--check` writes nothing: it reads the ConfigMap `openbao-config`, whose stanza must name the
+  checkout's keys, and checks that the file holds the current key, naming both mismatches in one run,
+  and only then compares each Secret's key with the file's. It needs no port-forward, only to read
+  that ConfigMap and to read, create and, with `--replace`, delete those Secrets.
+- `just bao-seal-keep <file> <new file>` writes, once a rotation of the seal key is applied and every
+  member runs it, the custody file of the rotated store: `<new file>` gets the recovery keys of
+  `<file>`, the custody file of the key before the rotation, the key of the current key's Secret as
+  its `seal`, and `<file>`'s seal, which the previous key's Secret must hold, as its `previous_seal`.
+  It refuses, writing nothing, while the stanza names no previous key, for a file whose seal is not
+  the previous key, and while the current key's Secret is missing or malformed. It writes as
+  `bao-recovery` does, never over a file, leaves `<file>` as it was, and ends with
+  `bao-seal-restore <new file> --check`, whose failure is its own. It needs no port-forward: kubectl
+  reads the two Secrets and, for the check, the ConfigMap.
 - `just bao-seed-volsync <file> [cluster]` seeds the key `volsync` the volume backups read, once for
   each store, with the master password in `<file>`, which its first run makes;
   `just bao-seed-volsync --rotate-s3 [cluster]` replaces only the S3 key in it.
@@ -5513,8 +7849,15 @@ of `secrets/`, every version, the policies, the roles and the auth methods' conf
 keeps that data encrypted with a keyring that a root key protects, which the seal protects
 ([seal](https://openbao.org/docs/concepts/seal/)), so a snapshot is ciphertext until it is restored
 into a store that unseals with the same seal key; the archive's checksums are sealed with the
-store's seal, which is how a restore checks that the snapshot was sealed with the seal key the store
-unseals with; a new store with the same seal key passes. A restore that skips that check, `snapshot-force`, installs data that still opens only with the seal key
+current seal key of the member that took it, under that key's id (`sealer` in the pinned release's
+`internal/physical/raft/raft.go`), which is how a restore checks that the snapshot was sealed with a
+key the store unseals with; a new store with the same seal key passes. So a snapshot needs the key
+that was current when it was taken: it restores into a store whose stanza holds that key under that
+id, as its current key or, after one rotation, its previous one; with both, the restore ends by
+sealing the restored root key and recovery key again with the current key, as a member does when it
+takes the lead ([runbook](runbooks/openbao.md#rotating)). A snapshot taken before the rotation
+before the last one restores into the tree as it stands no more. A restore that skips that check,
+`snapshot-force`, installs data that still opens only with the seal key
 ([API](https://openbao.org/docs/api/system/storage/raft/)). The age layer keeps a copy that leaves
 the cluster unreadable to anyone who holds the S3 key without the operator's age key.
 
@@ -5535,9 +7878,9 @@ the same checksums, which a restore checks (`handleStorageRaftSnapshotWrite` in
 it, as the plain checksums are not signed and the age recipient is public; and that the store's
 keyring opens the data. Of the entries of `state.bin` the check knows the checksum alone.
 
-This backup covers the loss of the three volumes, or of the cluster, while the seal key is kept in
-the operator's file, which `just bao-recovery` writes with the recovery keys: the store is started
-again with that key and the snapshot restored into it
+This backup covers the loss of the three volumes, or of the cluster, while the seal keys are kept in
+the operator's file, which `just bao-recovery` writes with the recovery keys, and after a rotation
+`just bao-seal-keep`: the store is started again with those keys and the snapshot restored into it
 ([runbook](runbooks/openbao.md#restoring-a-snapshot)). It does not cover the loss of the seal key,
 which makes every snapshot as unreadable as the volumes; of the Talos age key, which leaves every
 snapshot undecryptable; or of the bucket's contents. What was written after the newest snapshot, up
@@ -5587,27 +7930,34 @@ the state key and reach nothing but the object storage. The alerts are
 
 ### When something is lost
 
-- **The seal Secret, with the volumes intact**: the members that run keep serving, unsealed; one that
-  restarts cannot start, as the Secret it mounts is missing, and the data stays sealed on its volume.
-  `just bao-seal-restore` writes the key back from the operator's file; an etcd snapshot also holds
-  it ([runbook](runbooks/openbao.md#bringing-the-seal-key-back)).
+- **A seal Secret, with the volumes intact**: the members that run keep serving, unsealed; one that
+  restarts cannot start, as a Secret it mounts is missing, and the data stays sealed on its volume.
+  `just bao-seal-restore` writes the keys back from the operator's file, after a rotation the one
+  `just bao-seal-keep` wrote; an etcd snapshot also holds them
+  ([runbook](runbooks/openbao.md#bringing-the-seal-key-back)).
 - **The volume backups' key `volsync`, or the master's file**:
   [the runbook](runbooks/volume-backups.md) says what each loss means, and how the key is seeded
   again from the file.
-- **The seal Secret and every copy of it**: every runtime secret is lost, the snapshots in the bucket
-  with them, as they are ciphertext that only the seal key opens. OpenBao starts again empty only
-  once its three claims, the Secret and the ExternalSecret `openbao-seal-1` are deleted: the
-  ExternalSecret has synced once and never makes a missing Secret again, so Flux makes it anew, it
+- **The seal Secrets and every copy of them**: every runtime secret is lost, the snapshots in the
+  bucket with them, as they are ciphertext that only the seal keys open. OpenBao starts again empty
+  only once its three claims, the seal Secrets and their ExternalSecrets are deleted: an
+  ExternalSecret that has synced once never makes a missing Secret again, so Flux makes it anew, it
   makes a new key, and every secret is written again.
 - **The operator's file**: nothing is lost while the roles work. If a role or policy breaks, the way
   back to privileged access is gone, and new recovery keys need a threshold of the old ones; what is
-  left is a new OpenBao with every secret written again. The seal key in the file is the key a
-  snapshot needs, so without the file and the Secret a snapshot restores nothing either.
+  left is a new OpenBao with every secret written again. The seal keys in the file are the keys a
+  snapshot needs, so without the file and the Secrets a snapshot restores nothing either.
+- **The custody file after a rotation of the seal key, with the one before it kept**: the older file
+  holds the previous key as its seal and not the current key, which `bao-seal-restore` and
+  `cluster-last-copies` refuse, naming the file to give, while its recovery keys still serve
+  `bao-root`; `just bao-seal-keep` writes the
+  custody file of both keys from it while the previous key's Secret holds its key and the current
+  key's Secret exists ([runbook](runbooks/openbao.md#rotating)).
 - **One member's volume**: the member starts empty, does not initialise, and joins the others, which
   hold every secret; [the runbook](runbooks/openbao.md#a-member-that-does-not-rejoin) says what to do
   when it does not rejoin.
 - **The three volumes, or the whole cluster, while the operator's file is kept**: the snapshots cover
-  this loss. The store is started again empty with the seal key of the file in its Secret, and the
+  this loss. The store is started again empty with the seal keys of the file in their Secrets, and the
   newest snapshot is restored into it ([the runbook](runbooks/openbao.md#restoring-a-snapshot)); what
   was written after that snapshot, up to six hours of it, is lost. The snapshots do not cover the loss
   of the seal key, of the Talos age key that opens them, or of the object storage's bucket.
@@ -5631,10 +7981,10 @@ n8n, the workflow automation tool, runs in `ai-system` (`apps/base/ai-system/n8n
 enforces the restricted Pod Security level and carries the Gateway label; it holds no default deny,
 and `network-policy-exceptions.yaml` lists it with n8n's flows ([Network policy](#network-policy)).
 n8n's `ks.yaml` names the operator, the Barman Cloud plugin, the Prometheus Operator definitions,
-External Secrets, the store's application, VolSync, LINSTOR and the public Gateway in `dependsOn`,
-and sets `wait` with the long timeout, so a cluster that lacks one of them is refused by
-`just kubernetes-check`, the encryption key's ExternalSecret is applied once the store is Ready, and
-the application is Ready once n8n answers its readiness endpoint.
+External Secrets, the store's application, VolSync, LINSTOR, the public Gateway and the blackbox
+exporter in `dependsOn`, and sets `wait` with the long timeout, so a cluster that lacks one of them
+is refused by `just kubernetes-check`, the encryption key's ExternalSecret is applied once the store
+is Ready, and the application is Ready once n8n answers its readiness endpoint.
 
 - **The chart** is app-template, from its publisher's OCI registry, pinned by tag and tracked by
   Renovate, with the images `docker.io/n8nio/n8n` and `docker.io/n8nio/runners` pinned by tag and
@@ -5681,10 +8031,12 @@ the application is Ready once n8n answers its readiness endpoint.
   as its data does not survive a rebuild ([rebuild.md](runbooks/rebuild.md)), so the order is: the
   store's recovery keys and the backups' key, as for every application
   ([the runbook](runbooks/volume-backups.md#the-stores-key-is-lost-and-the-file-is-kept)), which lets
-  the claim be restored; then the encryption key, before n8n starts. n8n's pod waits for its Secret
-  meanwhile, so n8n does not start without the key. When the operator keeps no copy of the
-  key, it is read back from the latest backup of the volume, by hand, into a directory only the
-  operator can read, and written to the store without being displayed:
+  the claim be restored; then the encryption key, before n8n starts; and the database, held from
+  Flux's first apply and restored from its archive beside the rebuilt, empty one, then switched over
+  ([rebuild.md](runbooks/rebuild.md#building-it-again)), as the volume holds none of n8n's work.
+  n8n's pod waits for its Secret meanwhile, so n8n does not start without the key. When the
+  operator keeps no copy of the key, it is read back from the latest backup of the volume, by hand,
+  into a directory only the operator can read, and written to the store without being displayed:
 
   ```sh
   install -d -m 700 <directory>
@@ -5721,7 +8073,8 @@ the application is Ready once n8n answers its readiness endpoint.
   Gateway's proxy adds the forwarding headers, and the edge routers in front of it translate the
   source address and add none ([ADR 0018](adr/0018-own-edge-routers-translate-public-traffic-to-the-gateway.md)),
   so n8n trusts one proxy. n8n sees as the client's the address the Gateway's proxy took as the
-  client's ([The public Gateway](#the-public-gateway)).
+  client's ([The public Gateway](#the-public-gateway)). The route's `Probe` asks for `/healthz`
+  through the Gateway from inside the cluster ([Probes](#probes)).
 - **The task runners.** Code nodes run in n8n's external mode, as n8n's documentation recommends:
   the container `runners`, from n8n's runners image of n8n's own version, which
   `tests/applications.bats` holds, runs the launcher that starts a JavaScript or Python runner when
@@ -5793,11 +8146,12 @@ Open WebUI, a chat interface for language-model APIs, runs in `ai-system`
 namespace directory is n8n's entry. The namespace holds no default deny, and
 `network-policy-exceptions.yaml` lists Open WebUI's flows beside n8n's; the public Gateway's
 proxies reach its pods on 8080 alone ([Network policy](#network-policy)). Its `ks.yaml` names
-External Secrets, the store's application, VolSync, LINSTOR and the public Gateway in `dependsOn`,
-and sets `wait` with the long timeout, so a cluster that lacks one of them is refused by
-`just kubernetes-check` and the application is Ready once Open WebUI answers its readiness endpoint
-on the restored volume. It has no database cluster
-and no secret of its own, so it names neither the operator nor the Prometheus Operator definitions.
+External Secrets, the store's application, VolSync, LINSTOR, the public Gateway and the blackbox
+exporter, which answers its route's `Probe`, in `dependsOn`, and sets `wait` with the long timeout,
+so a cluster that lacks one of them is refused by `just kubernetes-check` and the application is
+Ready once Open WebUI answers its readiness endpoint on the restored volume. It has no database
+cluster and no secret of its own, so it names neither the operator nor the Prometheus Operator
+definitions, whose `Probe` kind the exporter waits for.
 
 - **The chart** is app-template at the tag n8n's is, its `OCIRepository` named after the
   application, with the image `ghcr.io/open-webui/open-webui` pinned by tag and digest in
@@ -5836,7 +8190,9 @@ and no secret of its own, so it names neither the operator nor the Prometheus Op
   server trusts `X-Forwarded-For` from any peer, as the image starts it (`FORWARDED_ALLOW_IPS`
   defaults to `*`), and the variable is left alone: the sign-in rate limit is keyed by the account's
   email and not by the address, and the client's address reaches only the audit log and the
-  token-exchange limit, so a forged one gains little.
+  token-exchange limit, so a forged one gains little. The route's `Probe` asks for `/health/db`
+  through the Gateway from inside the cluster, which Open WebUI answers 200 without a session once
+  its database does ([Probes](#probes)).
 - **Hardening.** The pod runs as user and group 1000, though the image runs as root unless told
   otherwise, with the runtime's seccomp profile; the one container has a read-only root filesystem,
   no capability and no privilege escalation. It writes to the claim at `/app/backend/data`, to an
@@ -5930,10 +8286,10 @@ enter again.
 Backstage, the catalogue of what the cluster runs, runs in the namespace `backstage`
 (`apps/base/backstage/backstage/`), which enforces the restricted Pod Security level and carries the
 Gateway label. Its `ks.yaml` names the PostgreSQL operator, the Barman Cloud plugin, the Prometheus
-Operator definitions, External Secrets, the store's application, the public Gateway and Cilium,
-whose operator defines the
-kind of its network policies, in `dependsOn` and sets `wait` with the long timeout, so the
-application is Ready once Backstage answers its readiness endpoint with its database.
+Operator definitions, External Secrets, the store's application, the public Gateway, Cilium, whose
+operator defines the kind of its network policies, and the blackbox exporter, which answers its
+route's `Probe`, in `dependsOn` and sets `wait` with the long timeout, so the application is Ready
+once Backstage answers its readiness endpoint with its database.
 
 - **The image** is Backstage's published one, `ghcr.io/backstage/backstage`, pinned by tag and
   digest in `values.yaml` and tracked by Renovate, which never merges it
@@ -5983,8 +8339,10 @@ application is Ready once Backstage answers its readiness endpoint with its data
   from the Kustomizations, and fails naming both when one names an application with no entity;
   descriptions, systems and links stay as written.
 - **The database** is a PostgreSQL cluster named `backstage-db` from `components/cnpg-cluster`, with
-  the component's three instances, which it offers no variable to lower, and 2Gi each: the catalogue
-  is the files, so the database holds only what Backstage derives from them (entities, relations
+  the component's three instances, which it offers no variable to lower, and 4Gi each, the least any
+  database's volume has, as it holds the WAL of an archive outage besides the data
+  ([PostgreSQL](#postgresql)). Its data is small: the catalogue is the files, so the database holds
+  only what Backstage derives from them (entities, relations
   and the search index), its plugins' signing keys and the guest user's sign-in record, and a lost
   database is made again by a start. Backstage reads its host, port, database, user and password
   from the keys of the Secret `backstage-db-app`, which the operator makes. The user may not create
@@ -6001,16 +8359,19 @@ application is Ready once Backstage answers its readiness endpoint with its data
   listener to the Service `backstage` on 7007, published and reached as
   [Giving an application a public hostname](#giving-an-application-a-public-hostname) and
   [DNS records](#dns-records) say. The route sends on only the requests a reader's pages make
-  (Sign-in, below).
+  (Sign-in, below). Its `Probe` asks for the readiness endpoint, a `GET` the route admits, through
+  the Gateway from inside the cluster ([Probes](#probes)).
 - **Network.** The namespace denies traffic both ways by default and declares its flows beside the
   application (`ciliumnetworkpolicy.yaml`, [Network policy](#network-policy)). Backstage's pod takes
   the public Gateway's proxies and the kubelet's probes on 7007, and sends only to the cluster's
   resolver and to its database's instances on 5432: not to the API server, not to another
-  application, nothing outside the cluster. The database's pods take the operator on 8000 and 5432
-  and each other, Backstage and the dump job on 5432, Prometheus on 9187 and the kubelet's probes on
-  8000, and send to each other, the resolver and the API server; its instances also send to the
-  world on 443, for the object storage their Barman Cloud sidecars archive to, in a policy of its
-  own with its reason; the dump job sends to the resolver,
+  application, nothing outside the cluster. The database's pods, those of every cluster of the
+  namespace by `cnpg.io/cluster` existing, a restore's beside `backstage-db` included, take the
+  operator on 8000 and 5432 and each other, Backstage and the dump job on 5432, Prometheus on 9187
+  and the kubelet's probes on 8000, and send to each other, the resolver and the API server; its
+  instances also send to the world on 443, for the object storage their Barman Cloud sidecars
+  archive to, in a policy of its own with its reason, and so does a restore's recovery job, whose
+  sidecar reads the archive, in another; the dump job sends to the resolver,
   the instances on 5432 and the world on 443, for the age release and the object storage, in a
   policy of its own with its reason. The dump job's pods carry the labels
   `app.kubernetes.io/name: pgdump` and `app.kubernetes.io/instance: backstage-db`, which a patch in
@@ -6465,6 +8826,1189 @@ the pinned sources, and the list is what to look at when the application first r
 - **That Pod Security admits the pod the webhook returns** is under what the webhook adds, above:
   seen on the offline API server for the example's pod, in a namespace that enforces restricted.
 
+### Ascender
+
+Ascender is Ctrl IQ's web interface, API and job runner for Ansible, a build of AWX: playbooks run
+from the browser against hosts and repositories the owner configures there. It runs in the namespace
+`ascender` (`apps/base/ascender/`), installed by Ctrl IQ's operator from its published chart and one
+`AWX` resource of the tree, at its own hostname behind its own login. A cluster selects it with
+three entries of its overlay: the namespace directory, `ascender-operator/ks.yaml` and
+`ascender/ks.yaml`; with the namespace directory alone it builds the namespace, its defaults and its
+default deny, and nothing else of Ascender. `tests/ascender.bats` holds what follows on the built
+applications and the rendered chart (`features/ascender.feature`).
+
+- **The two applications.** `ascender-operator` installs the chart `ascender-operator` 25.6.3 from
+  Ctrl IQ's classic Helm repository, `https://ctrliq.github.io/ascender-operator`, with the chart's
+  definitions of `awx.ansible.com` from its `crds/`, and makes the database's Secret (below). Its
+  `ks.yaml` names `cilium` and `external-secrets` and waits, so it is Ready once the operator runs
+  and the Secret exists. `ascender` applies the `AWX` named `ascender`, the database from
+  `components/cnpg-cluster`, the route, its `Probe`, the Service `ascender-web` and the policies. It
+  names `ascender-operator`, `cloudnative-pg`, `plugin-barman-cloud`, `prometheus-operator-crds`,
+  `external-secrets`, `openbao-store`, `gateway-public`, `cilium` and `blackbox-exporter`, takes the
+  long timeout and is Ready by a `healthCheckExprs` entry for the `AWX`: `current` is its
+  `Successful` condition being `True`. The operator is operator-sdk's Ansible operator, in the
+  pinned image `ansible-operator` v1.42.3-4-g6a8af31: it sets `Successful` to `False` when a run
+  starts and to `True` when the run ends without a failure, and a failed run sets `Failure` to
+  `True`, which stays so into the next run until that one succeeds; so the entry has no `failed` and
+  no `inProgress` expression.
+- **What runs.** The operator, one pod of the chart's Deployment `awx-operator-controller-manager`:
+  the manager, `awx-manager`, and kube-rbac-proxy in front of its metrics. From the `AWX` it makes,
+  in the same namespace: the web Deployment `ascender-web`, one pod of nginx, uwsgi and daphne under
+  supervisord in the container `ascender-web`, valkey and rsyslog; the task Deployment
+  `ascender-task`, one pod of the dispatcher, the callback receiver and the websocket relay in
+  `ascender-task`, receptor in the control plane's execution environment, `ascender-ee`, valkey and
+  rsyslog; the migration Job `ascender-migration-<version>` of each version; its own Service
+  `ascender-service`, ConfigMap, Secrets, service account, Role and binding. Ascender starts a pod
+  `automation-job-<id>` for every job. Valkey listens on its socket in the pod alone (`port 0`), and
+  receptor too (`local-only`). The pinned image is not the tree of the tag: it holds the Python
+  package `awx` 25.6.3, on Python 3.12 and Django 5.2.17, while the tag's tree holds a package
+  `ascender` on newer releases of both; what this section cites of Ascender is the image's files.
+- **The operator's rights, and what they make it.** The chart binds the operator's account to a Role
+  of the namespace over pods, `pods/exec`, `pods/attach` and `pods/log`, Secrets, service accounts,
+  ConfigMaps, Services, endpoints, persistent volume claims, events, roles and role bindings,
+  Deployments, StatefulSets, DaemonSets and ReplicaSets, Jobs and CronJobs, Ingresses, OpenShift's
+  routes, Traefik's TCP routes, the creation of ServiceMonitors and its own kinds; to a Role for its
+  leader election; and to the ClusterRole `awx-operator-proxy-role-ascender-operator`, which creates
+  TokenReviews and SubjectAccessReviews for kube-rbac-proxy. Its other ClusterRole, the metrics
+  reader, is bound to nothing. It has no webhook, and it watches its own namespace alone
+  (`WATCH_NAMESPACE` is the pod's). The instance's own account, `ascender`, which the web and task
+  pods run as, may create, change and delete pods, attach to them, read their logs, and read, create
+  and delete Secrets of the namespace by name. A right to create pods in a namespace is a right to
+  run a pod as any account of it, so each account can reach every Secret there, and **whoever holds
+  Ascender's admin login can, through a container group's pod spec override, run any `baseline` pod
+  there, as the `ascender` account or the operator's**, with any labels and so with the flows of any
+  of the namespace's policies: the login is as strong as the namespace.
+- **The images**, pinned by tag and digest and moved by Renovate in one group, `Ascender`, with the
+  chart (`.renovate/groups.json5`), as Ctrl IQ releases the chart, the operator and Ascender at one
+  version and its installer runs them so; nothing of the two applications merges itself
+  (`.renovate/automerge.json5`). The chart names its two images by tag alone and has no value for
+  them, so the release's post-renderer pins `ghcr.io/ctrliq/ascender-operator` at the chart's
+  appVersion and `quay.io/brancz/kube-rbac-proxy` at the chart's tag, each by the digest of its tag,
+  as `images` entries whose `newTag` carries the digest. The proxy's tag is the chart's, which
+  `tests/ascender.bats` holds it to, so Renovate proposes only new digests of it
+  (`.renovate/managers.json5`), and the chart's pull request sets the tag a new chart names. The
+  chart's Deployment names the pull secret `redhat-operators-pull-secret`, which nothing makes; the
+  images are public and the kubelet pulls them without it, so the reference stays as the chart has
+  it. The `AWX` names the rest, and the operator joins each repository and version with a colon:
+  `ghcr.io/ctrliq/ascender` and the init container's `ghcr.io/ctrliq/ascender-ee` at the chart's
+  version with their digests, the control plane's execution environment and the one execution
+  environment for jobs, `Ascender EE`, the same `ascender-ee` reference, and
+  `ghcr.io/valkey-io/valkey` at the newest 9.x.y-alpine, the line the operator defaults to, which
+  `.renovate/managers.json5` keeps Renovate to. The init container's image is set in full, as the
+  operator's default splits the control plane's reference at its colons. The execution environment
+  is matched by its name, which holds no version, so a new image moves it in place
+  (`awx/main/management/commands/register_default_execution_environments.py`). Each pin is extracted
+  once: the versions by the custom manager under their comments, the job environment's `image:` line
+  by the kubernetes manager, which also reads `spec.image`, the repository alone, as a dependency
+  with no version, which its lookup skips. `spec.image` is the one line of `.image-allowlist` for
+  the application, as the image check reads it without a tag. The record
+  `# ascender-operator-templates: 25.6.3` beside the Service and the policies names the release
+  whose templates their selectors were read from (`.renovate/by-hand.tsv`).
+- **Pod Security.** The namespace enforces `baseline` and audits and warns at `restricted` at the
+  cluster's minor. The one workload below `restricted` is the job pod, an entry of
+  `pod-security-exceptions.yaml` created by the `AWX`: the default pod Ascender starts sets no
+  security context (`get_default_pod_spec` in `awx/main/utils/execution_environments.py`), and the
+  operator does not make it, so its restricted mode does not reach it. Every pod the operator makes
+  asks for `restricted`: the `AWX` sets `restricted_security_context`, which gives every container
+  of the web and task pods and of the migration Job no privilege escalation and no capability, and
+  `security_context_settings`, which the operator combines over its own pod context: a non-root
+  user, 1000, group 0, file system group 1000 and the runtime's seccomp profile. The user and file
+  system group are the ones the restricted mode writes. The group is 0 because the image holds
+  `/etc/passwd`, `/etc/group`, `/var/lib/awx` (uwsgi's fifo), `/var/lib/awx/rsyslog`,
+  `/var/run/supervisor` and `/var/log/tower` as root's, group-writable for gid 0 alone, and at start
+  the launch scripts write `/etc/passwd` and supervisord opens its socket in `/var/run/supervisor`:
+  run with group 1000 the web container can do neither and stops, and with group 0 every launch
+  script runs and stops only on the missing database (the pinned images, run offline with
+  `--user 1000:0 --cap-drop ALL --security-opt no-new-privileges --network none`, valkey with a
+  writable `/data` and socket directory); the `restricted` level puts no rule on groups. The `AWX`
+  sets none of `task_privileged`, `redis_capabilities`, `development_mode`, `projects_persistence`
+  and `host_aliases`, and no other field that adds to the operator's pods, such as `extra_volumes`,
+  a `*_extra_volume_mounts` or `init_container_extra_commands`: `tests/ascender.bats` holds its
+  fields to those the pods it evaluates model and those Pod Security does not read. No root
+  filesystem is read-only: the operator has no field for it, and the launch scripts write
+  `/etc/passwd`. The operator's own pod passes `restricted` as the chart renders it.
+- **The database** is a PostgreSQL cluster named `ascender-db` from `components/cnpg-cluster`, with
+  the component's three instances and 5Gi each: every job's events are rows of it until the system
+  job Cleanup Job Details, which Ascender schedules each Sunday, removes the jobs older than its 120
+  days (`awx/main/migrations/0002_squashed_v300_release.py`). A patch in `app/kustomization.yaml`
+  gives the component's Cluster `bootstrap.initdb`: the database `app`, owned by `app`, with the
+  password of the Secret `ascender-db-app`, so CloudNativePG makes no application Secret of its own.
+  External Secrets makes that Secret once, from a `Password` generator of 32 characters hex-encoded,
+  so the password holds no character the settings file the operator writes it into as a Python
+  string could misread, through a `CreatedOnce` ExternalSecret: a `kubernetes.io/basic-auth` Secret
+  with `username: app`, the password, `dbname: app` for the dump job, and the keys the operator's
+  `database_configuration.yml` reads, `host: ascender-db-rw`, `port: "5432"`, `database: app`,
+  `sslmode: require` and `type: unmanaged`. The `AWX` names it in `postgres_configuration_secret`.
+  It is made in the application `ascender-operator`, which `ascender` waits for, because the
+  operator reads it once at the start of a run, and without it writes
+  `ascender-postgres-configuration` with `type: managed` and starts a PostgreSQL of its own.
+  Ascender accepts PostgreSQL 12 and newer (`awx/__init__.py`), so the component's 18 stays, and no
+  migration of it creates an extension or needs more than the database's owner. Its connections: the
+  task container's memory limit, 2Gi, is what the operator writes as `SYSTEM_TASK_ABS_MEM`, so the
+  dispatcher's pool is at most 2Gi over 100MiB a fork plus 7, 27 workers
+  (`awx/main/dispatch/pool.py`, `get_mem_effective_capacity` in `awx/main/utils/common.py`), not the
+  node's memory; with the dispatcher's own process and its listener (2), the callback receiver and
+  its four workers (5), the relay (1), the two rsyslog configurers with their listeners (4), uwsgi's
+  five processes (5), daphne (1), the heartbeat (1), the cache clearer with its listener (2), one
+  `awx-manage` of the operator's at a time (1) and the dump job (1), that is **50 connections at
+  most**, read from the image's source and not measured, against PostgreSQL's default of 100, which
+  the component leaves. A rollout of a new version runs the old pods beside the new ones for a
+  while, the new pool at its minimum of four, about 25 more. The component archives its WAL, backs
+  the database up daily and dumps it once a day ([PostgreSQL](#postgresql)), and that database is
+  all of Ascender's state: its organisations, inventories, projects, credentials, templates and job
+  history.
+- **Secrets.** Nothing secret is in the tree and the tree makes no Secret. The admin password and
+  the secret key are the operator's own: `admin_password_secret` and `secret_key_secret` are unset,
+  so it generates `ascender-admin-password` and `ascender-secret-key`, 32 letters and digits each,
+  and `garbage_collect_secrets` is false, so they outlive the `AWX`. They live in those Secrets, in
+  etcd and in its snapshots, and the admin password also in the API server's audit log (The first
+  sign-in, below). Ascender encrypts every credential it stores, a machine's SSH key or a
+  repository's token, under the secret key: a database restored onto a rebuilt cluster without the
+  old `ascender-secret-key` keeps its rows and loses every such credential, which the owner enters
+  again.
+- **Restoring the database.** Either restore of [postgres-restore.md](runbooks/postgres-restore.md)
+  makes a new cluster, `<NEW>`, beside `ascender-db`, and for Ascender its steps differ as follows.
+  The patch of `app/kustomization.yaml` names the component's Cluster by the name it has when
+  patches apply, `${CNPG_CLUSTER_NAME}`, so each of the runbook's Clusters, added to `app/`, keeps
+  its own `bootstrap`, which `tests/ascender.bats` holds for the point-in-time one by building it
+  there with the owner's Secret below.
+  The `AWX` cannot read the Secret CloudNativePG makes for a new cluster, `<NEW>-app`, which has
+  no `database`, `sslmode` or `type`, and the operator's run fails reading `database`; nor does
+  `ascender-db-app` follow the new cluster, as External Secrets writes a `CreatedOnce` Secret
+  once, and an edit of its template, a new `host` among them, changes nothing in it. So the pull
+  request that adds the new cluster also adds the file that step 2 of
+  [the point-in-time restore](runbooks/postgres-restore.md#restoring-one-database-to-a-point-in-time)
+  gives, the copy of `ascender-db-app`'s `Password` and `ExternalSecret` for the new cluster,
+  `<NEW>-app`, beside `ascender-operator/app/database-secret.yaml`; and the new cluster names it
+  as its owner's Secret, in `bootstrap.recovery.secret.name` of the runbook's Cluster for a point
+  in time or `bootstrap.initdb.secret.name` of its Cluster for a dump, the file each adds to
+  `ascender/app/`. CloudNativePG then makes no Secret of its own and sets the password of `app`
+  from that one, on a recovered cluster too, as it does whenever the Secret changes
+  (`reconcileUser` in `internal/management/controller/instance_controller.go` of CloudNativePG
+  v1.30.1). `tests/ascender.bats` holds every Cluster of `ascender/app/` other than the
+  component's to naming `<its name>-app` so, and every `Password` and `ExternalSecret` of
+  `ascender-operator` other than `ascender-db-app`'s to the copy for such a Cluster: the
+  original's, metadata included, with only the names, the Secret written, the generator read and
+  the host changed. `tests/postgres-restore.bats` makes both of Ascender's restores with the
+  runbook's file and holds that file, made for `ascender-db`, to the original. The switch, in a
+  pull request of its own, merges only once this shows that Secret:
+  `kubectl --namespace ascender get secret <NEW>-app`. The operator reads a
+  `postgres_configuration_secret` that does not exist as none, and writes
+  `ascender-postgres-configuration` and starts a PostgreSQL of its own, as it does without
+  the database's Secret (above), so Ascender comes up on an empty database. The switch sets
+  the `AWX`'s `postgres_configuration_secret` to `<NEW>-app`, and the web and task pods
+  roll with the new connection; for either restore it also sets the patch's `secret.name`
+  to `<NEW>-app` with `CNPG_CLUSTER_NAME: <NEW>`, so that the component's Cluster keeps
+  that Secret. The Cluster the component adopts then has the patch's `bootstrap.initdb`
+  in place of the one it was made with, the point-in-time restore's `bootstrap.recovery` or
+  the dump restore's `bootstrap.initdb`, which rests on the untested assumption step 5 of
+  the runbook's point-in-time restore names, so its check holds here too: the Cluster in
+  a healthy state, no instance restarted and the next Backup completed. The database's
+  policies select every cluster of the namespace by `cnpg.io/cluster` existing, so `<NEW>`'s
+  pods have the database's flows from their start
+  ([What the namespaces let through](#what-the-namespaces-let-through)), and the dump job's
+  `app.kubernetes.io/instance` label in `ascender/app/kustomization.yaml` and the selectors
+  of its policies name `ascender-db` together, so the job keeps its flows after the switch. The
+  switch changes the names `tests/ascender.bats` holds the Kustomization, the patch and the
+  `AWX` to, which fail the required check until they follow. Neither restore touches
+  `ascender-secret-key`, and the restored rows need it: their
+  credentials are encrypted under it, so a restore onto a rebuilt cluster needs the old Secret
+  back first.
+- **The first sign-in.** At `https://ascender.${CLUSTER_DOMAIN}/`, as `admin`, with the password the
+  operator generated, which this prints, with `KUBECONFIG` set to the file `just cluster-kubeconfig`
+  prints:
+
+  ```sh
+  kubectl --namespace ascender get secret ascender-admin-password --output jsonpath='{.data.password}' | base64 -d; echo
+  ```
+
+  `create_preload_data` is false, so the instance holds no demonstration data: no organisation,
+  project, inventory or template until the owner makes them, and no credential but the managed
+  `Ansible Galaxy` one that a migration creates (below). Until that first sign-in nobody but the
+  holder of that Secret can use it. The operator sets that password through the API server: on its
+  first run, and on any run whose check for the superuser `admin` fails, it runs
+  `awx-manage update_password` in the web pod with the password on the command line
+  (`roles/installer/tasks/initialize_django.yml`), and an `exec`'s command travels in the request's
+  URL, which the API server's audit log on the control planes records ([Logs](#logs)). So the
+  password is in that log too: change it in the interface after the first sign-in. The Secret then
+  no longer holds the password, and the command above prints the old one; the operator sets it back
+  only on a run whose check fails.
+- **The hostname** is `ascender.${CLUSTER_DOMAIN}`, an `HTTPRoute` on the public Gateway's `https`
+  listener with one rule to the Service `ascender-web` on 80, every method and path and no filter,
+  published as [Giving an application a public hostname](#giving-an-application-a-public-hostname)
+  says. The operator makes its own Service at run time, which no render holds, so the tree declares
+  this one, with the web pods' three labels and port 80 to 8052, numbered. There is no sign-in of
+  the cluster and no firewall in front: Ascender's own login is the one, and the edge routers'
+  allowlist is what stands before it. The route's `Probe` asks `/api/v2/ping/`, which answers 200
+  without a session once the web pod reads the database; with no trailing slash Django answers a
+  redirect. That path **publishes the version, the pod names and the installation's identifier** to
+  whoever can reach the route (`ApiV2PingView` in `awx/api/views/root.py`).
+- **Signing in behind the Gateway.** The Gateway terminates TLS, nginx serves plain http on 8052,
+  and neither Ascender's settings nor the operator's set Django's `SECURE_PROXY_SSL_HEADER`, so
+  Django sees the request as http. Its CSRF check then compares the `Origin` of the login's `POST`,
+  `https://ascender.<domain>`, with the request's own `http://` origin, which differs, and admits it
+  only because `extra_settings` sets `CSRF_TRUSTED_ORIGINS` to the route's https origin, from the
+  same substitution as the hostname; Django checks the `Referer` only for a secure request without
+  an `Origin`. The session and CSRF cookies are marked secure. The interface's websockets reach
+  daphne through nginx: Envoy Gateway v1.10.0 upgrades websockets on every route of HTTP/1.1 by
+  default, so job output streams as it runs, with no Envoy Gateway object.
+- **Probes and requests.** The operator's probes are off by default, so the `AWX` turns on the web's
+  readiness probe on `/api/v2/ping/` and the liveness probes of web and task, which run
+  `supervisorctl status` and fail while any program is not `RUNNING`. A program is `RUNNING` 30
+  seconds after it starts (`startsecs` in the image's supervisord files), so the liveness probes
+  begin after 60 seconds. The requests of every container are written out in the `AWX`; they are the
+  operator's defaults and are not measured here, and the task container alone has a limit, of
+  memory, for the connections above. One web and one task replica.
+- **Network.** The namespace denies traffic both ways by default and declares its flows beside each
+  application ([Network policy](#network-policy)). The operator takes the kubelet's probes on 6789
+  and reaches the API server alone: its tasks reach it through the operator's proxy on the pod's
+  loopback and look no name up, and none fetches anything. The web pods take the proxies, the
+  kubelet's readiness probe and the task pods' relay on 8052 (`awx/main/wsrelay.py`). Every pod of
+  the instance, the migration Job's included, reaches the resolver and the database's instances on
+  5432. The task pods also reach the web pods on 8052 and the API server, where receptor starts each
+  job's pod and streams it through `pods/attach` and `pods/log`, and the world on 443 and on 22,
+  each in a policy of its own with its reason: project updates and system jobs are of the control
+  plane's capacity (`get_capacity_type` in `awx/main/utils/common.py`) and run in the task pod's
+  execution environment (`work_type` in `awx/main/tasks/receptor.py`), where a project update clones
+  its repository and installs the roles and collections it names. **The job pods reach the cluster's
+  resolver and the world on 443 and on 22 and nothing else**, each world port in a policy of its own
+  with its reason, and take nothing: they mount no service account token, reach no pod of the
+  cluster, not the API server, the database or Ascender's own pods, and receptor attaches to them
+  through the API server. The database, its instances and the dump job let through what Backstage's
+  do, for `ascender-db`, the instances taking every pod of Ascender's instance and the dump job on
+  5432. The policies select the job pods by the label `ansible_job` and Ascender's pods by their
+  operator's labels; a pod a container group's override starts carries whatever labels it names, so
+  the labels are no proof of what a pod is, as for the movers of `demo`.
+- **Monitoring.** No monitor scrapes Ascender or its operator: Ascender's metrics need a session or
+  a token (`ALLOW_METRICS_FOR_ANONYMOUS_USERS` is false in `awx/settings/defaults.py`), and the
+  operator's are behind kube-rbac-proxy. The component's PodMonitor of the database is the
+  application's one monitor, and the CloudNativePG dashboard describes its cluster
+  ([Dashboards](#dashboards)). The route's `Probe` feeds `PublicEndpointDown` and
+  `PublicEndpointWrongStatus`.
+- **What Ascender calls outside the cluster**, read from the image's settings; no offline run of it
+  was made:
+
+  | What | Setting | State |
+  | --- | --- | --- |
+  | Automation Analytics, which uploads data to Red Hat | `INSIGHTS_TRACKING_STATE`, `REDHAT_USERNAME`, `AUTOMATION_ANALYTICS_URL` | off: the tracking state is false and the account empty, so the gathering stops before it collects |
+  | Pendo, the interface's usage tracking | `PENDO_TRACKING_STATE` | `off` |
+  | A log aggregator | `LOG_AGGREGATOR_ENABLED` | false |
+  | Ansible Galaxy, for the roles and collections a project's requirements name | `AWX_ROLES_ENABLED`, `AWX_COLLECTIONS_ENABLED`, the managed credential `Ansible Galaxy` at `https://galaxy.ansible.com/` a migration creates | on for a project update whose organisation has a Galaxy credential, from the task pod on 443 |
+  | A project's repository | the project's URL | on once a project names one, from the task pod on 443 or 22 |
+  | The hosts and APIs a playbook manages | the owner's inventories and credentials | on for every job, from the job pod on 22 or 443 |
+  | Notifications by mail, chat or webhook | a notification template | none is configured |
+
+  The execution environment's image is pulled by the kubelet, not by Ascender.
+- **Updates.** Renovate proposes the chart, the operator's image and Ascender's two images in one
+  pull request and never merges it. `auto_upgrade` keeps the operator's default, true: on a new
+  version the operator rolls the Deployments and runs the migration Job, which changes the
+  database's schema, so a new version is read before it is merged, and what takes it back is a
+  restore of the database, under the same `ascender-secret-key` (Restoring the database, above).
+  After a merge, watch the `AWX`'s conditions, not the Kustomization's Ready: the operator writes no
+  `status.observedGeneration`, the one field by which Flux's health check tells a status older than
+  its object (`runtime/cel/status_evaluator.go` of `fluxcd/pkg`), and it sets `Successful` to
+  `False` only when its run starts, so until then `ascender` can be Ready on the last run's
+  `Successful`. The run has started once `Running` is `True` with the reason `Running`; it has
+  succeeded once `Successful` is `True` again, and failed once `Failure` is `True`, with the failed
+  tasks in its message:
+  `kubectl --namespace ascender get awx ascender --output jsonpath='{.status.conditions}'`.
+- **When the operator's run stalls.** On the first start a `Failure` is expected: the operator's
+  first run begins when the `AWX` is applied, with the Cluster, and while the database's instances
+  come up its check for pending migrations counts none, as `awx-manage showmigrations` fails without
+  printing (`roles/installer/tasks/migrate_schema.yml`), so it starts no migration Job and fails
+  where it makes the admin user; a later run, once the primary answers, starts the Job. Read the
+  `AWX`'s `Failure` condition and the log of the container `awx-manager` first. The operator runs
+  again when the `AWX` or an object it made changes, as operator-sdk's Ansible operator watches the
+  objects it makes by default, and after a failed run, which it returns as an error and
+  controller-runtime retries with a growing delay (`internal/ansible/controller/reconcile.go` and
+  `internal/ansible/watches/watches.go` of `ansible-operator-plugins` at v1.42.3); it runs on no
+  period, as its reconcile period is `0s` (its `Dockerfile`). A restart of the Deployment
+  `awx-operator-controller-manager` starts a run at once, the one live change that retries without a
+  commit and without that delay. While the operator is down, Ascender runs as it was, and nothing it
+  would make or change is made.
+- **Removal.** Taking the three entries out of the overlay prunes the `AWX`, and with it, through
+  their owner references, the Deployments, the migration Job, the operator's Service, ConfigMap,
+  role and the Secrets it does not keep; the Cluster and its volumes; the release and its
+  Deployment. The backups stay in the object storage. What stays in the cluster: the namespace,
+  whose prune is disabled; the chart's definitions, which Helm installed from `crds/` and leaves;
+  and the Secrets whose owner references the operator removes on every run, as
+  `garbage_collect_secrets` is false (`roles/installer/tasks/cleanup.yml`):
+  `ascender-admin-password`, `ascender-secret-key`, `ascender-broadcast-websocket`,
+  `ascender-receptor-ca`, `ascender-receptor-work-signing` and the database's `ascender-db-app`,
+  which External Secrets then no longer deletes with its ExternalSecret.
+  `kubectl --namespace ascender get secrets` lists them.
+
+### Locust
+
+Locust (`apps/base/locust/locust/`) puts load on a target inside the cluster and shows what it
+measures: a master, which serves the web interface and hands out the work, and workers, which run
+the simulated users. It runs in the namespace `locust`, which enforces the restricted Pod Security
+level and denies traffic by default, from its publisher's image `docker.io/locustio/locust`, by
+plain manifests with kustomize: the chart `stable/locust` of `github.com/deliveryhero/helm-charts`
+is at 0.35.0 with the `appVersion` 2.32.2, older than the release the tree runs. A cluster selects
+it with two entries of its overlay, the namespace directory and the application's `ks.yaml`, and
+its interface's route, the application `locust-route`, with one more (The route, below). Its
+`ks.yaml` names `cilium` alone in `dependsOn`, for its policies' kind, as Locust starts without its
+target; sets `wait`; and sets one variable of its own, `LOCUST_TARGET`, the target (below).
+`tests/locust.bats` holds what follows on the application built as Flux applies it and on the render
+(`features/locust.feature`). What this section says of Locust 2.47.0 is read from its source at that
+tag (`github.com/locustio/locust`) and from its wheel on PyPI, in the files it names, and was seen
+in a run of the pinned image offline (Resources, below).
+
+- **What runs.**
+  - The master, the Deployment `locust-master`: one replica, replaced by the strategy `Recreate`, as
+    two masters would split the workers between them. It runs `locust --master` with the tree's
+    locustfile, the target as its host, the web interface on 8089 (`--web-port`) and the port the
+    workers connect to on 5557 (`--master-bind-port`), and both are ports of the Service
+    `locust-master`. It runs no users itself (`docs/running-distributed.rst`) and opens no
+    connection: the workers connect to it. Its readiness probe asks for the interface's page, `/`,
+    which Locust answers without a sign-in (`locust/web.py`): the cluster's sign-in is the
+    Gateway's, in front of the route, and the kubelet's probe does not pass through it.
+  - The workers, the Deployment `locust-worker`: two replicas, each `locust --worker` with the
+    locustfile and the master's Service and port, `--master-host=locust-master` and
+    `--master-port=5557`. Each opens one connection to the master, a ZeroMQ socket of its own to the
+    master's one (`locust/rpc/zmqrpc.py`), and keeps it; over it the master hands each worker the
+    users to run with every test it starts, and the host to run them against
+    (`locust/runners.py`), and the worker sends its statistics back. A worker listens on nothing, so
+    it has no port and no probe, and is given no host of its own.
+  - The locustfile, `app/locustfile.py`: one `HttpUser` that asks for `/` and then waits one to
+    three seconds. kustomize generates it into the ConfigMap `locust-locustfile` under a name that
+    carries the hash of its content, with Flux's substitution off, and both pods mount it read-only
+    at `/mnt/locust`.
+  - Every option is an argument. No container sets a `LOCUST_*` variable or `--config`, and nothing
+    is mounted at the image's working directory, `/home/locust`, where Locust reads `locust.conf`,
+    `pyproject.toml` and `~/.locust.conf` (`DEFAULT_CONFIG_FILES` in `locust/argument_parser.py`).
+    Both pods set `enableServiceLinks: false`: Locust reads each option from a variable as well,
+    `LOCUST_` and its name, and the kubelet hands a pod variables named after every Service of its
+    namespace (`getServiceEnvVarMap` in `pkg/kubelet/kubelet_pods.go` of Kubernetes v1.37.1). A
+    Service named `locust-web` would give `LOCUST_WEB_PORT=tcp://<address>:<port>`; the pinned
+    image, given that variable, stops at start with `argument --web-port/-P: invalid int value`,
+    `--web-port` on its command line or not.
+- **No test starts by itself.** No container's command or arguments start or shape a test: no
+  `--autostart`, `--headless`, `--autoquit`, `-u` or `--users`, `-r` or `--spawn-rate`, `-t` or
+  `--run-time`, `--processes`, `--config-users`, `--otel` or `--web-login`, in any spelling Locust's
+  parser takes, an unambiguous abbreviation of a long option among them; and no `LOCUST_*` variable,
+  through which the same options would arrive. The keys a person can press to add or remove users
+  work only on a terminal, which a pod's standard input is not (`locust/input_events.py`). The
+  master waits, with no users, until a request to `/swarm` starts a test: offline, five seconds
+  after both workers had connected, it reported the state `ready`, no user and no request, and the
+  stand-in target had logged none.
+- **Opening it.** Two ways, each to port 8089 of the Service `locust-master`. At
+  `https://locust.<domain>/`, through the public Gateway, behind the cluster's sign-in (The route,
+  below). And with `just locust [cluster]`, which forwards a local port, `LOCUST_PORT` or 8089, on
+  127.0.0.1 only, through the cluster's kubeconfig, until Ctrl-C, as `just grafana` does
+  ([cluster.md](cluster.md#recipes)); then open `http://127.0.0.1:8089`. **The interface has no
+  sign-in of its own.** Its login page, `--web-login`, is a hook the locustfile fills with a check
+  of its own, and Locust ships none (`docs/extending-locust.rst`, Adding Authentication to the Web
+  UI), so it is not used. Every path of the interface answers whoever reaches it, and answers the
+  requests of any web page, as the interface allows cross-origin requests from every origin
+  (`CORS(app)` in `locust/web.py`): while the forward runs, anything on the machine that runs it, a
+  page open in its browser among them, can start, change and stop a test. Whoever reaches it may
+  also give any host, in the interface's form or in the `host` field of `/swarm`, and the workers
+  put the load on it. Locust bounds neither who reaches it nor where the load goes. Through the
+  Gateway, the cluster's sign-in and the route bound who reaches it; inside the cluster, the
+  policies do (Network, below): the workers' egress keeps the load inside the cluster, and the
+  master's ingress keeps every pod but the Gateway's proxies and those of its node's host network
+  from the interface. This holds once the cluster enforces the policies; while it audits them, a
+  flow they would drop is reported and passes ([Service addresses](#service-addresses)). **While
+  the cluster audits, the policies bound neither:** a host given to the interface is reached
+  wherever it is, outside the cluster included, and every pod of the cluster reaches the master's
+  8089 and 5557, through the Service `locust-master` or the pod's own address, and can start a test
+  as the forward can. The Service is of the cluster alone and nothing announces it: the Gateway
+  reaches it through the route `locust` only. The forward needs, in `locust`, get on `services`,
+  get and list on `pods`, as kubectl finds a pod the Service selects (and watch, when none runs
+  yet), and create on `pods/portforward` (`portforward.go` and `polymorphichelpers/helpers.go` of
+  kubectl at Kubernetes v1.37.1).
+- **The route.** The application `locust-route` (`apps/base/locust/locust-route/`) holds it, shaped
+  as the log store's ([The log store's interface](#the-log-stores-interface)): its `app/` holds the
+  one `HTTPRoute` `locust` and its `Probe` (Monitoring, below), and its `ks.yaml` adds
+  `components/sso` with `SSO_ROUTE` and `SSO_HOSTNAME` both `locust`, so the component makes the
+  `SecurityPolicy` `locust`, which asks oauth2-proxy about each request of the route and does not
+  fail open, and the route `locust-oauth2`, which sends `/oauth2/` on the same host to oauth2-proxy
+  ([Putting a route behind it](#putting-a-route-behind-it)). Its `targetNamespace` is `locust`,
+  which carries `k8s-gitops/gateway: public`, and the `ReferenceGrant` `oauth2-proxy` names
+  `locust`. It names `gateway-public`, `locust`, `oauth2-proxy` and `blackbox-exporter` in
+  `dependsOn` and waits, so it is applied once the master answers its readiness probe and the
+  sign-in can answer for the route, and a cluster that lists it without any of the four is refused.
+  Its own Ready says that its objects are applied, not that the Gateway took them: `just
+  gateway-check`, which counts the routes the Gateway accepted and names the DNS record of each
+  host, is what shows it. external-dns publishes the name as for every route on the Gateway
+  ([DNS records](#dns-records)). The first visit signs in through dex and GitHub, as for every route
+  that opts in, and oauth2-proxy returns the person to `/`, the interface; a session that another
+  route which opts in started passes here too.
+- **What the route sends on, and why.** One rule, which `tests/locust.bats` pins in full, with no
+  filter, to the Service `locust-master` on 8089, its web port, which targets the master's 8089 and
+  never 5557, admits by an allowlist of methods and paths, in the form of Backstage's route
+  ([Backstage](#backstage)):
+  - `GET` and `HEAD` of any path: the interface's page, `/`, its files under `/assets/`, the reads
+    its bundle polls, `/stats/requests`, `/tasks`, `/exceptions`, `/logs` and `/worker-count`, and
+    the report, `/stats/report`, and the four CSVs the page links. None of them changes anything.
+  - `POST` of exactly `/swarm`, `/stop` and `/stats/reset`, the page's three posts, each only with
+    the header `Origin` exactly `https://locust.<domain>`, the route's own origin (below).
+
+  Nothing else matches, and the Gateway answers it itself, 404, without reaching the master: a post
+  without that `Origin`; `POST /user`, which sets any attribute of a user class
+  (`update_user_class` in `locust/env.py`) and which the page posts only from its user-class
+  picker, which `--class-picker` turns on and the master does not set; a post's path with a
+  trailing slash or in another letter case; and `PUT`, `DELETE`, `PATCH`, `OPTIONS` and every other
+  method. The sources are Locust 2.47.0, the tag of the master's image: the routes of
+  `locust/web.py`, its options in `locust/argument_parser.py`, and the wheel's built interface,
+  `locust/webui/dist/index.html` and its bundle `assets/src-Cl6CiemE.js`, whose requests are RTK
+  Query's, relative to the page, with no `WebSocket` and no `EventSource`. The interface is at the
+  host's root: `--web-base-path` is empty unless it is set, and it is not, and Flask checks no
+  `Host` while `SERVER_NAME` and `TRUSTED_HOSTS` are unset, which `web.py` does not set; the pinned
+  image answered its page offline for another host than its own. So the master's arguments do not
+  change for the route. The interface polls with plain requests, so the route needs no upgrade and
+  no timeout of its own, and Envoy's default for a route, 15 seconds, applies, as for the log
+  store's route. Locust answers each request at once but `/stop`, which waits, up to 60 seconds, for
+  the workers to report their users stopped (`stop` in `locust/runners.py`), and with no
+  `--stop-timeout` they stop them at once: a stop that took longer than 15 seconds would be
+  answered 504 by the Gateway and go on in the master. The route has no web application firewall:
+  it admits only the identities on the owner's list, so the firewall would inspect only their
+  requests, and it fails open ([Web application firewall](#web-application-firewall)).
+- **Why the posts need their `Origin`.** oauth2-proxy's session cookie is `SameSite=Lax`, for
+  `.${CLUSTER_DOMAIN}`, so a browser sends it with a page's request from any host under the domain,
+  the same site, and Locust checks no origin: without the check, a page of another host under the
+  domain could post a form to `/swarm` with the person's session and aim the workers anywhere. A
+  browser sends `Origin` with every `POST` (the Fetch standard, "append a request `Origin` header"),
+  and a page cannot set it. The interface's posts are fetches in the default `cors` mode, and
+  neither its page nor its fetches set a referrer policy, so they carry the page's origin and never
+  `null`. The `GET`s need no check: they change nothing, and `CORS(app)` answers another origin
+  with that origin and no `Access-Control-Allow-Credentials` (the defaults of flask-cors 6.0.5, the
+  release in the image, leave `supports_credentials` off; seen offline), so no other origin reads
+  an answer to a request sent with the session. A page of another site has the cookie sent only with
+  a top-level navigation by `GET`, which changes nothing and whose answer that site does not see.
+- **What the route gives a signed-in person: the right to start load from the cluster's workers**,
+  on the target `ks.yaml` names, which the form shows, or on any host typed into the form or posted
+  as `host`, which Locust 2.47.0 takes (`web.py`, lines 288 to 291), and to stop a test and reset
+  its numbers; the form's other fields set the master's options of their names (lines 308 to 326).
+  Who gets it is the sign-in list ([Who is admitted](#who-is-admitted)), the same people who pass
+  every other route that opts in. Where the load goes is bound by the workers' egress, to the
+  target, the cluster's resolver and the master, once the cluster enforces its policies; **while
+  the cluster audits them, as it does, nothing bounds it**: a host typed in is reached wherever it
+  is, outside the cluster included (Network, below).
+- **An expired session.** The policy sends oauth2-proxy the request's cookie, host and method, and
+  none of its other headers but the `Authorization` Envoy always adds
+  ([Putting a route behind it](#putting-a-route-behind-it)). The interface's fetches send
+  `Accept: application/json` (RTK Query's `fetchBaseQuery`, in the bundle), but oauth2-proxy never
+  sees it, so it takes them for no AJAX request (`isAjax` in `oauthproxy.go` of v7.15.6 reads
+  `Accept`) and answers them as it answers a page: the 302 to dex, not 401, a post's as well. The
+  fetch follows the redirect to dex, another origin, which sends no cross-origin permission, as it
+  is given no allowed origins (`HandleCORS` in `server/router/router.go` of dex v2.46.0, the
+  chart's), and the fetch fails. So an open interface stops updating and its buttons fail until the
+  page is reloaded, which goes through sign-in again; a running test runs on in the master.
+- **Running a test.** In the interface: the number of users, the rate they are started at (ramp up)
+  and the host, which shows the target, and, among the advanced options, a run time; then Start, the
+  charts and the statistics, and Stop. Through its HTTP API, on the forwarded port, as the route
+  sends a post on only with a session and the interface's own `Origin`:
+
+  ```sh
+  curl -s http://127.0.0.1:8089/worker-count
+  curl -s -X POST -d user_count=4 -d spawn_rate=2 -d run_time=60s http://127.0.0.1:8089/swarm
+  curl -s http://127.0.0.1:8089/stats/requests | jq '{state, user_count, worker_count, total_rps, fail_ratio}'
+  curl -s -X POST http://127.0.0.1:8089/stop
+  ```
+
+  `/worker-count` answers `{"worker_count": 2}` once both workers have connected. `/swarm` answers
+  `"success": true` with `"message": "Swarming started"`, the host and the run time, and `"success":
+  false` with the reason for a form without a whole `user_count` and a positive `spawn_rate`.
+  `/stats/requests` holds the state (`ready`, `spawning`, `running`, `stopping`, `stopped`), the
+  users, the workers, the requests a second since the test started and the share of them that
+  failed, with a row for each request name. `/stop` answers `{"success": true, "message": "Test
+  stopped"}` (the routes of `locust/web.py`). A test without a run time runs until it is stopped.
+  Its numbers are in the master's memory alone: nothing scrapes them (Monitoring, below), and they
+  leave with the master's pod.
+- **Changing the load.** The locustfile is a file of the tree: change `app/locustfile.py` in a pull
+  request. kustomize gives the new content a new ConfigMap name, both Deployments change with it,
+  and every pod of Locust restarts on it. `tests/locust.bats` reads the file's text and requires one
+  import line, `from locust import HttpUser, between, task`, a string starting with `/` as the first
+  argument of every call spelled `self.client.<method>(`, and no assignment to a `host`, so that
+  `LOCUST_TARGET` stays the one place the target is written. A check of the text does not bound
+  where the requests go: the workers' egress does, once the cluster enforces the policies (Network,
+  below).
+- **Changing the target.** The target is `LOCUST_TARGET` in `ks.yaml`,
+  `http://hello.demo.svc.cluster.local:80`: a Service of the cluster by its name, its namespace, the
+  cluster's DNS domain (`talos/patches/all/cluster-network.yaml`) and its port. It is named
+  `LOCUST_TARGET`, so that it is never taken for `LOCUST_HOST`, the variable Locust reads its host
+  from. Another target is three edits in one pull request: the variable; the workers' egress rule to
+  the target in `app/ciliumnetworkpolicy.yaml`, naming its namespace, the labels its Service selects
+  and the container port its port targets, as a Service's address is translated to a pod's before
+  policy applies; and an allow beside the target's application, from the workers' labels in `locust`
+  on that port, as `hello`'s policy has. A target must admit the workers, and nothing here may be
+  pointed outside the cluster. `tests/locust.bats` reads the target from the master's `--host` in
+  the render, requires that form, finds the Service in the render, resolves its port to the
+  container port through the named port of the pods it selects, 8080 for `hello`, and fails unless
+  the workers' one rule to that namespace names exactly its labels and that port and the target's
+  own policy admits the workers there and no other pod of `locust`.
+- **Network.** The namespace holds the default deny, and the application's two policies let through,
+  to the master, the workers on 5557, the public Gateway's proxies on 8089, by their labels, for the
+  route, and the node it runs on on 8089, for the kubelet's probe, and from the workers, the
+  cluster's resolver on 53, the master on 5557 and `hello`'s pods on 8080. The master sends nothing
+  and the workers take nothing; `hello`'s own policy admits the workers, by their labels, on 8080,
+  and the proxies' policy `public-proxy` lets them reach the master's pods on 8089 alone, not 5557
+  and no worker ([What the namespaces let through](#what-the-namespaces-let-through)).
+  This holds once the cluster enforces the policies; while it audits them, a flow they would drop
+  is reported and passes ([Service addresses](#service-addresses)), as Opening it, above, says.
+  Once they are enforced, the workers' egress bounds where the load can go, not that it goes to the
+  target: a host that names the cluster's resolver on 53 or the master on 5557, both of which the
+  workers reach, puts the load there, and a test aimed at the resolver can slow the name lookups of
+  every application of the cluster. The interface takes nothing but the Gateway's proxies, which
+  send it only what the route passes behind the sign-in, and the node the master runs on:
+  `host` is every process in that node's network namespace, the kubelet and the pods of the host's
+  network there among them, and the agent lets the local host reach the pods of its node on every
+  port whatever the policies say (the local host, in
+  [What the namespaces let through](#what-the-namespaces-let-through)); the rule from `host` states
+  the probe's port. The master looks up one name, its own: the web server it runs, gevent's
+  `WSGIServer`, asks for the fully qualified name of the address it binds as it starts
+  (`update_environ` in `gevent/pywsgi.py` of gevent 26.9.0, the release in the image), and the
+  kubelet writes the pod's name with its address into the pod's `/etc/hosts`
+  (`managedHostsFileContent` in `pkg/kubelet/kubelet_pods.go`), which the image reads before it
+  asks a resolver (`hosts: files dns`). `just locust` reaches the interface through a port forward,
+  which the container runtime connects inside the pod (What only the live cluster shows, below).
+- **Scaling.** The workers are the `replicas` of `locust-worker`: change them in a pull request.
+  Each worker is one process and uses at most about one core, so the load the cluster can generate
+  is about a core a worker. A `kubectl scale` is Flux's to undo at its next reconcile.
+- **What the load does elsewhere.** It reaches `hello` through its Service from inside the cluster,
+  so the Gateway's proxies and the route's `Probe` see nothing of it. Its public routes have the
+  same pods behind them, though: hello requests 1m of CPU and has no CPU limit, and its busybox
+  `httpd` forks a process for each connection (seen offline), so a test heavy enough to slow hello
+  slows those routes as well. One that keeps the route's `Probe` from a 200 within its 5 seconds for
+  5 minutes raises `PublicEndpointDown` or `PublicEndpointWrongStatus`, both critical
+  ([Probes](#probes)), so a large test runs with those expected, or silenced for its time
+  ([Silences](#silences)). hello's busybox `httpd -v` logs every request it answers, one line each
+  (`[<address>]:<port>: response:200`, seen offline), so the load reaches the log store
+  ([Logs](#logs)), split over hello's two pods as the Service balances. A node whose collector sends
+  at least ten events a second for 30 minutes, ten times as many as the median node's, raises
+  `LogCollectorOutsizedShare`, an info alert ([Alerts](#alerts)): a test that keeps a pod of hello
+  above about ten requests a second for more than 30 minutes can raise it for that pod's node.
+  hello's server closes each connection after its answer, so every request is a new connection, and
+  every connection looks the target's name up. The kubelet writes `ndots:5` and the search domains,
+  the namespace's three and then any of the node's own (`generateSearchesForDNSClusterFirst` in
+  `pkg/kubelet/network/dns/dns.go`), so a name of four dots is asked of the cluster's resolver under
+  each search domain before it is asked as it is; and each time for an A and an AAAA record where
+  the pod can bind the IPv6 loopback, as urllib3 asks for both only there (`allowed_gai_family` in
+  `urllib3/util/connection.py` of urllib3 2.8.0, the release in the image). That is eight queries a
+  request there, six of them for names that do not exist, and two more for each search domain of the
+  node's: a test of N requests a second asks the resolver about 8N times a second. Offline, with the
+  namespace's three search domains and a loopback that held the IPv6 address, every request of a
+  test asked those eight.
+- **Resources.** The pinned image ran offline as the pods run it: read-only, with no capability, no
+  new privileges and the user 1000:1000, the tree's locustfile mounted read-only at `/mnt/locust`, a
+  master with its arguments and `--host=http://127.0.0.1:8080`, two workers with
+  `--master-host=127.0.0.1` in the master's network namespace, which had nothing but a loopback, and
+  there a stand-in target, hello's busybox image running hello's `httpd` command over a page. In two
+  such runs a client asked `/worker-count` (2), started a test of two users at one a second for 20
+  seconds through `/swarm`, read `/stats/requests` (20 and 21 requests, none failed) and posted
+  `/stop`. The master peaked at about 61 MiB resident and the workers at up to about 62 MiB (each
+  process's `VmHWM`), each under a twentieth of a core and the master under a hundredth. So each
+  container requests 64Mi, the peak rounded up, and is limited to 128Mi, twice that; the master
+  requests 10m of CPU and each worker 50m; there is no CPU limit, as a worker is one gevent process
+  and a limit would throttle it under every real test and raise the stack's `CPUThrottlingHigh`. At
+  100 users a worker, about 50 requests a second each, a worker's peak grew to about 65 MiB. The run
+  logged no write the read-only root refused, and the same run with a writable root changed nothing
+  in it but the mount point Docker made for the locustfile: Locust writes a file only for a report
+  or a log it is told to keep (`--csv`, `--html`, `--json`, `--logfile`, none of them set), and the
+  image's bytecode was compiled when it was built (`Dockerfile.ci`). So neither pod mounts anything
+  writable. At 1,000 users a worker, in a test of a minute against the target by its name that
+  averaged about 850 requests a second in all, its ramp included, with each container's memory
+  limited to 128 MiB as the pods' is, a worker peaked at about 99 MiB resident and 84 MiB of its
+  cgroup's memory (`memory.peak`), with no kill, and at about half a core; a test of more users than
+  that wants more workers (Scaling, above).
+- **Debug mode.** `locust/web.py` sets `app.debug = True` on its Flask application. The image holds
+  Flask 3.1.3; the wheel asks for no more than `flask>=2.0.0`. Flask's interactive debugger runs
+  only in Werkzeug's development server, which `flask run` and `app.run` start (`use_debugger` in
+  Flask's `cli.py` and `app.py`), and Locust serves the application with gevent's `WSGIServer`
+  instead (`start_server` in `locust/web.py`): no debugger and no reloader run. What debug mode
+  does there is Flask's: Jinja checks the interface's templates for changes at each render
+  (`TEMPLATES_AUTO_RELOAD`), a key missing from a form is named in the 400 it answers
+  (`TRAP_BAD_REQUEST_ERRORS`), and an exception no handler takes propagates
+  (`PROPAGATE_EXCEPTIONS`) to gevent, which logs its traceback and answers 500 without it
+  (`handle_error` in `gevent/pywsgi.py`). Locust's routes have a handler for every exception, which
+  answers with the exception's message and its code, whatever the mode (`locust/web.py`).
+- **Monitoring.** No metrics. Locust 2.47.0 serves none: `locust/web.py` has no `/metrics` route,
+  the wheel holds no Prometheus client, and it sends telemetry only with `--otel`
+  (`locust/main.py`), which is not set. So no monitor scrapes it, it has no alert or dashboard of
+  its own, and no row of [Dashboards](#dashboards)' tables names it. Its route has a `Probe`,
+  `locust`, copied from `hello-sso`'s: the module `public_https_signin` at `/`, which Locust answers
+  200 to anyone, so the probe passes on the sign-in's redirect alone, and the day the policy is lost
+  it meets that 200 and `PublicEndpointWrongStatus` fires ([Probes](#probes)). A request without a
+  session never reaches the master, so the probe proves the Gateway, the route, its policy and
+  oauth2-proxy, not the master. Its pods are covered by the monitoring chart's stock alerts on every
+  workload, `KubePodCrashLooping`, `KubePodNotReady`, `KubeDeploymentReplicasMismatch` and
+  `KubeContainerWaiting` among them. A change that wants Locust's numbers in Prometheus adds an
+  exporter.
+- **What it calls on its own.** Nothing but the resolver, the master and the target, which the
+  workers reach:
+
+  | Call | Variable | State |
+  | --- | --- | --- |
+  | Update checks, usage reports | none | the package has none |
+  | OpenTelemetry's traces, metrics and logs | `--otel` | off: not set |
+  | A locustfile fetched from an address | `-f <URL>` | not used: the locustfile is a file |
+  | The interface's script and styles | none | served by the master |
+  | The addresses in the interface's bundle | none | links a person follows, to Locust's documentation, repository and releases |
+  | The one name it looks up, its own | none | answered from the pod's `/etc/hosts` (Network, above) |
+
+  The pinned image ran offline in a network namespace with nothing but a loopback, whose resolver
+  was a listener that logged each query and was shown logging a lookup made on purpose. With a line
+  for the namespace's hostname in its hosts file, as the kubelet writes one, it logged no lookup of
+  Locust's; without that line, one name, that hostname, asked as an A and an AAAA record.
+- **Updates.** Renovate's `kubernetes` manager reads the image from both Deployments, and a rule in
+  `.renovate/managers.json5` keeps it to the registry's release tags of three numbers, as the
+  registry also tags each build of Locust's master branch as `x.y.z.devN` and holds moving tags. The
+  master and the workers run one reference, which Renovate moves in one pull request: a worker of
+  another version than its master is only warned of (`locust/runners.py`, `client_ready`). It
+  merges by the auto-merge switch alone, which waits for the pull request's checks, and the paths
+  test fails them until the record moves: the route's header records, in `# locust-paths:` beside
+  its `Source:` line, the release its matches were read from, and `tests/locust.bats` holds it to
+  the tag of the master's image, failing, saying what to read again and what to set, until the
+  interface's routes and requests are read at the new tag, the route's matches and the test's
+  requests follow them and the record is set, as `.renovate/by-hand.tsv` lists it. No check runs
+  the image: a release that renames an option the arguments use, or changes where the interface
+  listens, shows first on the cluster, as pods that do not become ready and the Kustomization
+  `locust` failing its wait. What this section says from Locust's source, its wheel and the image's
+  packages, gevent's, Flask's and flask-cors' releases among them, is of 2.47.0, so the pull request
+  that moves the image is read against Locust's changelog for the arguments of What runs and for
+  this section.
+- **Removing it.** The route's entry goes first, `locust-route`, as a cluster that lists it without
+  `locust` is refused: take it out with what the tests hold to it, its catalogue entity, the
+  `ReferenceGrant`'s two entries for `locust` and `public-proxy`'s rule to the master, and with the
+  master's rule from the proxies and the namespace's Gateway label, which let nothing through
+  without the route. Flux prunes the route, its sign-in route, its policy and its `Probe`, and
+  external-dns the name's record ([DNS records](#dns-records)). Then take the two overlay entries of
+  Locust out, in the same pull request or a later one. Flux prunes the application, its pods, its
+  Service, its ConfigMap and its policies, and the root prunes the namespace's default deny and its
+  `app-template-defaults` ConfigMap; the namespace stays, by its prune annotation, as Flux reads
+  that annotation on each object it would prune and not on the object's namespace (`Delete` in
+  `ssa/manager_delete.go` of `fluxcd/pkg/ssa` v0.83.0). hello's rule for the workers stays and
+  admits nothing while no worker runs; it goes in a pull request of its own.
+
+**What only the live cluster shows.** None of the following is run by a check; each is read from
+the pinned sources, and the list is what to look at when the application first reconciles.
+
+- **The order things become Ready.** The root applies the namespace and its default deny at once.
+  `locust` waits for `cilium`, so the kind of its policies exists before it applies. The pinned
+  kustomize-controller (v1.10.1, of Flux 2.10.0) applies a build through `ApplyAllStaged` of
+  `fluxcd/pkg/ssa` v0.83.0 (`ssa/manager_apply.go`): every object is first applied as a server-side
+  dry run, and nothing is applied when one fails; then the objects are applied in the order of their
+  kinds (`ReconcileOrder` in `ssa/sort.go`), the ConfigMap, the Service, the Deployments, and the
+  policies last, a kind that order does not know. With `wait`, the Kustomization is Ready only once
+  both Deployments are: a Deployment counts once its ready replicas reach its replicas
+  (`deploymentConditions` in `pkg/kstatus/status/core.go` of `fluxcd/cli-utils` v1.4.0). The master
+  is ready once its probe answers, and the workers once their containers run, as they have no probe.
+- **A worker without its master.** A worker that starts before the master asks for it every 5
+  seconds and gives up after 60 tries, about five minutes (`CONNECT_TIMEOUT`, `CONNECT_RETRY_COUNT`
+  and `connect_to_master` in `locust/runners.py`), then logs `Failed to connect to the Locust
+  master` and exits (`locust/main.py`); the kubelet starts it again. A worker that hears no
+  heartbeat from its master for 60 seconds quits (`MASTER_HEARTBEAT_TIMEOUT`,
+  `heartbeat_timeout_checker`), and a master that is stopped, as the kubelet stops a pod, with
+  SIGTERM, first tells each worker to quit: offline, both workers logged `Got quit message from
+  master, shutting down...` and exited with status 0 as the master did. So a restart of the master
+  restarts the workers, which connect to the new one through the Service.
+- **The image's user.** The image's user is the name `locust`, uid and gid 1000 (`/etc/passwd` of
+  the image's `useradd` layer). The kubelet refuses to start a container with `runAsNonRoot` and a
+  user it cannot read as a number (`verifyRunAsNonRoot` in
+  `pkg/kubelet/kuberuntime/security_context_others.go`: `image has non-numeric user (locust), cannot
+  verify user is non-root`), so the pods give `runAsUser` and `runAsGroup`.
+- **The port forward.** Talos v1.14.6 ships containerd v2.3.7 (`PKGS` in Talos' `Makefile` at that
+  tag, and `containerd_version` in the `Pkgfile` of `siderolabs/pkgs` at that commit), whose port
+  forward enters the pod's network namespace and connects to `localhost:<port>` there
+  (`internal/cri/server/sandbox_portforward_linux.go`): the connection is on the pod's loopback,
+  which no policy sees, so `just locust` needs no rule. A runtime that connected to the pod's
+  address from the node instead would arrive as `host`, which the master's rule on 8089 admits.
+- **The workers' rule names hello's pods.** The agents translate a Service's cluster address to a
+  pod's before policy applies, so the workers reach `hello` and the master by the rules that name
+  their pods, not their Services.
+- **While the cluster audits**, nothing is dropped: a flow the policies deny passes and shows as an
+  `AUDIT` line of `just network-drops`, a missing allow, such as `<count> AUDIT
+  locust/locust-worker-<pod> demo/hello-<pod> 8080/TCP`, and the load of a test aimed at a host the
+  workers may not reach alike; once it enforces, the same flow is `DROPPED` and the test's requests
+  fail. No flow of `locust/locust-master` to the resolver shows, as its own name is in its hosts
+  file.
+- **What the master says.** As each worker connects, the master logs `<worker> (index <n>) reported
+  as ready. <count> workers connected.` (`handle_message` in `locust/runners.py`), so the second
+  reads `(index 1) reported as ready. 2 workers connected.`; then `/worker-count` answers
+  `{"worker_count": 2}`, and the answers of `/swarm`, `/stats/requests` and `/stop` are those of
+  Running a test, above.
+- **The order the route, the label and the rules land in.** The root applies the namespace's
+  Gateway label as it reconciles the merge, and creates `locust-route`, which is applied only once
+  `gateway-public`, `locust`, `oauth2-proxy` and `blackbox-exporter` are Ready, so after the label,
+  without which the Gateway would not accept the route. `envoy-gateway` applies `public-proxy`'s
+  rule to the master and `locust` the master's rule from the proxies, each as it reconciles, and
+  nothing orders the route after them. While the cluster audits, as it does, a flow they would drop
+  passes, so the order does not matter; on a cluster that enforced, a request the route sent on
+  before both had landed would fail at the Gateway, 503, until they had. Nor does anything order the
+  route after the grant: each application reads an artifact of its own, and kustomize-controller
+  compares a dependency's applied revision with its own only when both read the same source, so
+  `locust-route` can apply while `oauth2-proxy` is Ready at the revision before, whose
+  `ReferenceGrant` does not name `locust` yet. Until it does, Envoy Gateway v1.10.0 refuses the
+  policy's reference to oauth2-proxy's Service (`internal/gatewayapi/validate.go`) and gives the
+  route a direct answer of 500 (`internal/gatewayapi/securitypolicy.go`), so the route fails closed
+  until `oauth2-proxy` applies the grant, and the `SecurityPolicy` `locust` is `Accepted` `False`,
+  reason `Invalid`, until then.
+- **Envoy's translation of the matches, and its 404.** Envoy Gateway v1.10.0 makes each match of the
+  rule one Envoy route, of the path and of header matches, the method as `:method` beside `Origin`,
+  each exact (`processHTTPRouteRule` in `internal/gatewayapi/route.go`, `buildXdsRouteMatch` in
+  `internal/xds/translator/route.go`), and Envoy answers a request that matches no route of the
+  host with 404. `tests/locust.bats` evaluates the Gateway API's matching, not Envoy's: a
+  signed-out `POST /swarm` answered 404 without `Origin` and 302 with the host's is the proof.
+- **The method oauth2-proxy is asked with.** Envoy asks oauth2-proxy with the request's method, as
+  it always passes the method to an HTTP authorisation service (`headersToExtAuth` in
+  `api/v1alpha1/ext_auth_types.go` of Envoy Gateway v1.10.0), so a post is asked as
+  `POST /?rd=https://locust.<domain>/`. oauth2-proxy's catch-all takes every method
+  (`PathPrefix("/")` in `oauthproxy.go` of v7.15.6), and its static upstream answers any of them 200
+  (`ServeHTTP` in `pkg/upstream/static.go`), so a post with a session passes and one without gets
+  the 302; the first test started through the route is the proof.
+- **The browser's `Origin`.** That a browser sends `https://locust.<domain>` with the interface's
+  posts is the Fetch standard's and the bundle's, read rather than run: a test started from the
+  interface, which the route sends on only with that `Origin`, shows it.
+- **The proxies' identity at the master in audit mode.** The proxies reach the master by its pod's
+  address, as every backend, and the master's rule names them by their labels; while the cluster
+  audits, a line of `just network-drops` from
+  `envoy-gateway-system/envoy-envoy-gateway-system-public-…` to `locust/locust-master-…` on
+  `8089/TCP` would mean that rule does not match them; the first opening of the interface through
+  the route is the time to look.
+
+### Robot Framework
+
+Robot Framework (`apps/base/robot/`) runs the tree's test suites, checks over HTTP and checks in a
+real browser, against Services inside the cluster every night and whenever asked, and keeps their
+reports to read afterwards. It is a command-line tool, not a server: a CronJob runs it, and a small
+static server shows what it wrote; neither is a service anything else uses. It runs in the
+namespace `robot`, which enforces the restricted Pod Security level and denies traffic by default,
+from the Browser library's published image `docker.io/marketsquare/robotframework-browser`, by plain
+manifests with kustomize. A cluster selects it with three entries of its overlay: the namespace
+directory, `robot/ks.yaml` and `robot-ascender/ks.yaml`. `robot` holds the runner, the report
+server, their claim, the suites of hello and the policies; its `ks.yaml` names `cilium` alone in
+`dependsOn`, for its policies' kind, as the runner starts without its targets and a target that
+does not answer is a failed test, not a stalled apply; sets `wait`; and sets two variables of its
+own, the targets (below). `robot-ascender` holds the suite of Ascender's sign-in page and the
+runner's flow to Ascender's web pods, deploys into `robot` and names `cilium`, `robot` and
+`ascender`, so a cluster without Ascender leaves it out, and `just kubernetes-check` refuses one
+that selects it without either. `tests/robot.bats` holds what follows on the applications built as
+Flux applies them, on the render and on `run.sh` run as the container runs it
+(`features/robot.feature`). What this section says of the image, Robot Framework 7.5, the Browser
+library 21.0.0 and Playwright 1.64.1 is read from their sources at those tags
+(`github.com/MarketSquare/robotframework-browser`, `github.com/robotframework/robotframework`,
+`github.com/microsoft/playwright`) and from the image, in the files it names, and was seen in a run
+of the pinned image offline (Resources, below).
+
+- **What runs.**
+  - The image, `docker.io/marketsquare/robotframework-browser:21.0.0` by the digest of its index,
+    for `linux/amd64` and `linux/arm64`, about 1.1 GB of compressed layers for `amd64`. The
+    library's release workflow builds it from `docker/Dockerfile.latest_release`
+    (`.github/workflows/on-release.yml`): Playwright's image `mcr.microsoft.com/playwright:v1.64.1-noble`,
+    Python 3.14 in a virtual environment, `robotframework` unpinned beside
+    `robotframework-browser==21.0.0`, and the library's `init --skip-browsers`, so the browsers are
+    the base image's, in `/ms-playwright`, and nothing is installed when it runs. It holds Robot
+    Framework 7.5, the Browser library 21.0.0 with its assertion engine 5.0.1, PyYAML, grpcio and
+    protobuf, and no RequestsLibrary; Playwright 1.64.1 and its Chromium. Its user is the name
+    `pwuser`, uid and gid 1001
+    (`/etc/passwd` of the base image's `adduser` layer); it sets no working directory and no
+    entrypoint. The same workflow pushes a separate build to `ghcr.io`, with digests of its own,
+    which the tree does not use.
+  - The runner, the CronJob `robot-suites`: at 05:45 every night, in the cluster's UTC, a job whose
+    one pod runs `/mnt/robot/scripts/run.sh` with bash and the two targets as Robot variables,
+    `--variable HELLO_URL:<target>` and `--variable ASCENDER_URL:<target>`. Its environment is
+    `HOME=/tmp`, so that what a process keeps in its user's home, such as `~/.cache`, goes to the
+    writable `/tmp` and not to the image's `/home/pwuser` on the read-only root, `KEEP_RUNS=30` and
+    `JOB_NAME`, the job's name, which the Job controller gives its pod as the label
+    `batch.kubernetes.io/job-name`. A second run is not started while one runs
+    (`concurrencyPolicy: Forbid`), a run that cannot start within 300 seconds of its time is
+    skipped, a failed pod is not retried (`backoffLimit: 0`), as a retry would be a second run in a
+    second directory, and a run ends after 1200 seconds (`activeDeadlineSeconds`). The CronJob keeps
+    its newest successful job and its three newest failed ones.
+  - `run.sh`, generated with the suites into ConfigMaps and mounted read-only: it takes only
+    `--variable NAME:VALUE` pairs, `NAME` of capital letters, digits and `_`, and refuses anything
+    else with status 2 before Robot runs, so no option that turns off Robot's status or selects
+    fewer tests can reach Robot through the CronJob's arguments. It makes `/reports/<UTC time>`,
+    named `date -u +%Y-%m-%dT%H%M%SZ` and never reused, runs
+    `robot --outputdir <that directory> --consolecolors off --pythonpath /mnt/robot/suites/base <the pairs> /mnt/robot/suites`,
+    writes the return code to `status` and the job's name to `job` beside the reports, removes the
+    oldest of the directories so named down to `KEEP_RUNS` and nothing else, keeping the one it
+    just made whatever its name sorts as, as after the clock stepped back, and writes
+    `/reports/index.html` through a temporary file. It exits with Robot's return code, or 1 when
+    every test passed and a step after Robot failed, naming the step.
+  - The report server, the Deployment `robot-reports`: busybox's `httpd -f -v -p 8080 -h /reports`,
+    the busybox of the demo and of the drill's check by its tag and digest, serving the claim
+    read-only on the port `http` of the Service `robot-reports`, as user 65534. It lists no
+    directory of its own (`networking/httpd.c` of busybox 1.38.0 answers a directory with its
+    `index.html` or 404), so the runs' index is the one `run.sh` writes, and its MIME table serves
+    `.html`, `.png`, `.css` and `.js` as such. Its readiness probe is a connection to its port: `/`
+    is 404 until the first run writes the index, and a probe that waited for one would hold the
+    Kustomization's `wait` until 05:45. One replica, replaced by `Recreate`: a new pod on another
+    node would wait for the volume the old one holds.
+  - The claim, `robot-reports`, `ReadWriteOnce`, 1Gi, of the default StorageClass (below).
+  - No container sets a variable whose name starts with `ROBOT_`: Robot reads `ROBOT_OPTIONS`,
+    `ROBOT_SYSLOG_FILE` and others from its environment (`src/robot/run.py`), and the Browser
+    library `ROBOT_FRAMEWORK_BROWSER_*` (`Browser/browser.py`). So the targets are Flux's
+    variables, substituted into the CronJob's arguments, and named `ROBOT_TARGET_*` in `ks.yaml`
+    alone, never in a container's environment; and both pods set `enableServiceLinks: false`, as
+    the kubelet hands a pod variables named after every Service of its namespace
+    (`getServiceEnvVarMap` in `pkg/kubelet/kubelet_pods.go` of Kubernetes v1.37.1), and
+    `robot-reports` would give `ROBOT_REPORTS_PORT=tcp://<address>:8080` and its kin.
+- **The suites** are files of the tree, three in `robot/app/suites/` and one in
+  `robot-ascender/app/suites/`. kustomize generates `robot-suites` from the first three and
+  `robot-scripts` from `run.sh`, each under a name that carries the hash of its content, and
+  `robot-suite-ascender` from the fourth under that fixed name, as `robot`'s CronJob, of another
+  Kustomization, names it and kustomize's name reference cannot follow it there; all three with
+  Flux's substitution off, as Robot's `${...}` and bash's are its syntax. The runner mounts them
+  whole at `/mnt/robot/suites/base`, `/mnt/robot/scripts` and, optional, `/mnt/robot/suites/ascender`:
+  without `robot-ascender` that directory is empty, and Robot, run over `/mnt/robot/suites`, skips
+  it and the kubelet's `..data` entries, as it skips a name that starts with a dot, and runs the
+  base suites alone (seen offline, with the ConfigMap volumes' layout).
+  - `common.resource`: `Open Target`, a headless Chromium (`New Browser chromium headless=True`),
+    a context of its own and a page at the target, and `Close Everything`, each suite's teardown.
+    A suite imports it by name: `run.sh` puts its directory on Robot's path.
+  - `hello-http.robot`: `/` of hello answers 200 and its body holds `hello`, the page of
+    `demo/hello/app/configmap.yaml`, and `/robot-no-such-page` answers 404. The requests are the
+    Browser library's `Http`, which the suite sends after opening hello's page: the image has no
+    RequestsLibrary, Robot's standard libraries have no HTTP client, and `Http` runs the browser's
+    `fetch` from the active page (`Browser/keywords/network.py`, `node/playwright-wrapper/network.ts`),
+    so a relative path is hello's own origin, while a request from no page, or to another origin,
+    is held to CORS, which busybox's server does not answer.
+  - `hello-ui.robot`: hello's page, opened in the browser, shows `hello` (`Get Text` of `body`
+    with `contains`), and `Take Screenshot` puts a PNG of it in the report.
+  - `ascender-ui.robot`: Ascender's page shows its sign-in form, the field labelled `Username`, the
+    field labelled `Password` and the button `Log In`, found by label and by role and name, as a
+    person finds them, and a screenshot. The strings are the pinned image's: its Login screen
+    (`awx/ui/src/screens/Login/Login.js`) gives PatternFly's `LoginForm` the messages its built
+    bundle's English catalogue reads as `Username`, `Password` and `Log In`, which the tag's tree
+    also has (`ascender/ui/src/screens/Login/Login.tsx`), and the suite passed offline against
+    that bundle, served from the image. The interface draws the form once its script has run, so
+    the test sets the Browser library's timeout to a minute for itself (`Set Browser Timeout 60s
+    scope=Test`) before its first lookup: each lookup and each wait takes up to that, where the
+    library's default is 10 seconds, and the first lookup waits for the form (offline, against a
+    page that drew it after 20 seconds, the test passed, and with the library's default it failed
+    at 10). It types nothing, clicks nothing and sends nothing but the page's own loads.
+  - **The check of the suites' text.** No suite of the tree holds a credential or signs in.
+    `tests/robot.bats` checks the text of every `.robot` and `.resource` file under
+    `apps/base/robot/` and refuses the forms below. It is a lint, not a confinement: it keeps a
+    suite from doing these things by accident or in an obvious form, and what bounds the runner is
+    its egress once the cluster enforces network policy, and nothing while the cluster audits it
+    (Network, below). It reads each cell as it is written: except where a refusal says so, the
+    `Http` path and the `Take Screenshot` name, which must be literals with no variable or escape,
+    it does not follow Robot's escapes or variables, so a suite written to get round it can. **It
+    holds each file to tab, line feed and printable ASCII**, bytes 0x20 to 0x7e, and fails on any
+    other byte, a carriage return or a character beyond ASCII among them, **and to Robot's
+    space-separated format**, failing on a row whose first character but white space is `|`, which
+    Robot reads in its pipe format: Robot splits rows at every line end Python's `str.splitlines`
+    knows and cells at two or more of any Unicode white space, and the check's split, rows at line
+    feeds and cells at two spaces or more or a tab, agrees with Robot's only in that alphabet and
+    that format. It strips a comment only from a `#` that starts a cell, and matches each keyword's
+    name without case, spaces or underscores and with a `Browser.` or `BuiltIn.` prefix dropped. It
+    fails on a library but `Browser` with no argument, a resource but `common.resource` and a
+    variable file, and on a call of any keyword but those it lists (`SUITE_KEYWORDS`) and those the
+    suite's own file or `common.resource` defines, called by their names alone, in a step, a setup
+    or a teardown: the Browser library's that open the target, read the page, wait, take a
+    screenshot or fetch with `Http`, and Robot's own that compare. None of those clicks, taps,
+    types, fills, presses keys or the mouse, hovers, focuses, checks, selects, drags, uploads or
+    downloads, evaluates Python or JavaScript, or runs a program or another keyword, and a control
+    structure such as `IF` or `FOR`, whose conditions Robot evaluates as Python, fails the check
+    too, as does the name of a keyword that clicks, types or evaluates in any cell, by itself or
+    after a dot. It also fails on `New Browser` but as `chromium headless=True` and on `New Context`
+    with an argument; on `Http` but as a `GET` of a literal path, `/` or `/<path>`, `<path>` not
+    starting with `/`, with no variable and no escape anywhere in it: Robot substitutes a cell's
+    variables and unescapes its `\` before the page's `fetch` resolves it, which takes `//<host>`
+    and `/\<host>` to another host and drops a tab first, so a path given in a variable or as a
+    keyword's argument fails too; on `Take Screenshot` with an argument but one bare file name, with
+    no `/`, `\`, variable or `=` in it, as the library writes a relative name under the run's
+    `browser/screenshot/` and a name with a directory where it leads, the claim's root or another
+    run's directory among them (`_get_screenshot_path` in `Browser/keywords/browser_control.py`); on
+    `Go To`, `New Page` or `Open Target` with anything but one target's variable, `${<NAME>_URL}`,
+    and on a step that assigns one or a keyword whose argument is named as one; on a row that
+    continues another but a documentation's; on the assertion operators that evaluate Python,
+    `validate`, `then` and `evaluate`, spelled out by position, and on `assertion_operator` given by
+    name, whatever its value, which no suite needs; on inline Python, `${{...}}`, and a variable
+    that is more than a name, as `${name.attribute}`, which Robot evaluates as Python; on
+    `chromiumSandbox`; on `%{`, Robot's syntax for an environment variable; on an address with
+    `://`; and on `password`, `passwd`, `token`, `secret`, `authorization` or `cookie` outside a
+    comment and the field label the Ascender suite asserts. No pod reads a Secret.
+  - **Adding a check.** A test case in a suite file; a suite of its own is a new file in
+    `robot/app/suites/`, listed in `robot/app/kustomization.yaml`'s generator, written in Robot's
+    space-separated format, that starts with a comment saying what it checks and imports
+    `common.resource`. An HTTP check opens the target's page first and asks paths of it with `Http`,
+    as `hello-http.robot` does; a UI check finds elements by role or label (`Get Element By Role`,
+    `Get Element By`) and takes a screenshot. A keyword the test does not list goes into
+    `SUITE_KEYWORDS` in the pull request whose suite calls it, where its review reads what the
+    keyword can do.
+  - **Adding a target.** A variable `ROBOT_TARGET_<NAME>` in `robot/ks.yaml`, a Service of the
+    cluster by name, namespace, the DNS domain and port; a `--variable <NAME>_URL:${ROBOT_TARGET_<NAME>}`
+    pair in `robot/app/cronjob.yaml`; an egress rule in the policy `robot-runner` to the pods its
+    Service selects, on the container port its port targets; and an allow beside the target's
+    application, from the runner's labels in `robot` on that port, as hello's policy has. A target a
+    cluster may not run takes a piece of its own, as `robot-ascender` is: a `ks.yaml` that names the
+    target's application, its policy and its suite's ConfigMap under a fixed name, which the
+    CronJob mounts, optional, at a directory of its own under `/mnt/robot/suites`. A target must
+    admit the runner, and nothing here is pointed outside the cluster. `tests/robot.bats` reads
+    each target from the CronJob's arguments in the render, requires
+    `http://<service>.<namespace>.svc.<the cluster's DNS domain>:<port>`, finds the Service in the
+    render, resolves its port to a container port, through the named port of the pods it selects,
+    8080 for hello, or its numbered `targetPort`, 8052 for `ascender-web`, whose pods Ascender's
+    operator makes, and fails unless the runner's one rule to that namespace names exactly its
+    labels and that port and the target's own policy admits the runner there and no other pod of
+    `robot`.
+- **Running it now, and reading the reports.** `just robot-run [cluster]` refuses while a job of the
+  runner has a pod, makes the job `robot-run-<UTC time>` from `cronjob/robot-suites`, waits up to
+  `ROBOT_RUN_WAIT` seconds, 900, for its pod to leave `Pending`, prints the job's log, Robot's
+  console, as it comes, and exits with the container's exit code, Robot's return code: it prints
+  `Every test passed.`, `<n> tests failed.`, what a code of 250 and above means, or the job's
+  reason when it failed with no code, as when its deadline ended it ([cluster.md](cluster.md#recipes)).
+  Ctrl-C stops following and leaves the job running; it deletes nothing. `just robot [cluster]`
+  forwards a local port, `ROBOT_PORT` or 8090, on 127.0.0.1 only, to port 8080 of the Service
+  `robot-reports`, until Ctrl-C, as `just locust` does; then open `http://127.0.0.1:8090`. The index
+  lists the kept runs, newest first, with the time each started, its job, `passed`, `<n> failed` or
+  the error and what it means, and links to its `report.html`, Robot's summary, and `log.html`,
+  each keyword with its arguments and messages; the screenshots are under the run's
+  `browser/screenshot/`, linked from the log, and the Browser library's own log of the run is its
+  `playwright-log.txt`. **The reports hold screenshots of the pages the suites opened and whatever
+  the suites print**, and the forward serves them to anything on the machine that runs it, a page
+  open in its browser among them, while it runs. The forward needs in `robot` what Locust's needs in
+  `locust`.
+- **A failed run.** Robot's return code is the number of failed tests, at most 250
+  (`src/robot/result/executionresult.py`); `run.sh` exits with it, so the container's status is
+  Robot's, the pod fails, and with `backoffLimit: 0` the job is `Failed`. The index shows the run as
+  `<n> failed`, and the stock `KubeJobFailed` of the monitoring chart, a warning of every
+  namespace, fires 15 minutes after the job failed and for as long as the failed job exists, past
+  later runs that pass; the CronJob keeps three failed jobs. Read the run's report, then delete the
+  job, which clears the alert: `kubectl --namespace robot delete job <job>`. Robot Framework has
+  no rule of its own: the drill's and the dumps' rules exist because a missed backup is a loss, and
+  a missed run of the suites is not. Codes of 250 and above (`doc/userguide/src/ExecutingTestCases/BasicUsage.rst`):
+
+  | Code | Meaning |
+  | --- | --- |
+  | 250 | 250 or more failures. |
+  | 251 | Help or version information printed. |
+  | 252 | Invalid data or command line option. |
+  | 253 | Execution stopped by user. |
+  | 255 | Unexpected internal error. |
+
+  At a run's deadline the Job controller deletes its pod: the kubelet sends SIGTERM, which `run.sh`
+  passes on to Robot, and kills the pod 30 seconds later, the default grace, as the pod sets no
+  `terminationGracePeriodSeconds`. Robot interrupts the keyword it is in, a call into the browser
+  among them, counts every test it did not finish as failed, runs the teardowns and writes its
+  reports, and the index shows the run as failed (offline, a run stopped in the Ascender suite's
+  first lookup ended within a second and read `4 failed`). A keyword that retries through every
+  error until its timeout takes the signal for one of them and runs on: the Browser library's
+  `Wait For Elements State` does (`Browser/keywords/waiter.py`), and the Ascender suite gives it a
+  minute. When such a keyword, a teardown or the writing of the reports outlasts the 30 seconds, the
+  pod is killed with them (offline, a stop in that wait took the 30 seconds and the container ended
+  with 137): the run's directory holds no `status`, `job`, `log.html` or `report.html`, and from
+  the next run on the index lists it as `no result`, with no job and links that answer 404. A run
+  whose pod had not started Robot, as one still pulling the image or `Pending`, leaves no directory
+  and no row. In every case the job is `Failed` with the reason `DeadlineExceeded` and
+  `KubeJobFailed` reports it.
+- **The claim.** Thirty runs are kept. A run took about 0.6 MiB of the claim offline, its
+  `output.xml`, `log.html`, `report.html`, `playwright-log.txt` and two screenshots, and about 0.7
+  MiB with a failed test, which adds a screenshot and a longer log: thirty runs are about 20 MiB of
+  the 1Gi. The claim is `ReadWriteOnce` on the default class, `linstor-replicated`, which makes the
+  volume for its first pod and attaches it to one node at a time ([StorageClasses](#storageclasses),
+  and the drill's [claim in turn](#the-restore-drill)). The report server is that first pod, so it
+  places the volume, and the runner's pod requires the server's node (`podAffinity` on the server's
+  labels by `kubernetes.io/hostname`), where the kubelet mounts the same volume for both pods.
+  `ReadWriteOnce` admits several pods of one node; `ReadWriteOncePod` would admit one pod and keep
+  the runner from the server's claim, and `ReadWriteMany` is not used. **Both pods publish the
+  volume writable, and the server's container mounts it read-only.** The kubelet hands the driver
+  each pod's volume read-only or not as the pod's `persistentVolumeClaim.readOnly` says
+  (`pkg/volume/csi/csi_mounter.go` of Kubernetes v1.37.1). The LINSTOR driver of the Piraeus
+  operator v2.12.1, linstor-csi v1.13.2 (`config/manager/0_piraeus_datastore_images.yaml` of the
+  operator), stages nothing (`NodeGetCapabilities` in `pkg/driver/driver.go`) and mounts the device
+  itself for each pod: read-only after `blockdev --setro`, with `ro,norecovery`, or writable with
+  `-w` (`Mount` in `pkg/client/linstor.go`). Linux refuses to mount a block device that is mounted
+  already with the other read-only state, the class's XFS among the file systems it holds to that
+  ("Can't mount, would change RO state", `get_tree_bdev_flags` in `fs/super.c` of Linux v6.18.63,
+  which `xfs_fs_get_tree` in `fs/xfs/xfs_super.c` calls). A read-only volume for the server would
+  so keep every run's pod beside it in `ContainerCreating`. The container's read-only mount is a
+  read-only bind the container runtime makes over the pod's mount, so the server cannot write the
+  claim the runner writes on the same node. The claim's root is root's
+  until the runner's mount is given the group 1001 (`fsGroup`, with `fsGroupChangePolicy:
+  OnRootMismatch`, so once, while the root's group differs): Kubernetes applies `fsGroup` to a CSI
+  volume's mount that is not read-only when the driver's policy is `File` (`supportsFSGroup` in
+  `pkg/volume/csi/csi_mounter.go` of Kubernetes v1.37.1), which is the policy of the `CSIDriver`
+  `linstor.csi.linbit.com` the Piraeus operator makes (`pkg/resources/cluster/csi-controller/csi-driver.yaml`
+  at v2.12.1), and only to a pod that sets one: the server's sets none, so nothing is changed for
+  it. `run.sh` writes with the mask 022, so the server, user 65534, reads what the runner writes.
+  While the server's pod is not running, a run's pod has no node to go to: it waits `Pending` and
+  fails at its deadline, which `KubeJobFailed` reports. It waits the same way while the server's
+  node has less than the runner's requests, 500m of CPU and 320Mi of memory, left unrequested:
+  the scheduler places the server, which requests 1m, with no regard for the runner, and nothing
+  holds that room for it. `kubectl --namespace robot describe pod` then shows the run's pod's
+  `FailedScheduling` event, `0/<n> nodes are available:` with `Insufficient cpu` or `Insufficient
+  memory` for the server's node and, for each other node, the first check it fails: the scheduler
+  runs a node's filters in the order of `pkg/scheduler/apis/config/v1/default_plugins.go`, taints,
+  resources and volumes before pod affinity, and reports the first that fails (`RunFilterPlugins`
+  in `pkg/scheduler/framework/runtime/framework.go`). So a worker with room reads
+  `node(s) didn't match pod affinity rules`, a worker without it `Insufficient cpu` or
+  `Insufficient memory` as well, and a node with a taint the pod does not tolerate
+  `node(s) had untolerated taint(s)` (`tainttoleration/taint_toleration.go`,
+  `noderesources/fit.go` and `interpodaffinity/filtering.go` under
+  `pkg/scheduler/framework/plugins/` of Kubernetes v1.37.1). Nothing backs the claim up, snapshots
+  or clones it: the next run writes its reports again. Removing the application prunes the claim
+  with every report.
+- **Network.** The namespace holds the default deny. The runner takes nothing and reaches the
+  cluster's resolver on 53, the pods the Service `hello` selects in `demo` on 8080 and, by
+  `robot-runner-ascender`, the web pods the Service `ascender-web` selects in `ascender` on 8052,
+  each the container port the Service's port 80 targets; hello and `ascender-web` admit the runner
+  by its labels in `robot`, by a rule beside each, so neither admits the report server or another
+  pod of `robot`. The report server takes the node it runs on on 8080, for the kubelet's probe;
+  `host` is every process of that node and every pod of its host network, which so reach the
+  reports as well. It sends nothing; the runner writes the claim and does not connect to it.
+  Within the runner's pod, the library's Python and its Node process talk over gRPC on the pod's
+  loopback, which no policy sees. `just robot` reaches the server through a port forward, which
+  the container runtime connects inside the pod on its loopback, where no policy applies
+  ([Locust](#locust) says how).
+  This holds once the cluster enforces the policies. **While the cluster audits network policy,
+  nothing bounds what the pods reach** ([Service addresses](#service-addresses)): a flow they would
+  drop is reported and passes, so a page a suite opens can reach anywhere, outside the cluster
+  included, and every pod of the cluster reaches the report server's 8080.
+- **The browser under restricted.** Playwright 1.64.1 starts Chromium with `--no-sandbox` unless
+  `chromiumSandbox` is true (`packages/playwright-core/src/server/chromium/chromium.ts`), and the
+  Browser library's `New Browser` defaults it to false (`Browser/keywords/playwright_state.py`).
+  Chromium's sandbox needs a user namespace, which the runtime's default seccomp profile, the one
+  `RuntimeDefault` gives, refuses to clone: Playwright's Docker guide runs it with a profile of its
+  own that allows those clones (`docs/src/docker.md`), and the image's guide recommends that
+  profile and `--ipc=host` "for best compatibility" (`docker/README.md`). Neither fits the
+  restricted level, so no suite sets `chromiumSandbox` and `tests/robot.bats` fails on it. Chromium
+  started, and every suite passed, offline with no capability, no new privileges, a read-only root,
+  the user 1001:1001 and Docker's default seccomp profile. Without `--ipc=host` Chromium has a
+  `/dev/shm` of the runtime's size, and Playwright starts it with `--disable-dev-shm-usage`
+  (`packages/playwright-core/src/server/chromium/chromiumSwitches.ts`), so it keeps its shared
+  memory in files under `/tmp` instead, which offline wrote nothing to `/dev/shm`. **An
+  unsandboxed renderer means that a page that exploits Chromium runs as the runner**, with its
+  mounts, the claim writable among them, and its egress: so `tests/robot.bats` refuses a suite
+  that opens a page but a target's, a variable of `ks.yaml`, or asks `Http` for anything but a
+  literal path of it (The check of the suites' text, above). Where a page leads the browser is
+  bounded by the runner's egress once the cluster enforces network policy, and while it audits by
+  nothing (Network, above). What it writes to the claim the report server serves to the browser
+  that opens the reports, and busybox's `httpd` also runs a program it finds under the claim's
+  `cgi-bin/` and reads an `httpd.conf` it finds in a directory it serves (`networking/httpd.c`), in
+  the server's own pod, which writes nothing and reaches nothing.
+- **Resources.** The pinned image ran offline as the pod runs it: read-only, with no capability, no
+  new privileges and the user 1001:1001, `/tmp` a tmpfs owned by that user, `HOME=/tmp`, the suites,
+  the Ascender suite and `run.sh` mounted read-only in the kubelet's ConfigMap layout, a volume
+  owned by 1001 at `/reports`, and `run.sh` with the CronJob's arguments, the targets
+  `http://127.0.0.1:8080` and `http://127.0.0.1:8052`. Its network namespace had nothing but a
+  loopback, shared with stand-ins: hello's busybox image running hello's `httpd` command on 8080
+  over hello's page, and for Ascender a page whose script draws, after a second and a half, a form
+  with the labels and the button above, then the pinned Ascender image's own built interface, served
+  by busybox with no API behind it; and a resolver stand-in on 53 that logged each query. Each run
+  passed its four tests in about 3 seconds, Robot's console ending in `4 tests, 4 passed, 0 failed`,
+  and with the Ascender directory empty in `3 tests, 3 passed, 0 failed`; with a suite edited to
+  fail one test, `run.sh` exited 1 and the index read `1 failed`. The container's memory, its cgroup's
+  `memory.peak` with `/tmp` and the shell that sampled `/tmp` included, peaked at 236 to 243 MiB, and
+  at 266 to 271 MiB against
+  Ascender's own interface; so the runner requests 320Mi, that rounded up to a multiple of 64Mi, and
+  is limited to 640Mi, twice that. A run used about 2.4 seconds of CPU in its 3, about 0.8 of a
+  core; the runner requests 500m and has no CPU limit, which would throttle the browser and raise
+  `CPUThrottlingHigh`, so a run takes what its node has free and is slower where that is less. `/tmp`
+  held at most 392 KiB, Chromium's profile and a cache under `$HOME/.cache`, the space of files
+  Chromium keeps open after removing them included; it is an `emptyDir` in memory of at most 16Mi, room for suites
+  that open more pages. Nothing was written to `/dev/shm`, so the pod mounts nothing there. The run
+  logged no write the read-only root refused, and the same run with a writable root changed nothing
+  in it but the mount points Docker made and Python's compiled bytecode of a few modules of the
+  virtual environment, which Python skips silently where it cannot write: the pod mounts nothing
+  else writable. The report server's figures are the drill's check's, for the same image.
+- **Monitoring.** None of its own. Neither image serves metrics, so no monitor scrapes them; no
+  alert or dashboard names them. A failed run raises `KubeJobFailed` (above), and the server's pod
+  is covered by the stock alerts on every workload, `KubePodNotReady`, `KubePodCrashLooping`,
+  `KubeContainerWaiting` and `KubeDeploymentReplicasMismatch` among them. The server's busybox
+  `httpd` forks for each connection it takes, the kubelet's probe every 10 seconds included, which
+  Falco's rule `Redirect STDOUT/STDIN to Network Connection in Container` matches at priority Notice;
+  the rule's items in [Tuning](#tuning) except the server's `httpd`, so its requests raise no event
+  of that rule, and no alert reads a rule of that priority.
+- **What it calls on its own.** Nothing but the resolver and its targets, which the runner reaches:
+
+  | Call | Variable | State |
+  | --- | --- | --- |
+  | Chromium's background networking: variations, safe browsing's lists, the default apps' updates | `--disable-background-networking` | off: Playwright starts every Chromium with it (`chromiumSwitches.ts`) |
+  | Chromium's component updates | `--disable-component-update` | off: the same |
+  | Chromium's crash reports | `--disable-breakpad` | off: the same |
+  | A browser download, `rfbrowser init`, `pip` or `npm` | none | not run: the image holds the browsers in `/ms-playwright` and the library's Node modules, and nothing runs at start but `run.sh` |
+  | Update checks, usage reports | none | neither Robot Framework 7.5 nor the Browser library 21.0.0 has one: the only network code in either is Robot's `Remote` and `Telnet` libraries, which no suite imports, and the library's choice of a free loopback port for its Node process |
+  | Pendo, in Ascender's interface | Ascender's `PENDO_TRACKING_STATE` | off (`awx/settings/defaults.py` of the pinned image's `awx` package), and loaded only after a sign-in, which no suite makes: the built interface loads Pendo's agent only when the configuration gives an analytics state other than off (`issuePendoIdentity` in `awx/ui/build/static/js/main.*.js`), and `/api/v2/config/` gives it to a signed-in user alone (`ApiV2ConfigView` in `awx/api/views/root.py`) |
+
+  The image ran offline with a resolver stand-in that logged each query, shown logging a lookup
+  made on purpose by glibc and one by Chromium, each under the namespace's three search domains;
+  through every run above it logged no lookup by Chromium, Node or Robot.
+- **Updates.** Renovate's `kubernetes` manager reads the runner's image from `cronjob.yaml` and the
+  server's from `deployment-reports.yaml`, and a rule in `.renovate/managers.json5` keeps it to the
+  Browser library's release tags of three numbers, as the registry also holds `21`, `21.0` and
+  `latest`, which move with each release. Each merges by the auto-merge switch alone.
+  `tests/robot.bats` holds each to a release tag and a digest, and the server's busybox to the
+  reference of the drill's check, which Renovate moves in the same pull request. The image's
+  Dockerfile installs `robotframework` unpinned, so a new image can move Robot Framework's major
+  version with the library's: the pull request is read against both changelogs, for `New Browser`'s
+  defaults, `Http`, the locators the suites use, the return codes and the options `run.sh` passes.
+  No check runs the image: a release that breaks a suite shows first as a failed run.
+- **Removing it.** Take the three overlay entries out. Flux prunes both applications, the CronJob,
+  its jobs, the server, the Service, the ConfigMaps, the policies, and the claim with every report;
+  the root prunes the namespace's default deny and its `app-template-defaults` ConfigMap; the
+  namespace stays, by its prune annotation, as for Locust. The rules beside hello and Ascender stay
+  and admit nothing while no runner runs; they go in a pull request of their own.
+
+**What only the live cluster shows.** None of the following is run by a check; each is read from
+the pinned sources, and the list is what to look at when the applications first reconcile.
+
+- **The order things become Ready.** The root applies the namespace and its default deny at once.
+  `robot` waits for `cilium`. The pinned kustomize-controller applies its build through
+  `ApplyAllStaged` of `fluxcd/pkg/ssa` v0.83.0: every object first as a server-side dry run, then in
+  the order of their kinds (`ReconcileOrder` in `ssa/sort.go`), the ConfigMaps, the Service, the
+  Deployment and the CronJob, and then the kinds that order does not know, the claim and the
+  policies. The claim stays `Pending` until the server's pod is scheduled, as its class makes the
+  volume for its first pod. With `wait`, `robot` is Ready once the Deployment's ready replicas reach
+  its one (`deploymentConditions` in `pkg/kstatus/status/core.go` of `fluxcd/cli-utils` v1.4.0) and
+  the claim is `Bound` (`pvcConditions`); the CronJob counts as current at once (`alwaysReady`).
+  `robot-ascender` follows once `robot` and `ascender` are Ready.
+- **The first pull.** The runner's image is about 1.1 GB compressed for `amd64`, pulled by the
+  first run's pod on the server's node, within the job's 1200 seconds, which count from the job's
+  start; Spegel serves it to other nodes from one that holds it
+  ([The kube-system baseline](#the-kube-system-baseline)). A first pull that does not finish within
+  them fails that run at its deadline, before Robot starts, so the run leaves no directory and no
+  row of the index. Unpacked, the image is about 2.8 GB (`du` of a container's root, offline), and
+  containerd keeps the compressed layers beside it, as the tree has it keep them for Spegel
+  ([cluster.md](cluster.md#image-layers-for-spegel)): about 4 GB of the server node's image
+  filesystem, `/var` of its 40 GB system disk (`root_volume_size_gb` in
+  `infra/openstack/modules/talos-nodes/variables.tf`), on which the kubelet removes unused images
+  from 75% use down to 65% (`talos/patches/all/kubelet.yaml`) and, below 15% free, reports disk
+  pressure and evicts pods ([cluster.md](cluster.md#what-it-costs)).
+- **Jobs made by hand.** A job `kubectl create job --from=cronjob/robot-suites` makes takes the job
+  template's labels and annotations, the annotation `cronjob.kubernetes.io/instantiate: manual` and
+  an owner reference to the CronJob with `controller: true` (`createJobFromCronJob` in
+  `staging/src/k8s.io/kubectl/pkg/cmd/create/create_job.go` of Kubernetes v1.37.1), so the CronJob
+  controller counts it among its jobs and its history limits remove it as they remove a scheduled
+  one (`cleanupFinishedJobs` in `pkg/controller/cronjob/cronjob_controllerv2.go`). That controller's
+  `Forbid` reads only the jobs it started itself (`status.active`), so a run started by hand just
+  before 05:45 does not hold the night's run back: both run, each in its own directory. While a
+  job made by hand runs, the controller records a `Warning` event `UnexpectedJob`, "Saw a job that
+  the controller did not create or forgot", on the CronJob at each of its syncs (`syncCronJob` in
+  the same file), as the job is its own but not among those it started; it means nothing here, and
+  no alert reads events.
+- **The claim on one node.** A run's pod reaches `Running` on the server's node beside
+  `robot-reports`, both pods having published the volume writable (The claim, above), and
+  `kubectl --namespace robot get events` shows no `FailedMount`.
+- **The claim's group and the image's user.** The kubelet gives the runner's mount the group 1001,
+  as the `CSIDriver`'s policy is `File`, and changes nothing for the server's pod, which sets no
+  `fsGroup` (The claim, above). The kubelet refuses to start a container with `runAsNonRoot` and a
+  user it cannot read as a number (`verifyRunAsNonRoot` in
+  `pkg/kubelet/kuberuntime/security_context_others.go`), which the image's `pwuser` is, so the
+  runner's pod gives 1001.
+- **The port forward** enters the pod's network namespace and connects on its loopback, as for
+  Locust, so `just robot` needs no rule.
+- **The rules name the targets' pods.** The agents translate a Service's cluster address to a pod's
+  before policy applies, so the runner reaches hello and Ascender by the rules that name their pods,
+  not their Services.
+- **While the cluster audits**, nothing is dropped: a flow the policies deny passes and shows as an
+  `AUDIT` line of `just network-drops`, a missing allow such as `<count> AUDIT
+  robot/robot-suites-<pod> demo/hello-<pod> 8080/TCP`, and once it enforces, the same flow is
+  `DROPPED` and the run's tests fail.
+- **Ascender's page by the Service's name.** The runner asks `ascender-web.ascender.svc.cluster.local`,
+  not the route's hostname. The pinned operator's settings, which the web pod's Django reads, set
+  `ALLOWED_HOSTS = ['*']`, and its nginx listens on 8052 as the `default_server` with `server_name _`
+  (`roles/installer/templates/configmaps/config.yaml.j2` of `ghcr.io/ctrliq/ascender-operator`
+  25.6.3), so the page is served whatever the request's host; the page asks no sign-in to be drawn,
+  and its script's requests to the API, made over plain http from inside the cluster, carry no
+  session, as the suite signs in nowhere.
+
 ### Porting an application from the reference catalogue
 
 The steps n8n took, in order; the next port does the same and says where it differs.
@@ -6486,7 +10030,10 @@ The steps n8n took, in order; the next port does the same and says where it diff
    listing for the image's variants (slim, with CUDA, with its own model server) and take the one
    that fetches least and fits the volume, and for whether its version tags are releases alone.
    `just renovate-record`, then the form of the tags in `.renovate/tag-forms.tsv`, read from the
-   registry's own listing; `just renovate-pins` passes.
+   registry's own listing; `just renovate-pins` passes. The chart's source gets its row of
+   `signatures.yaml`, and, where the publisher signs keyless, the row's `verify` block in the
+   `OCIRepository`, after the pinned cosign verified the tag with the row's identity
+   ([Adding a source](#adding-a-source)); `just signatures-check` and `just signatures-verify` pass.
    Where the registry tags betas as plain versions, as n8n's does, a rule in
    `.renovate/managers.json5` keeps Renovate to the line the tree runs; where it does not, say so,
    and add the image to the packages `.renovate/automerge.json5` never merges. An image an operator
@@ -6521,11 +10068,16 @@ The steps n8n took, in order; the next port does the same and says where it diff
    the claim named in `existingClaim`; say what is in the volume and what is in the database, or
    that the volume is both.
 6. **Route.** An `HTTPRoute` on `https` of `public`, the application's own settings for its
-   host, protocol, origin and proxies agreeing with it, `gateway-public` in `dependsOn`, and a rule
-   for the backend's pods and container port in the proxies' egress ([Giving an application a public hostname](#giving-an-application-a-public-hostname)).
+   host, protocol, origin and proxies agreeing with it, `gateway-public` in `dependsOn`, a rule
+   for the backend's pods and container port in the proxies' egress, and the route's `Probe` at a
+   path the application answers 200 without a session, with `blackbox-exporter` in `dependsOn`
+   ([Giving an application a public hostname](#giving-an-application-a-public-hostname)).
    A route behind the cluster's sign-in also takes `components/sso`, names `oauth2-proxy` in
    `dependsOn` and adds its namespace to oauth2-proxy's grant
-   ([Putting a route behind it](#putting-a-route-behind-it)).
+   ([Putting a route behind it](#putting-a-route-behind-it)). An interface with no sign-in the
+   cluster can rely on gets no route, but a recipe that forwards a local port on 127.0.0.1, as
+   Locust's does ([Locust](#locust)). Reports a job writes are read the same way, through a small
+   server of the job's claim, as Robot Framework's are ([Robot Framework](#robot-framework)).
 7. **Hardening.** Restricted: a user the image runs as, a read-only root filesystem with every path
    the application writes as a volume, found by running the pinned image read-only with those
    mounts alone, no capability, requests and a memory limit measured from that run, probes on the
@@ -6561,10 +10113,12 @@ The steps n8n took, in order; the next port does the same and says where it diff
    the Gateway out, and to the same list in `tests/external-dns.bats`; the backends the proxies
    reach in `tests/network-policy.bats`, where a port with a route adds its namespace and port to
    the pairs the routes must send to, and a row that the proxies reach its port and not another;
-   for a route behind the sign-in, the policies on the Gateway's routes in `tests/gateway.bats`, and
-   in `tests/sso.bats` the Kustomizations that name oauth2-proxy and the `tree_without` list of the
-   test that leaves the sign-in out; and the applications that take the volsync component in
-   `tests/volume-backups.bats`.
+   the routes, the `Probe`s' paths and the applications that declare a `Probe` in
+   `tests/probes.bats`, where a port with a route also adds its application to the `tree_without`
+   list of the test that leaves the Gateway out; for a route behind the sign-in, the policies on the
+   Gateway's routes in `tests/gateway.bats`, and in `tests/sso.bats` the Kustomizations that name
+   oauth2-proxy and the `tree_without` list of the test that leaves the sign-in out; and the
+   applications that take the volsync component in `tests/volume-backups.bats`.
 9. **Catalogue.** The application's entity in `apps/base/backstage/backstage/app/catalogue/`, named
    as the application and listed in that directory's generator in `app/kustomization.yaml`, with
    its dependencies from `just catalogue-dependencies` ([Backstage](#backstage)).
@@ -6902,15 +10456,21 @@ hold secrets, a password given on a command line or a token in an address, and s
 holds it. An event is a line in the pod's log file on the node, until the kubelet rotates it, and a
 document in the log store, with the other logs, for 14 days or until the store's 15 GiB are used
 ([Logs](#logs)); whoever can read the store, with `just logs` or Grafana's VictoriaLogs datasource,
-or `exec` into the pods of `monitoring` and `security-system`, can read it.
+or `exec` into the pods of `monitoring` and `security-system`, can read it. Of a pod under `gvisor` or
+`kata` it sees little, as such a pod's system calls reach gVisor's kernel or a Kata guest's instead
+of the node's ([Runtime classes](#runtime-classes)).
 
 ### Tuning
 
 Local rules have one place, the `customRules` key of
 `apps/base/security-system/falco/app/values.yaml`: a map of rule file names to their contents,
 which the chart makes the ConfigMap `falco-rules` of and mounts at `/etc/falco/rules.d`, which
-Falco reads after the image's rules. It holds one file, `exceptions.yaml`, of two items, each with
-its reason in a comment above it, and no rule of the tree's own:
+Falco reads after the image's rules. It holds one file, `exceptions.yaml`, of fourteen items, each
+with its reason in a comment above it, and no rule of the tree's own. Each item overrides the
+condition of a placeholder macro the image leaves for known cases, `(never_true)`, which a rule
+negates last: the first item for a placeholder replaces its condition, and each further one appends
+`or (...)` to it, so the rule negates the items' disjunction, each item one conjunction with its own
+reason ([overriding](https://falco.org/docs/concepts/rules/overriding/)):
 
 ```yaml
 - macro: user_known_stand_streams_redirect_activities
@@ -6919,6 +10479,54 @@ its reason in a comment above it, and no rule of the tree's own:
     condition: replace
 - macro: known_drop_and_execute_activities
   condition: (k8s.ns.name = "kube-system" and container.name = "apply-sysctl-overwrites" and container.image.repository = "quay.io/cilium/cilium" and proc.exepath = "/opt/cni/bin/cilium-sysctlfix")
+  override:
+    condition: replace
+- macro: user_known_stand_streams_redirect_activities
+  condition: or (k8s.ns.name = "robot" and container.name = "httpd" and container.image.repository = "docker.io/library/busybox" and proc.name = "httpd")
+  override:
+    condition: append
+- macro: user_known_stand_streams_redirect_activities
+  condition: or (k8s.ns.name = "piraeus-datastore" and container.name = "ha-controller" and container.image.repository = "quay.io/piraeusdatastore/piraeus-ha-controller" and proc.name = "agent")
+  override:
+    condition: append
+- macro: user_known_stand_streams_redirect_activities
+  condition: or (k8s.ns.name in ("ai-system", "ascender", "backstage", "kguardian") and container.name = "postgres" and container.image.repository = "ghcr.io/cloudnative-pg/postgresql" and proc.name = "manager")
+  override:
+    condition: append
+- macro: user_known_contact_k8s_api_server_activities
+  condition: (k8s.ns.name = "ascender" and container.name = "ascender-task" and container.image.repository = "ghcr.io/ctrliq/ascender" and proc.name = "awx-manage")
+  override:
+    condition: replace
+- macro: user_known_contact_k8s_api_server_activities
+  condition: or (k8s.ns.name = "ascender" and container.name = "awx-manager" and container.image.repository = "ghcr.io/ctrliq/ascender-operator" and proc.name = "ansible-operato")
+  override:
+    condition: append
+- macro: user_known_contact_k8s_api_server_activities
+  condition: or (k8s.ns.name = "monitoring" and container.name = "vector" and container.image.repository = "docker.io/timberio/vector" and proc.name = "vector")
+  override:
+    condition: append
+- macro: user_known_contact_k8s_api_server_activities
+  condition: or (k8s.ns.name = "kyverno" and container.name = "kyverno" and container.image.repository = "reg.kyverno.io/kyverno/kyverno" and proc.name = "kyverno")
+  override:
+    condition: append
+- macro: user_known_contact_k8s_api_server_activities
+  condition: or (k8s.ns.name = "kyverno" and container.name = "controller" and container.image.repository = "reg.kyverno.io/kyverno/reports-controller" and proc.name = "reports-control")
+  override:
+    condition: append
+- macro: user_known_contact_k8s_api_server_activities
+  condition: or (k8s.ns.name in ("ai-system", "ascender", "backstage", "kguardian") and container.name in ("initdb", "join", "postgres") and container.image.repository = "ghcr.io/cloudnative-pg/postgresql" and proc.name = "manager")
+  override:
+    condition: append
+- macro: user_known_contact_k8s_api_server_activities
+  condition: or (k8s.ns.name in ("ai-system", "ascender", "backstage", "kguardian") and container.name = "plugin-barman-cloud" and container.image.repository = "ghcr.io/cloudnative-pg/plugin-barman-cloud-sidecar" and proc.name = "manager")
+  override:
+    condition: append
+- macro: user_shell_container_exclusions
+  condition: (k8s.ns.name in ("ai-system", "ascender", "backstage", "kguardian") and container.name = "postgres" and container.image.repository = "ghcr.io/cloudnative-pg/postgresql" and proc.pname = "postgres" and proc.cmdline startswith "sh -c -- /controller/manager wal-archive --log-destination /controller/log/postgres.json pg_wal/")
+  override:
+    condition: replace
+- macro: allowed_clear_log_files
+  condition: (not container and fd.name startswith "/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/")
   override:
     condition: replace
 ```
@@ -6941,8 +10549,8 @@ out of it: the namespace, the workloads of every other namespace; the container'
 `volsync-demo`, which runs the same image in the same namespace; the image's repository, any other
 image run under that name there; and the process, a shell, or any process but `httpd`, that puts its
 streams on a socket in that very container. All of those still match, as every other workload does.
-Falco compiles the rule to the image's condition with one negation, of that conjunction:
-`(evt.type in (dup, dup2, dup3) and container.id != host and evt.rawres in (0, 1, 2) and fd.type in (ipv4, ipv6) and not (k8s.ns.name = demo and container.name = httpd and container.image.repository = docker.io/library/busybox and proc.name = httpd))`.
+Falco compiles the rule to the image's condition with one negation, of that conjunction or the three
+appended to the same placeholder below (The exceptions for the tree's own applications).
 
 The second quiets the image's rule `Drop and execute new binary in container`, of priority
 Critical, whose matches raise `FalcoCriticalRuleMatched`
@@ -6983,11 +10591,173 @@ container and binary of Cilium's agent included. Falco compiles the rule to the 
 with one negation, of that conjunction:
 `(evt.type in (execve, execveat) and container.id != host and proc.is_exe_upper_layer = true and not container.image.repository in () and not (k8s.ns.name = kube-system and container.name = apply-sysctl-overwrites and container.image.repository = quay.io/cilium/cilium and proc.exepath = /opt/cni/bin/cilium-sysctlfix))`.
 
+**The exceptions for the tree's own applications.** The other twelve items quiet four of the image's
+rules for what the tree's own applications do as they run. Each names the namespace, the container's
+name, the image's repository and the process, read from what runs, but the last, which names a path;
+each leaves every other process of its container, every other container and every other namespace to
+the rule:
+
+- `Redirect STDOUT/STDIN to Network Connection in Container`, Notice, three items appended:
+  - Robot's report server (`robot`, `httpd`, `docker.io/library/busybox`, `httpd`): busybox's
+    `httpd` answers each request in a child that puts the connection on its standard streams, as
+    `hello`'s does; a shell in that container still matches.
+  - Piraeus' HA controller (`piraeus-datastore`, `ha-controller`,
+    `quay.io/piraeusdatastore/piraeus-ha-controller`, `agent`): Falco reports the agent's call on a
+    socket, and the cause is not established (below); a shell, or any other process, in that
+    container still matches.
+  - CloudNativePG's instance manager in PostgreSQL's container (the databases' namespaces,
+    `postgres`, `ghcr.io/cloudnative-pg/postgresql`, `manager`): the same, the cause not established
+    either; PostgreSQL itself in that container still matches.
+- `Contact K8S API Server From Container`, Notice, whose placeholder
+  `user_known_contact_k8s_api_server_activities` the sixth item replaces and six append to: the
+  controllers that call the API server by design.
+  - Ascender's dispatcher (`ascender`, `ascender-task`, `ghcr.io/ctrliq/ascender`, `awx-manage`),
+    which supervisord runs as `awx-manage run_dispatcher` and which lists the pods of the container
+    group Ascender registers in a Kubernetes install every minute, to remove those of finished jobs
+    (`awx_k8s_reaper` in `awx/main/tasks/system.py`, `k8s_reaper` in `awx/settings/defaults.py`),
+    from workers that are forks of it; the task pod's `ascender-ee`, the web pod and the job pods
+    as Ascender starts them still match.
+  - Ascender's operator (`ascender`, `awx-manager`, `ghcr.io/ctrliq/ascender-operator`,
+    `ansible-operato`), which watches the `AWX` and what it makes; kube-rbac-proxy beside it still
+    matches.
+  - The log collector (`monitoring`, `vector`, `docker.io/timberio/vector`, `vector`), which watches
+    pods, namespaces and nodes for the metadata of its `kubernetes_logs` source; any other process
+    in that container still matches.
+  - Kyverno's admission controller (`kyverno`, `kyverno`, `reg.kyverno.io/kyverno/kyverno`,
+    `kyverno`) and reports controller (`kyverno`, `controller`,
+    `reg.kyverno.io/kyverno/reports-controller`, `reports-control`), which watch the policies and
+    what runs and write their reports; the init container `kyverno-pre` and the chart's Jobs still
+    match.
+  - CloudNativePG's instance manager (the databases' namespaces, `initdb`, `join` and `postgres`,
+    the component's image, `manager`), which reads and writes its `Cluster`; the one container of
+    each Job of a restore, named after its role, `full-recovery`, `import`, `pgbasebackup` or
+    `snapshot-recovery`, still matches, and so does PostgreSQL itself in the three.
+  - The Barman Cloud plugin's sidecar (the databases' namespaces, `plugin-barman-cloud`,
+    `ghcr.io/cloudnative-pg/plugin-barman-cloud-sidecar`, `manager`), which reads its `ObjectStore`
+    and the credentials it names, as `/manager instance` in each instance's pod and as
+    `/manager restore` in the `full-recovery` or `snapshot-recovery` Job of a restore from the
+    plugin's archive, where the plugin puts it as well (`reconcileJob` in
+    `internal/cnpgi/operator/lifecycle.go`); it is excepted in both, and any other process in it,
+    and the restore Job's own container, still match.
+- `Run shell untrusted`, Notice, `user_shell_container_exclusions` replaced: PostgreSQL's archiver
+  in every database of the component (the databases' namespaces, `postgres`, the component's image,
+  the parent `postgres` and a command line that starts with the archive command up to `pg_wal/`);
+  any other command PostgreSQL runs through a shell still matches.
+- `Clear Log Activities`, Warning, `allowed_clear_log_files` replaced: containerd unpacking an
+  image's layer that holds a log file, under
+  `/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/`, by what Falco places in
+  no container; the same truncation in a container, and of any file outside that path, still
+  matches.
+
+**The archiver's shell.** PostgreSQL archives each finished WAL segment by running
+`archive_command` through `system()` (`shell_archive.c` of PostgreSQL 18), and CloudNativePG makes
+that command, which it does not let a `Cluster` change,
+`/controller/manager wal-archive --log-destination /controller/log/postgres.json %p`, with `%p` the
+segment's path under the data directory, `pg_wal/<segment>` (`pkg/postgres/configuration.go` of
+v1.30.1; `pgarch.c`). From 2.38 glibc runs the command `system()` and `popen()` are given as
+`sh -c -- <command>` (`sysdeps/posix/system.c`, `libio/iopopen.c`), and the component's image,
+`ghcr.io/cloudnative-pg/postgresql:18.6-standard-trixie`, is of Debian trixie, with glibc 2.41
+(`ldd --version` in the image, run offline). So `postgres` starts
+`sh -c -- /controller/manager wal-archive ...` for every segment, which the rule matches as a
+database server that spawns a shell. The image's own macro `postgres_running_cnpg`, which the rule
+negates as well, excepts a command line that starts `sh -c /controller/manager wal-archive`, as a
+glibc before 2.38 writes it: the `--` is why it misses. The item matches the command line's fixed
+prefix, up to `pg_wal/`, as that macro matches its own. Its price: a command a superuser has
+PostgreSQL run through `COPY ... TO PROGRAM`, which PostgreSQL runs with `popen()`
+(`OpenPipeStream` in `src/backend/storage/file/fd.c`), is excepted when it starts with that prefix;
+any other such command still matches. A segment is archived once it is finished, and
+`archive_timeout`, which CloudNativePG sets to `5min` where a `Cluster` does not, as the component's
+does not, switches to a new one only when the server had activity since the last switch
+(PostgreSQL's documentation of `archive_timeout`). Ascender's dispatcher records its instance's
+heartbeat in its database every minute (`cluster_node_heartbeat`, `CLUSTER_NODE_HEARTBEAT_PERIOD`
+of 60 seconds in `awx/settings/defaults.py`), so `ascender-db` is expected to archive a segment
+about every five minutes, and a database nothing writes to, none; that is reasoning, which only the
+cluster shows (What no proof shows, below). `tests/falco.bats` fails when the
+component's image is no longer of Debian trixie, saying to read its glibc again.
+
+**The databases' namespaces.** Every database the component `cnpg-cluster` makes runs the same
+image, instance manager, sidecar and archive command, so the four items for them name the set of
+their namespaces, read from the tree: the target namespaces of every Kustomization of the overlay
+whose `components` name the component, `ai-system`, `ascender`, `backstage` and `kguardian`, in one
+`in` of that set, sorted. An application that takes the component fails the proof until the items
+name its namespace, and one that leaves it fails it until they no longer do. No item names a
+database or a pod. The containers are named as CloudNativePG v1.30.1 and the Barman Cloud plugin
+v0.16.0 name them: `postgres` (`PostgresContainerName` in `pkg/specs/pods.go`), each Job's one
+container after its role, `initdb` and `join` (`pkg/specs/jobs.go`), and the sidecar
+`plugin-barman-cloud`, which the plugin puts into each instance's pod and into a restore's
+`full-recovery` or `snapshot-recovery` Job (`internal/cnpgi/operator/lifecycle.go`), on the
+`SIDECAR_IMAGE` the plugin's chart renders. The operators make these containers at run time, so no
+render holds them and `tests/falco.bats` states each name with its source.
+
+**A process's name.** `proc.name` is the kernel's name of the process, which the probe reads at
+each `execve` (`get_comm()` in `userspace/libsinsp/sinsp_filtercheck_thread.cpp` of libs
+0.26.1): the base name of the executable started, cut to 15 characters, as `task->comm` holds 16
+bytes with its terminating NUL (`TASK_COMM_LEN` and `__set_task_comm` in the kernel's
+`fs/exec.c`). So the
+operator's `/usr/local/bin/ansible-operator`, which its image's entrypoint starts under tini, is
+`ansible-operato`, and Kyverno's `/ko-app/reports-controller` is `reports-control`; a script
+started by its name, as supervisord starts `awx-manage`, takes the script's name. Where the tree
+does not state a container's command, the executable is its image's entrypoint or its operator's
+source, which a table in `tests/falco.bats` records with its source and the proof cuts to 15
+characters. A wrong name fails safe: the item excepts nothing and the events stay.
+
+**The truncation in no container.** containerd unpacks each layer of an image the node pulls under
+`/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/<id>/fs`, opening every file
+it writes with `O_TRUNC` (`pkg/archive/tar.go` and `plugins/snapshots/overlay/overlay.go` of
+containerd 2.3.7; `CRIContainerdDataPath` in Talos' `pkg/machinery/constants/constants.go`), so a
+layer that holds a file of the rule's list `log_files`, such as a Debian image's
+`/var/log/dpkg.log`, matches the rule by the file's name. The image's macro `containerd_activities`
+excepts that path for the process `containerd` only, and Falco reports these events with no process
+and no container: why they carry no process is not established. The item names no process, and
+`not container`, the image's macro `container`, `container.id != host`, negated. That holds for a
+process of the node, whose `container.id` is `host`, and for a thread Falco has no record of, whose
+`container.id` the container plugin cannot extract (`plugins/container/src/caps/extract/extract.cpp`
+of the plugin 0.7.6), as a field that cannot be extracted compares false (`compare_nocache` in
+`userspace/libsinsp/sinsp_filtercheck.cpp` of libs). So a truncation under that path by a process
+Falco places in a container stays reported, and one by any process of the node, or by a thread
+Falco has no record of, is excepted: the item's price.
+
+**The HA controller's and the instance manager's calls on a socket.** Falco reports both making a
+`dup`-family call that returns 0, 1 or 2 for an IPv4 or IPv6 socket. Both run programs through Go's
+`os/exec`, the agent `drbdsetup` (`pkg/agent/drbd.go` of piraeus-ha-controller v1.3.4) and the
+manager `pg_ctl` and the server (`pkg/management/postgres/instance.go`), and Go's child moves its
+files onto 0, 1 and 2 with `dup3` before it execs, still under its parent's name
+(`forkAndExecInChild1` in `syscall/exec_linux.go` of Go 1.27.0, which the agent is built with),
+which is such a call; but those files are `/dev/null` and pipes (`childStdin` and `writerDescriptor`
+in `os/exec/exec.go`), not sockets. The sources do not show why Falco sees a socket there: the cause
+is not established, and the two items rest on what Falco reports.
+
+**Ascender's job pods, and the price.** No item names the container `worker` of the pods Ascender
+starts for jobs (`get_default_pod_spec` in `awx/main/utils/execution_environments.py`, as
+`tests/ascender.bats` models the pod), nor the image of the execution environment, which those pods
+and the task pod's `ascender-ee` run: a job pod as Ascender starts it, which calls the API server or
+puts a socket on its standard streams, stays reported. No item excepts by a pod's name or labels,
+which a pod started through a container group's override carries as its override says. The price is
+the one [Ascender](#ascender) states, that the login is as strong as the namespace: whoever holds
+Ascender's admin login can start a pod in `ascender` through a container group's override with any
+container name and image, so a pod made to look like a container an item names there, running what
+the item names, is excepted as that container is. A pod made to look like the task container,
+`ascender-task` on `ghcr.io/ctrliq/ascender`, running `awx-manage`, is excepted from the API server
+rule as the task container is; one made to look like the operator's container, from the same rule;
+and one made to look like a database's, from the redirect, API server and shell rules.
+
+Falco compiles each of the five rules to the image's condition with the placeholder, which is never
+true, replaced by one negation of its items. The redirect rule:
+`(evt.type in (dup, dup2, dup3) and container.id != host and evt.rawres in (0, 1, 2) and fd.type in (ipv4, ipv6) and not ((k8s.ns.name = demo and container.name = httpd and container.image.repository = docker.io/library/busybox and proc.name = httpd) or (k8s.ns.name = robot and container.name = httpd and container.image.repository = docker.io/library/busybox and proc.name = httpd) or (k8s.ns.name = piraeus-datastore and container.name = ha-controller and container.image.repository = quay.io/piraeusdatastore/piraeus-ha-controller and proc.name = agent) or (k8s.ns.name in (ai-system, ascender, backstage, kguardian) and container.name = postgres and container.image.repository = ghcr.io/cloudnative-pg/postgresql and proc.name = manager)))`.
+The shell rule ends
+`... and not (k8s.ns.name in (ai-system, ascender, backstage, kguardian) and container.name = postgres and container.image.repository = ghcr.io/cloudnative-pg/postgresql and proc.pname = postgres and proc.cmdline startswith "sh -c -- /controller/manager wal-archive --log-destination /controller/log/postgres.json pg_wal/"))`,
+the log-clearing rule
+`... and not (not container.id != host and fd.name startswith /var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/))`,
+and the API server rule
+`... and not ((k8s.ns.name = ascender and container.name = ascender-task and container.image.repository = ghcr.io/ctrliq/ascender and proc.name = awx-manage) or (k8s.ns.name = ascender and container.name = awx-manager and container.image.repository = ghcr.io/ctrliq/ascender-operator and proc.name = ansible-operato) or (k8s.ns.name = monitoring and container.name = vector and container.image.repository = docker.io/timberio/vector and proc.name = vector) or (k8s.ns.name = kyverno and container.name = kyverno and container.image.repository = reg.kyverno.io/kyverno/kyverno and proc.name = kyverno) or (k8s.ns.name = kyverno and container.name = controller and container.image.repository = reg.kyverno.io/kyverno/reports-controller and proc.name = reports-control) or (k8s.ns.name in (ai-system, ascender, backstage, kguardian) and container.name in (initdb, join, postgres) and container.image.repository = ghcr.io/cloudnative-pg/postgresql and proc.name = manager) or (k8s.ns.name in (ai-system, ascender, backstage, kguardian) and container.name = plugin-barman-cloud and container.image.repository = ghcr.io/cloudnative-pg/plugin-barman-cloud-sidecar and proc.name = manager)))`.
+
 `tests/falco.bats` holds the exceptions to that:
 
-- The place holds that one file of those two items, in that order, each an override that replaces
-  one macro's condition with its reason in a comment above it, and the chart's ConfigMap and the
-  pod's mount carry it. There is no second place: under `/etc/falco` the pod mounts only its
+- The place holds that one file of those fourteen items, in that order, each an override of one
+  placeholder's condition, the first for a placeholder replacing it and each further one appending
+  to it, with its reason in a comment above it, whose words the proof checks item by item, and the
+  chart's ConfigMap and the pod's mount carry it. There is no second place: under `/etc/falco` the
+  pod mounts only its
   configuration file, an empty `config.d` and `rules.d`, and the configuration names `config.d`
   alone as where Falco reads further configuration, which could turn a rule off.
 - The first's condition is, to the letter, the conjunction of four values read from `hello` as Flux
@@ -7012,29 +10782,60 @@ with one negation, of that conjunction:
   moves, or whose post-renderer renames the container, fails the proof, saying what Cilium is now,
   and one with `sysctlfix.enabled: false` fails it saying to remove the exception, which then names
   nothing that runs.
+- The other twelve conditions are, to the letter, the conjunctions of values read from what runs,
+  each item's from its workload: the namespace its application's Kustomization targets, or, for
+  CloudNativePG's, the set of the target namespaces of every Kustomization that takes the component;
+  the container's name from the build or the render (Robot's Deployment `robot-reports`, Vector's
+  DaemonSet, Kyverno's two Deployments, the operator's Deployment's default container, the `AWX`'s
+  name with `-task`), or, for the containers the operators make at run time, the name their sources
+  give, which the proof states with them; the image's repository as the runtime reports it, from the
+  build or the render, the component's `imageName`, the `SIDECAR_IMAGE` the Barman Cloud plugin's
+  chart renders, and the Piraeus operator's rendered image configuration with the `LinstorCluster`'s
+  `repository`, refusing one not written registry first; and the process from Robot's command or the
+  table of executables, cut to 15 characters. The archive command's prefix and the snapshot path are
+  stated with their sources. A report server renamed or on another image, a log collector, Kyverno
+  or operator on another image, an `AWX` renamed, a component on another image or of another Debian
+  release, a fifth application that takes the component, an HA controller whose image moves by the
+  image configuration or the `LinstorCluster`, or one turned off, fails the proof, saying what the
+  workload is now. No item names the job pods' container or their image.
+- No item names a field of a pod, an ancestor (`proc.aname`), `proc.exe` or `proc.args`, or any
+  field but the namespace, the container's name, the image's repository, `proc.name`,
+  `proc.exepath`, `proc.pname`, `proc.cmdline` and `fd.name`; each is one conjunction, with no `or`
+  within it and no `not` but before the macro `container`; every one but the fourteenth names a
+  namespace, a container's name, an image's repository and a process; and none turns a rule off.
 - Where a docker daemon answers, Falco itself says so, run from the pinned image without network,
   capability or root, on the rendered configuration and rules. Its dry run exits 0: a condition
   with a field Falco does not know makes it exit 1, which on a node is a pod in a crash loop. It
   validates the image's rules and then the local file without an error or a warning: an override of
   a macro the image does not define loads with the warning `LOAD_UNUSED_MACRO` and excepts nothing.
-  It prints the redirect rule enabled, at priority Notice, and the drop-and-execute rule enabled, at
-  priority Critical, each compiled to its condition above, where without the local file each
-  negates the image's placeholder. And it lists the same rules enabled with the local file as
-  without it, nothing changed but those two rules and their two placeholders: no other rule or
-  macro, and no list.
+  It prints the five rules enabled, at their priorities, Notice for the redirect, API server and
+  shell rules, Warning for the log-clearing rule and Critical for the drop-and-execute rule, each
+  compiled to the image's condition with its placeholder replaced by one negation of the items
+  built from the values above, where without the local file each negates the image's placeholder.
+  It shows the image's own `postgres_running_cnpg` and `containerd_activities` as above. And it
+  lists the same rules enabled with the local file as without it, nothing changed but those five
+  rules and their five placeholders: no other rule or macro, and no list.
 
-What no proof shows: an event evaluated against either rule. Of the image's engines, replay is the
+What no proof shows: an event evaluated against any rule. Of the image's engines, replay is the
 one that gives Falco system calls without a probe, and it reads a capture file, which only a probe
 on a running kernel records and which would hold that machine's processes, users and addresses. So
-that each rule still matches every other workload, and the drop-and-execute rule the same exec in
-another namespace, another container or at another path, rests on the condition Falco compiles. The
-values Falco reports for the four fields of each exception follow from the pinned sources, and an
-event on a node is what shows them: `container.name` is the name in the container's CRI metadata
-and `k8s.ns.name` the namespace of its pod's sandbox (`go-worker/pkg/container/cri.go` of the
-container plugin at 0.7.6, the version the image loads), and `container.image.repository` is the
+that each rule still matches every other workload, and that an excepted event's neighbour in another
+namespace, container, process, command line or path is still reported, rests on the condition Falco
+compiles. The values Falco reports for the fields of each exception follow from the pinned sources,
+and an event on a node is what shows them: `container.name` is the name in the container's CRI
+metadata and `k8s.ns.name` the namespace of its pod's sandbox (`go-worker/pkg/container/cri.go` of
+the container plugin at 0.7.6, the version the image loads), and `container.image.repository` is the
 image reference containerd 2.3.7 reports, the image's first repository digest
 (`internal/cri/server/container_status.go`), up to its `@`, which for `hello`'s image is
-`docker.io/library/busybox` and for Cilium's `quay.io/cilium/cilium`. For the sysctl fix, two of
+`docker.io/library/busybox` and for Cilium's `quay.io/cilium/cilium`. For the exceptions for the
+tree's own applications, an event of each shows what the sources only predict: each `proc.name`,
+`ansible-operato` and `reports-control` above all; `container.name` of the containers the operators
+make at run time; and `container.id` of a log-clearing event, which the item needs to be `host` or
+none. None of the proofs shows why the HA controller's and the instance manager's calls are on a
+socket, why the log-clearing events carry no process, or whether `backstage-db` and `n8n-db`
+archive at all: that `ascender-db` archives every five minutes and the others seldom is reasoning
+from `archive_timeout` and Ascender's heartbeat, which the database's own metrics
+(`cnpg_pg_stat_archiver_archived_count`) show on the cluster. For the sysctl fix, two of
 them are what such an event has to show. `proc.exepath` is the path the probe builds by walking the
 executable's mounts up to the root of the mount namespace they are in
 (`auxmap__store_d_path_approx` in libs' `driver/modern_bpf/helpers/store/auxmap_store_params.h`),
@@ -7055,17 +10856,23 @@ has one, and skip in CI, saying why.
 To silence another known-benign event, find it (`just logs` above) and read its rule and the
 namespace, pod, container, image and process in its `output_fields`; then, in a pull request:
 
-1. add an item to `exceptions.yaml` that overrides the placeholder the rule leaves for the case
-   (the image's rules name them `user_*` and `known_*`, such as
-   `user_expected_terminal_shell_in_container_conditions` for `Terminal shell in container`), with
-   the reason for the exception in a comment above it, as the items above have;
-2. keep it as narrow as the event is, a conjunction of what the event shows of the workload, and
-   never a whole rule off: the proof of the place fails on an item, file or place it does not
-   state, and, where a docker daemon answers, the proofs fail when Falco lists one rule fewer
-   enabled;
-3. prove it as the items above are proved: the proof of the place states what the place holds, so
-   an item it does not expect fails it, and the item's own proof takes its values from the workload
-   it excepts;
+1. add an item to `exceptions.yaml`, after the items there, that overrides the placeholder the rule
+   leaves for the case (the image's rules name them `user_*` and `known_*`, such as
+   `user_expected_terminal_shell_in_container_conditions` for `Terminal shell in container`): the
+   first item for a placeholder replaces its condition, `(<conjunction>)` with
+   `override: condition: replace`, and each further one appends `or (<conjunction>)` with
+   `override: condition: append`, never one item with an `or` of two conjunctions; with the reason
+   for the exception in a comment directly above it, as the items above have;
+2. keep it as narrow as the event is, a conjunction of what the event shows of the workload, its
+   namespace, container's name, image's repository and process, and never a whole rule off: the
+   proof of the place fails on an item, file or place it does not state, the proof that no exception
+   names a pod fails on a pod's field and on a conjunction without one of the four, and, where a
+   docker daemon answers, the proofs fail when Falco lists one rule fewer enabled;
+3. prove it as the items above are proved: the proof of the place states the items in their order
+   and checks each reason, so an item it does not expect fails it, and the item's own proof reads
+   its values from the workload it excepts as it runs, the process from the workload's command or
+   from the table of executables in `tests/falco.bats`, with the source each is read from, cut to
+   the kernel's 15 characters;
 4. merge it. The pod template carries a checksum of the rules' ConfigMap, `checksum/rules`, so the
    DaemonSet rolls when the rules change, one node at a time, and the Kustomization waits for the
    release. A pod that still runs gets the new file as well: the kubelet brings a changed ConfigMap
@@ -7077,9 +10884,48 @@ namespace, pod, container, image and process in its `output_fields`; then, in a 
    does ([What Falco costs and what it sees](#what-falco-costs-and-what-it-sees)). A file Falco
    refuses stops both: a pod that runs keeps the rules it has and writes
    `Falco internal: hot restart failure`, at priority Critical, among its events, and a new pod
-   exits when it starts, so the roll stops at its first node, the release's upgrade does not
-   become ready and its remediation rolls it back ([What the root sets](#what-the-root-sets)).
-   `FluxApplierNotReady` raises the release after 15 minutes.
+   exits when it starts, so the roll stops at its first node, whose pod restarts in a loop and
+   watches nothing while the release's upgrade waits out its timeout, the five minutes a
+   `HelmRelease` has where it sets none, as this one does not. Its remediation then rolls it back
+   and tries again, three times, so that node goes unwatched for up to five minutes on each of
+   four tries before the release is Stalled with the reason `RetriesExceeded`
+   ([What the root sets](#what-the-root-sets)). `FluxApplierNotReady` raises the release after
+   15 minutes.
+
+**The escape canary's attempts stay in the record.** No item names `escape-canary`, and every item
+but the one for what Falco places in no container is held to namespaces it names, so none excepts
+the canary; `tests/escape-canary.bats` fails on one that would. By the conditions of the image's
+rules, the network check's `api-server` attempt, made by `nc`, and each `kubectl` of the rights check
+trip `Contact K8S API Server From Container`, at priority Notice, so `FalcoCriticalRuleMatched` stays
+quiet: the rule takes a container's `connect` to an address that
+`kubernetes.default.svc.cluster.local` resolves to, the macro `k8s_api_server`'s
+`fd.sip.name="kubernetes.default.svc.cluster.local"`, outside the macro `k8s_containers`, which
+names neither image and no namespace but `kube-system`; and a pod's connection keeps the Service's
+address as its server's, as the agents translate a pod's Service address at its interface, after the
+connect (`socketLB.hostNamespaceOnly: true`, [Runtime classes](#runtime-classes)). No other attempt
+trips a rule of the image's:
+`Netcat Remote Code Execution in Container` needs ` -e` or ` -c` in `nc`'s command line, which the
+check never gives it; `Redirect STDOUT/STDIN to Network Connection in Container` needs a `dup` that
+returns 0, 1 or 2 for a socket, and `nc` moves its socket to descriptor 3 (`netfd` in
+`networking/nc_bloaty.c` of busybox 1.38.0) while the shell joins the tools' standard streams to
+pipes; `Run shell untrusted` needs a shell below a protected spawner, a web, database or mail server
+among them, and the checks' shells descend from the container's entrypoint alone; and none of the
+other rules asks for what an attempt does: a terminal or a login, a sensitive or a log file, a
+binary its image does not hold, a packet socket, a kernel module, ptrace or `ssh`. They stay in the
+record on purpose, as an hourly proof that Falco sees an unexpected contact with the API server on
+every worker. What that costs while the cluster audits: an event for each pod's `nc` to the API
+server, three a run of the network check, and one for each `kubectl`, which makes its requests over
+one connection, as a local run of the image's against a stand-in API server showed, six a run of the
+rights check: 9 events an hour, 9 JSON lines in the log store, and, on a worker where nothing else
+has tripped the rule since Falco started there, a series of `falcosecurity_falco_rules_matches_total`
+for it, which Falco's dashboard shows. Once the cluster enforces, the network check's connect to the
+API server fails, and libs 0.26.1, which Falco 0.45.2 builds on, leaves a socket whose connect failed
+without its server's address, as Falco does not ask it to track connections' status
+(`parse_connect_exit` in `userspace/libsinsp/parsers.cpp`), so that attempt trips nothing and the
+rights check's 6 an hour remain. Every event of the canary has, in `output_fields."k8s.ns.name"`,
+the namespace `escape-canary`:
+`just logs 'kubernetes.pod_namespace:security-system kubernetes.container_name:falco | unpack_json | filter output_fields.k8s.ns.name:escape-canary' --since 1h`
+prints them ([The escape canary](#the-escape-canary)).
 
 The Falco documentation says what else an override can do
 ([overriding](https://falco.org/docs/concepts/rules/overriding/),
@@ -7088,7 +10934,8 @@ The Falco documentation says what else an override can do
 ## kguardian
 
 `apps/base/kguardian/kguardian/` runs kguardian, from its publisher's chart
-(`oci://ghcr.io/kguardian-dev/charts/kguardian`), in the namespace `kguardian`. It records what each
+(`oci://ghcr.io/kguardian-dev/charts/kguardian`, whose keyless signature Flux verifies:
+[Signatures](#signatures)), in the namespace `kguardian`. It records what each
 pod connects to and which system calls it makes, and shows that as a proposed network policy or
 seccomp profile, which a person reads before writing the real one: the evidence for the allows of
 the namespaces [Network policy](#network-policy) still lists, whose flows are not yet enumerated.
@@ -7408,9 +11255,14 @@ key's recipient before it leaves its pod, of which the job keeps the newest 14 d
 select it by, and `tests/kguardian.bats` fails on any other: it builds the component alone with the
 same variables and compares each object. So the whole record, pod names and addresses, is also in
 the project's object storage for that long, and a lost database is restored from it as any other
-([postgres-restore.md](runbooks/postgres-restore.md)). The backup and dump alerts watch it as they
-do every database: `PostgresWALArchivingFailing`, `PostgresBackupTooOld`, `PostgresDumpStale` and
-`PostgresDumpJobFailing`.
+([postgres-restore.md](runbooks/postgres-restore.md)): the restore's cluster takes the database's
+flows from its start, as the namespace's policies select every cluster of it by `cnpg.io/cluster`
+existing ([Network policy](#network-policy)), and the broker is pointed at it by the names of its
+Secret and Service in `values.yaml`. A cluster rebuilt from nothing does not restore it: the old
+record names the pods and addresses of the cluster that was, so the database is made again by a
+start and the observers record anew ([rebuild.md](runbooks/rebuild.md)). The backup and dump alerts
+watch it as they do every database: `PostgresWALArchivingFailing`, `PostgresBackupTooOld`,
+`PostgresDumpStale` and `PostgresDumpJobFailing`.
 
 ### The broker's tokens
 
@@ -7528,19 +11380,22 @@ database's first base backup and first nightly dump; and the database's size aft
 
 The tree's checks stop a bad object before it is merged. They do not see one applied by hand, by an
 operator or by a chart at run time, and they report nothing about what already runs. An admission
-policy engine does both, against rules written once. Two engines dominate, so the lab runs both, in
-audit, holding the same three rules, to compare them on a real cluster. Neither refuses, mutates or
+policy engine does both, against rules written once. Two engines dominate, so the lab runs both,
+holding the same three rules in audit, to compare them on a real cluster, and Kyverno holds one rule
+of its own that refuses: a pod created in a namespace labelled with a sandbox tier, without that
+tier's isolation ([The sandbox tier rule](#the-sandbox-tier-rule)). Neither engine mutates or
 generates a workload, and neither can hold up the cluster: the webhooks that match workloads fail
-open and skip the control plane's and Flux's namespaces. Kyverno also keeps webhooks of its own, on
-its own policy kinds, that fail closed ([Audit, and what a webhook may do](#audit-and-what-a-webhook-may-do)).
+open and skip the control plane's and Flux's namespaces, so the refusal holds while Kyverno answers.
+Kyverno also keeps webhooks of its own, on its own policy kinds, that fail closed
+([Audit, and what a webhook may do](#audit-and-what-a-webhook-may-do)).
 
 The engines are five applications, which an overlay selects an engine at a time, each engine in a
 namespace of its own that enforces the restricted level:
 
-| Engine | Namespace | Applications, in order | Chart | Rules written as |
-| --- | --- | --- | --- | --- |
-| Kyverno | `kyverno` | `kyverno`, `kyverno-policies` | `kyverno` 3.10.0, Kyverno 1.20.0, an OCI chart | `ValidatingPolicy` (`policies.kyverno.io/v1`), in CEL |
-| Gatekeeper | `gatekeeper-system` | `gatekeeper`, `gatekeeper-templates`, `gatekeeper-policies` | `gatekeeper` 3.23.1, from the project's Helm repository | `ConstraintTemplate` in Rego, and a constraint of each template's kind |
+| Engine | Namespace | Applications, in order | Chart | Rules written as | What it holds |
+| --- | --- | --- | --- | --- | --- |
+| Kyverno | `kyverno` | `kyverno`, `kyverno-policies` | `kyverno` 3.10.0, Kyverno 1.20.0, an OCI chart | `ValidatingPolicy` (`policies.kyverno.io/v1`), in CEL | the three rules in audit (`Audit`), and `sandbox-tier`, which refuses (`Deny`) |
+| Gatekeeper | `gatekeeper-system` | `gatekeeper`, `gatekeeper-templates`, `gatekeeper-policies` | `gatekeeper` 3.23.1, from the project's Helm repository | `ConstraintTemplate` in Rego, and a constraint of each template's kind | the three rules in dry-run (`dryrun`) |
 
 The engine's application is the chart and what scrapes and alerts on it. Kyverno's rules are the
 next application, which waits for the engine (`dependsOn`) because the kinds it applies are the
@@ -7629,8 +11484,9 @@ alone. Only the live cluster shows the reports themselves.
 
 How each engine says it:
 
-- **Kyverno**: one `ValidatingPolicy` per rule in `kyverno-policies/app/`, `validationActions:
-  [Audit]` and `failurePolicy: Ignore`. `variables` collect the containers or images, and each
+- **Kyverno**: one `ValidatingPolicy` per rule in `kyverno-policies/app/`, beside `sandbox-tier`
+  ([The sandbox tier rule](#the-sandbox-tier-rule)), `validationActions: [Audit]` and
+  `failurePolicy: Ignore`. `variables` collect the containers or images, and each
   `validations` expression is CEL, with the message the report carries; the restricted rule has one
   expression for each setting, so a report names which of the four a pod misses. The legacy kind,
   `ClusterPolicy` of `kyverno.io/v1`, is no longer executed as of Kyverno 1.20, and the chart refuses
@@ -7647,6 +11503,109 @@ How each engine says it:
   schema, which `tests/admission-policy.bats` runs. The templates
   and the Kyverno policies are validated by `just kubernetes-validate` against the definitions the
   render holds.
+
+### The sandbox tier rule
+
+`sandbox-tier`, a `ValidatingPolicy` in `kyverno-policies/app/` beside the three, holds the contract
+of [Runtime classes](#runtime-classes): a pod created in a namespace that carries the label
+`k8s-gitops/sandbox` sets what the label's tier asks, `hostUsers: false` for `userns`,
+`runtimeClassName: gvisor` for `gvisor` and `runtimeClassName: kata` for `kata`, and a namespace whose
+label is any other value admits no pod. A refused pod carries one message, of the validation it
+fails: the label is not a tier, or the pod lacks its tier's field. Its offline twin, which its
+`k8s-gitops/offline-check` annotation names, is `just pod-security-check`
+([Pod Security](#pod-security)), which refuses a pod template of the render without its tier before
+a change is merged, and also a namespace whose value is no tier when it has no pods, and the VolSync
+and CloudNativePG resources whose operators would make pods there. Gatekeeper holds no twin of it,
+by decision ([ADR 0021](adr/0021-a-namespace-label-names-its-sandbox-tier-and-kyverno-alone-refuses-pods-without-it.md)):
+one engine refuses a rule, as [Moving a rule to enforce](#moving-a-rule-to-enforce) asks, and the
+offline check stands before it. It is the one rule of either engine in `Deny`.
+
+- **What it matches.** Pods alone, as for the other rules, with the automatic rules for pod
+  controllers off: a Deployment, Job or DaemonSet in such a namespace is admitted, and each pod its
+  controller makes is judged. Their creation alone: a pod's `runtimeClassName` and `hostUsers`
+  cannot change once it exists, as neither is among the fields `ValidatePodUpdate` lets an update
+  change (Kubernetes' `pkg/apis/core/validation/validation.go` at v1.37.1), so an update cannot
+  change the verdict, and evaluating one could only block a pod that predates the label. The
+  namespaces are those where the label exists, whatever its value. At 1.20.0 the webhook that
+  serves the rule carries the policy's namespace
+  selector merged with the `kyverno` ConfigMap's, which skips `kube-system`, `flux-system` and
+  `kyverno` (`resolveNamespaceSelector` and `mergeLabelSelectors` in
+  `pkg/controllers/webhook/validating.go`), and rules whose selectors differ get webhooks of their
+  own (`groupBySelectors`): this one's is in `kyverno-resource-validating-webhook-cfg`, named
+  `vpol.validate.kyverno.svc-ignore-` and the start of its selectors' digest, with the failure
+  policy `Ignore` and the side effects `NoneOnDryRun`. Kyverno's resource filters also drop every
+  object in `kube-system`, `kube-public`, `kube-node-lease` and `kyverno`. Those five namespaces
+  cannot be sandboxed, as Kyverno never sees their pods at admission; the reports controller's
+  background scan, which runs with `--skipResourceFilters=true` and has no webhook to skip a
+  namespace, evaluates them, and refuses nothing. `tests/admission-policy.bats` reads the five from
+  the rendered chart and fails when a Namespace of the lab-sto2 overlay that carries the label, or
+  `flux-system` as the FluxInstance's patches label it, is one of them. It also fails while any
+  namespace of the overlay carries the label, as none does. Every requester's pod is judged but
+  the kubelets': Kyverno admits a request of a user, group or role that the `kyverno` ConfigMap's
+  `excludeGroups`, `excludeUsernames`, `excludeRoles` or `excludeClusterRoles` names without
+  evaluating it (`withFilter` in `pkg/webhooks/handlers/filter.go`), and the chart's default names
+  one group, `system:nodes`, so the mirror pod a kubelet registers for a static pod is not judged.
+  A static pod comes from its node's machine config, and the kubelet runs it whatever admission
+  says of its mirror. The test requires that group to be the one exclusion.
+- **The refusal holds only while Kyverno's webhook answers.** The failure policy is `Ignore`, which
+  the policy sets and `--forceFailurePolicyIgnore` forces whatever a policy says: while no Kyverno
+  pod answers, or the answer takes longer than the API server's 10 seconds, a pod in a sandbox
+  namespace is admitted without its tier. So is a pod whose evaluation fails, as an error under
+  `Ignore` admits (`admissionResponse` in `pkg/webhooks/resource/vpol/handler.go`), and a pod in a
+  namespace Kyverno cannot read: it takes such a namespace to carry no label but its name
+  (`pkg/cel/matching/predicates/namespace/matcher.go`), so the rule does not match. Kyverno takes a
+  namespace from its cache of namespaces, and asks the API server only for one the cache lacks
+  (`NewNamespaceResolver` in `pkg/cel/engine/namespace.go`), so a pod created just after its
+  namespace gains or changes the label can be judged by the namespace's earlier labels. A version
+  of the policy whose CEL the engine cannot compile is refused when it is written: Kyverno's webhook
+  on its own policy kinds compiles each ValidatingPolicy (`Validate` in
+  `pkg/cel/policies/vpol/validate.go`) and fails closed
+  ([Audit, and what a webhook may do](#audit-and-what-a-webhook-may-do)), and Flux
+  dry-runs every object of `kyverno-policies` before it applies any (`ApplyAll` in
+  `fluxcd/pkg/ssa`), so the application applies nothing, the three audit rules' changes included,
+  and the version in force stays until the policy is fixed. A version already stored that the engine
+  does not compile, as an upgrade of Kyverno could leave it, is not loaded (`Reconcile` in
+  `pkg/cel/policies/vpol/engine/reconciler.go` returns without storing a compiled form): an
+  admission controller already running keeps the version it compiled before, and one that starts,
+  as each does on an upgrade, holds none, so the rule refuses nothing until a version that compiles
+  is applied. The tests compile the rule with the pinned 1.19 CLI ([Tests](#tests)), not with the
+  engine a chart update brings, so such a break shows on the cluster, not in the update's checks.
+  The admission controllers run two replicas, spread over nodes where the scheduler can, under a
+  budget that keeps one, and `KyvernoAdmissionControllerDown` fires when none has been available
+  for 10 minutes ([runbooks/alerts.md](runbooks/alerts.md#kyvernoadmissioncontrollerdown)).
+- **No exception at admission.** `PolicyException` stays off
+  (`features.policyExceptions.enabled: false`, the chart's default, rendered as
+  `--enablePolicyException=false`), and with it off the 1.20.0 admission controller compiles each
+  ValidatingPolicy with no exception: `cmd/kyverno/main.go` hands the provider
+  `PolicyExceptionEnabled()`, and its reconciler lists exceptions only when that is true. The
+  admission controller honours no exception, so none lets a pod past the refusal. The
+  reports controller's background scan does apply a `PolicyException` written to the cluster,
+  whatever the setting: `cmd/reports-controller/main.go` hands the scan the exceptions of
+  `policies.kyverno.io`, the scan fetches them each time it runs
+  (`pkg/controllers/report/background/controller.go`) and passes them to `ScanResource`
+  (`pkg/controllers/report/utils/scanner.go`), and `NewProvider`
+  (`pkg/cel/policies/vpol/engine/provider.go`) compiles each that names the policy into it. Such an
+  exception changes what the scan reports of a pod its `matchConditions` match
+  (`pkg/cel/policies/vpol/compiler/policy.go`), not what admission refuses. The Pod Security
+  exceptions file lists levels, and none of its entries lets a workload past its tier.
+- **What a person sees.** A bare pod that is refused fails at the API server, whose error names the
+  webhook and ends `Policy sandbox-tier failed: <message>`, the message of the validation that
+  failed; `kubectl apply` prints it as
+  `Error from server: error when creating "<file>": admission webhook "vpol.validate.kyverno.svc-ignore-…" denied the request: Policy sandbox-tier failed: <message>`.
+  A pod that a ReplicaSet, Job or DaemonSet makes is refused the same way, and that controller
+  records the refusal as a `FailedCreate` event on itself, `kubectl --namespace <namespace> get events
+  --field-selector reason=FailedCreate`, and tries again. Kyverno writes no admission report for a
+  request in which it evaluated a `Deny` rule (`audit` in `pkg/webhooks/resource/vpol/handler.go`),
+  and this rule's webhook, of selectors no other rule has, evaluates it alone, so its verdicts at
+  admission, a refusal or not, are in no report; those of the background scan are.
+- **Pods that predate a label.** A pod already running when its namespace gains the label, or when
+  the rule is first applied, is kept: the rule matches a pod's creation alone, and nothing evaluates
+  a running pod at admission again. The reports controller's background scan, every hour, evaluates
+  each ValidatingPolicy whose background evaluation is on, as this one's is by default, on each
+  existing pod as a creation, with its namespace's labels at the time (`ScanResource` in
+  `pkg/controllers/report/utils/scanner.go` at 1.20.0), so such a pod is reported as a `fail` of
+  `sandbox-tier` in its namespace's `PolicyReport`, unless a PolicyException that names the policy
+  matches the pod, until it is gone. Made again, by its controller or by hand, it is refused.
 
 ### Tests
 
@@ -7677,7 +11636,8 @@ chart, and runs the same Rego engine as the webhook; Renovate does not move eith
   it), and the namespace selector of the `kyverno` ConfigMap, which skips `kube-system` and
   `flux-system`, with the release's own namespace added by the chart. The webhook that protects
   generation labels, the generation of Kubernetes' own ValidatingAdmissionPolicies, and the background
-  and cleanup controllers are off, and every rule is `Audit`. A webhook that matches resources waits
+  and cleanup controllers are off, and every rule is `Audit` but `sandbox-tier`, which is `Deny`
+  ([The sandbox tier rule](#the-sandbox-tier-rule)). A webhook that matches resources waits
   10 seconds at most before `Ignore` admits the object: at the pinned version Kyverno sets no
   `timeoutSeconds` on it unless a policy's `webhookConfiguration` does, which none does and the test
   asserts, so the API server's default of 10 seconds applies. That is longer than Gatekeeper's
@@ -7712,7 +11672,9 @@ chart, and runs the same Rego engine as the webhook; Renovate does not move eith
   not in one, such as a namespace: `kubectl get policyreport --all-namespaces`,
   `kubectl get clusterpolicyreport`, and `-o yaml` on one for each failed result's policy, rule
   message and resource. The reports controller scans what already runs every hour, and each admitted
-  object is reported as it is admitted. The counts are the metric `kyverno_validating_policy_results_total`
+  object is reported as it is admitted against the three rules; `sandbox-tier`'s verdicts are the
+  scan's alone ([The sandbox tier rule](#the-sandbox-tier-rule)). The counts are the metric
+  `kyverno_validating_policy_results_total`
   (`kyverno_validating_policy_results` in Kyverno's source, which the Prometheus exporter gives the
   counter suffix; a scrape of the live cluster confirms the name), scraped from the admission and
   reports controllers' ServiceMonitors. `kubectl get validatingpolicies` lists the rules and whether
@@ -7748,6 +11710,18 @@ first:
 - The rule's test has a refused case in the engine's tool, which it has, and the change moves its
   assertion with the action.
 
+`sandbox-tier` is in `Deny` in Kyverno from its first commit, and each of these holds for it. No
+namespace carries the label, so its report is empty and stays so until an application's namespace
+asks for a tier, in a change that makes that namespace's pods meet it. What it refuses,
+`just pod-security-check` refuses first, before merge. Its failure policy is `Ignore`, and the
+admission controllers run two replicas, spread over nodes where the scheduler can, under a budget
+that keeps one. The namespaces that keep the cluster reconciled are skipped, and its test fails
+when a namespace Kyverno never sees at admission carries the label. There is no way to except a pod
+at admission, by decision: a pod that cannot meet its namespace's tier belongs in a namespace
+without one. Its test has a refused case for each tier and for each kind of value that is no tier,
+and `tests/admission-policy.bats` requires `Deny` of it
+([The sandbox tier rule](#the-sandbox-tier-rule)).
+
 ### What each engine costs
 
 From the rendered releases, with the values of the tree:
@@ -7756,7 +11730,7 @@ From the rendered releases, with the values of the tree:
 | --- | --- | --- |
 | Objects the release renders | 66, among them 4 hook Jobs and 2 test Pods | 29 |
 | Definitions | 22 | 17, and 3 more at run time, one for each constraint kind |
-| Rules | 3 objects | 6 objects |
+| Rules | 4 objects | 6 objects |
 | Long-running pods | 3: two admission controllers and one reports controller | 3: two controller managers and one audit |
 | Memory requested | 320 MiB (2 x 128, 64) | 1536 MiB (3 x 512) |
 | CPU requested | 300m | 300m |
@@ -7811,7 +11785,8 @@ artifact generator publishes only `apps/base`, and `path` is
 - **Charts**: the operator's own `flux-operator` and `flux-instance` charts from
   `oci://ghcr.io/controlplaneio-fluxcd/charts`, at one version that Renovate moves together. Each
   `OCIRepository` refuses a chart without the keyless cosign signature of the publisher's release
-  workflow on a version tag.
+  workflow on a version tag, the identity of the chart's row of `signatures.yaml`
+  ([Signatures](#signatures)).
 - **Instance**: upstream Flux 2.x, with source-watcher beside the four default controllers for
   the per-application artifacts, and Flux's network policies on. A patch of the instance sets the
   namespace `flux-system` to enforce the restricted Pod Security level ([Pod
@@ -7826,8 +11801,9 @@ artifact generator publishes only `apps/base`, and `path` is
   `flux-system` after its namespace, that read `oci://ghcr.io/eekaan/k8s-gitops/manifests` at the
   tag `main` every minute and apply `./clusters/<cluster>`. Its patches make the source verify the
   artifact's keyless signature: issued by GitHub Actions to this repository's
-  `.github/workflows/publish.yaml` on `refs/heads/main`. An artifact signed by a run on another
-  branch or tag, or by another workflow, is refused (ADR 0003).
+  `.github/workflows/publish.yaml` on `refs/heads/main`, the identity of the artifact's row, the
+  first, of `signatures.yaml`. An artifact signed by a run on another branch or tag, or by another
+  workflow, is refused (ADR 0003).
 - **Metrics**: the operator's values set its report, and with it the metrics of the state of every
   Flux resource, to every 30 seconds. The monitors and the alerts are the `flux-monitoring`
   application's, not these two applications': Flux is installed before the monitoring definitions
@@ -7954,14 +11930,294 @@ The signing identity is this workflow file on that branch: the subject
 `https://github.com/eekaan/k8s-gitops/.github/workflows/publish.yaml@refs/heads/main` from the
 issuer `https://token.actions.githubusercontent.com`, which the instance requires
 ([Flux itself](#flux-itself)). Renaming the workflow file, or publishing from another branch,
-changes the identity, so the instance's patch changes in the same change. `tests/publish.bats` fails
-when the identity the script verifies and the one the instance's values accept differ.
+changes the identity, so the instance's patch changes in the same change, and the artifact's row of
+`signatures.yaml` with it. `tests/publish.bats` fails when the identity the script verifies and the
+one the instance's values accept differ, and `just signatures-check` when the patch and the row do.
 
 The package must be public for the cluster to pull it without credentials. GitHub makes a new
 package private, and a package linked to its repository takes the repository's access permissions
 but not its visibility, so the package's visibility is set to public in its settings once, after
 the first run; until then the cluster cannot pull it. A public package cannot be made private
 again.
+
+## Signatures
+
+`signatures.yaml` at the repository's root lists every source a chart comes from, the artifact the
+cluster syncs and the tools image the checks run in, one row each, and how it is signed: keyless,
+by one identity that the certificate of its signature holds; with a key, whose public key is a file
+under `signatures/`; or not where Flux looks, with the reason. Its header gives each kind's fields.
+A source signed keyless whose row has no `cluster: false` is verified before merge and, through the
+`verify` block of its `OCIRepository`, by Flux on the cluster; every other row is checked before
+merge alone, or is unsigned. Who signs each:
+
+| Source | Signed by | Verified | Why |
+|---|---|---|---|
+| `oci://ghcr.io/eekaan/k8s-gitops/manifests` | eekaan/k8s-gitops, `publish.yaml` on `main` | before merge and by the cluster | the artifact the cluster syncs, signed by the publish run |
+| `oci://ghcr.io/eekaan/k8s-gitops/ci-tools` | eekaan/k8s-gitops, `tools-image.yaml` on `main` | before merge alone | the checks run in it, and nothing on the cluster pulls it |
+| `https://charts.fairwinds.com/stable` | — | unsigned | a Helm repository: Flux verifies none of its charts |
+| `https://crowdsecurity.github.io/helm-charts` | — | unsigned | a Helm repository: Flux verifies none of its charts |
+| `https://ctrliq.github.io/ascender-operator` | — | unsigned | a Helm repository: Flux verifies none of its charts |
+| `https://open-policy-agent.github.io/gatekeeper/charts` | — | unsigned | a Helm repository: Flux verifies none of its charts |
+| `oci://docker.io/envoyproxy/gateway-helm` | — | unsigned | Envoy Gateway signs its image, not its chart |
+| `oci://ghcr.io/bjw-s-labs/helm/app-template` | bjw-s-labs/helm-charts, `chart-release-steps.yaml` on `main` | before merge and by the cluster | the publisher signs keyless; four applications read it |
+| `oci://ghcr.io/cloudnative-pg/charts/cloudnative-pg` | cloudnative-pg/charts, `release-publish.yml` on `main` | before merge and by the cluster | the publisher signs keyless |
+| `oci://ghcr.io/cloudnative-pg/charts/plugin-barman-cloud` | cloudnative-pg/charts, `release-publish.yml` on `main` | before merge and by the cluster | the publisher signs keyless |
+| `oci://ghcr.io/controlplaneio-fluxcd/charts/flux-instance` | controlplaneio-fluxcd/charts, `release.yml` at a version tag | before merge and by the cluster | the publisher signs keyless |
+| `oci://ghcr.io/controlplaneio-fluxcd/charts/flux-operator` | controlplaneio-fluxcd/charts, `release.yml` at a version tag | before merge and by the cluster | the publisher signs keyless |
+| `oci://ghcr.io/dexidp/helm-charts/dex` | — | unsigned | no signature; the publisher says nothing about signing |
+| `oci://ghcr.io/emberstack/helm-charts/reflector` | — | unsigned | no signature; the publisher says nothing about signing |
+| `oci://ghcr.io/external-secrets/charts/external-secrets` | external-secrets/external-secrets, `helm.yml` on `main` | before merge and by the cluster | the publisher signs keyless |
+| `oci://ghcr.io/falcosecurity/charts/falco` | falcosecurity/charts, `release.yml` on `master` | before merge and by the cluster | the publisher signs keyless |
+| `oci://ghcr.io/grafana/helm-charts/grafana-operator` | — | unsigned | no signature; the publisher says nothing about signing |
+| `oci://ghcr.io/home-operations/charts-mirror/descheduler` | home-operations/charts-mirror, `app-builder.yaml` on `main` | before merge and by the cluster | the mirror signs keyless |
+| `oci://ghcr.io/home-operations/charts-mirror/external-dns` | home-operations/charts-mirror, `app-builder.yaml` on `main` | before merge and by the cluster | the mirror signs keyless |
+| `oci://ghcr.io/home-operations/charts-mirror/keda` | home-operations/charts-mirror, `app-builder.yaml` on `main` | before merge and by the cluster | the mirror signs keyless |
+| `oci://ghcr.io/home-operations/charts-mirror/metrics-server` | home-operations/charts-mirror, `app-builder.yaml` on `main` | before merge and by the cluster | the mirror signs keyless |
+| `oci://ghcr.io/home-operations/charts-mirror/volsync` | home-operations/charts-mirror, `app-builder.yaml` on `main` | before merge and by the cluster | the mirror signs keyless |
+| `oci://ghcr.io/kguardian-dev/charts/kguardian` | kguardian-dev/kguardian, `charts-release.yaml` at a version tag under `chart/` | before merge and by the cluster | the publisher signs keyless |
+| `oci://ghcr.io/kyverno/charts/kyverno` | — | unsigned | signed into another repository, which Flux cannot read |
+| `oci://ghcr.io/oauth2-proxy/charts/oauth2-proxy` | oauth2-proxy/manifests, `release.yaml` on `main` | before merge and by the cluster | the publisher signs keyless |
+| `oci://ghcr.io/open-feature/charts/open-feature-operator` | a key, `signatures/open-feature-operator.pem` | before merge alone | a key the publisher does not publish; no key's block is built |
+| `oci://ghcr.io/openbao/charts/openbao` | openbao/openbao-helm, `release-chart.yml` on `main` | before merge and by the cluster | the publisher signs keyless |
+| `oci://ghcr.io/piraeusdatastore/piraeus-operator/piraeus` | — | unsigned | no signature; the publisher says nothing about signing |
+| `oci://ghcr.io/postfinance/charts/kubelet-csr-approver` | — | unsigned | no signature; the publisher says nothing about signing |
+| `oci://ghcr.io/prometheus-community/charts/kube-prometheus-stack` | — | unsigned | Helm provenance with a PGP key, which Flux does not verify |
+| `oci://ghcr.io/prometheus-community/charts/prometheus-blackbox-exporter` | — | unsigned | Helm provenance with a PGP key, which Flux does not verify |
+| `oci://ghcr.io/prometheus-community/charts/prometheus-operator-crds` | — | unsigned | Helm provenance with a PGP key, which Flux does not verify |
+| `oci://ghcr.io/spegel-org/helm-charts/spegel` | spegel-org/spegel, `release.yaml` at a version tag | before merge and by the cluster | the publisher signs keyless |
+| `oci://ghcr.io/stakater/charts/reloader` | stakater/Reloader, `push-helm-chart.yaml` on `master` | before merge and by the cluster | the publisher signs keyless |
+| `oci://ghcr.io/vectordotdev/helm-charts/vector` | — | unsigned | no signature; the publisher says nothing about signing |
+| `oci://ghcr.io/victoriametrics/helm-charts/victoria-logs-single` | VictoriaMetrics/helm-charts, `release.yaml` on `master` | before merge and by the cluster | the publisher signs keyless |
+| `oci://gsoci.azurecr.io/charts/giantswarm/silence-operator` | a CircleCI pipeline of Giant Swarm's project | before merge and by the cluster | the publisher signs keyless, from CircleCI |
+| `oci://quay.io/cilium/charts/cilium` | cilium/cilium, `release.yaml` on `main` | before merge and by the cluster | the publisher signs keyless |
+| `oci://quay.io/jetstack/charts/cert-manager` | a key, `signatures/cert-manager.pem` | before merge alone | signed over SHA-512, which source-controller cannot verify with a key |
+
+### What the checks do
+
+- `just signatures-check`, a check of the `static` group, offline. It runs `just kubernetes-check`'s
+  builds first, and stops when they fail, and reads the sources from them: every application,
+  enabled or not, and each cluster directory, after kustomize and after Flux's substitution with
+  `--strict-substitute`. A source is the `url` of an `OCIRepository` or a `HelmRepository`, the
+  artifact the FluxInstance syncs, read from the values the `flux-instance` application builds into
+  its ConfigMap, or the tools image, by the name `scripts/tools-image` publishes; the objects of one
+  url share a row. The check fails, naming the source, and for an object its kind, namespace, name
+  and file: a source without a row, a row no source uses, a source listed twice, rows out of order,
+  a field missing, unknown or not one line of text; a `HelmRepository` whose row is not unsigned, as
+  a chart an https Helm repository serves is unsigned by its kind; a `HelmRepository` of type `oci`,
+  a `Bucket` or any other kind of `source.toolkit.fluxcd.io` it has no rule for; an `OCIRepository`
+  whose ref is neither a tag nor a digest; a key that is not a file directly under `signatures/`
+  holding one PEM public key, a file there no row names, and a key row without `cluster: false`; an
+  identity outside the grammar below; and a `verify` block that is not its row's. Every
+  `OCIRepository` whose row is keyless without `cluster: false` has `spec.verify` exactly
+  `provider: cosign` and one `matchOIDCIdentity` entry of the row's `issuer` and `subject`, byte for
+  byte, with no `secretRef` and nothing else, and so does the patch the FluxInstance's values put on
+  its sync source, the one patch whose target selects it as kustomize selects, by patterns of kind
+  and name; no other `OCIRepository` has a block. It needs what `kubernetes-check` needs.
+- `just signatures-verify`, the one check of the group `signatures`, which needs the network. It
+  runs the offline rules first and stops when they fail. Then, for each row, against the pins of the
+  tree, an `OCIRepository`'s tag or digest, the sync source's ref and the digest `versions.yaml`
+  records under `ci_tools_image` (with none recorded, the line says there is nothing to verify), it
+  probes the registry's `/v2/` with curl and runs the pinned cosign: `cosign verify` with a keyless
+  row's issuer and subject as its two regular-expression flags and nothing else, which is what Flux
+  matches, no claim Flux has no field for; with a key row's key, the transparency log not consulted
+  (`--insecure-ignore-tlog`), as source-controller does not consult it for a key, and the row's
+  digest algorithm; and for an unsigned OCI row, a lookup with an identity no certificate holds,
+  which passes only when cosign answers that there is no signature at all. A Helm repository's row
+  fetches nothing. It prints one line per row, `pass`, `FAIL` or `skip`, the source and how it was
+  verified or why it failed, and nothing else, then exits non-zero if any row failed.
+
+`signatures-verify` is a group of its own, outside `static`, so `just checks`, `just ci` and CI run
+both, CI as two jobs: a registry that cannot be reached fails `signatures` with its reason and
+leaves `static`'s result its own, and the required check `ci` stays red until a re-run verifies. The
+publish run runs neither: its gate is `just kubernetes-check` ([Publishing](#publishing)).
+
+The verification fails closed. Only cosign's exit 0 verifies, and only its own outcome "no
+signatures found", exit 10, counts as unsigned. The pinned cosign, 3.1.4, has exit codes of its own
+for no signature (10), a tag that is not there (11), a signature that does not match (12) and one
+without a certificate (13), for a signature at the signature tag (`cmd/cosign/errors/exit_codes.go`,
+`exit_code_lookup.go`, given in `cmd/cosign/cli/verify/verify.go` by `WrapError`); a signature in a
+Sigstore bundle that does not match, an unreachable registry, a refused request and a rate limit
+all exit 1. A registry's error does not end as "no signatures found": cosign resolves the pinned
+tag first, and any answer but the manifest is an error there, a missing tag's 404 exit 11; at the
+signature tag only a 404 reads as no signature, and any other answer is an error
+(`pkg/oci/remote/signatures.go`). The bundle lookup comes first, and when it fails for any reason
+cosign looks at the signature tag, as source-controller does, so a registry that refused the
+referrers call alone and then answered the rest would leave a bundle unseen, on the cluster as here.
+Before cosign runs, the check asks the registry's `/v2/` (Docker Hub's registry is
+`registry-1.docker.io`, not `docker.io`): one that does not answer within 20 seconds or cannot be
+resolved fails that source as "the registry <host> could not be reached", one that answers 429
+as "limits anonymous requests", and a 5xx as unreachable too. Every other failure of cosign fails
+with a reason of the check's own, chosen from its exit code and the time it took, never from what it
+printed: the signature does not match, a signature where the row says unsigned, no signature where
+the row names one, a tag that is not there, a cosign that did not finish within its `--timeout`
+(`SIGNATURES_VERIFY_TIMEOUT` seconds, 120 when unset), or a failure with no outcome of its own.
+Every row is checked; there is no retry beyond cosign's own.
+
+cosign runs with none of the caller's secrets (`scripts/lib/tools.sh`), in a home, a Docker
+configuration with no login in it and a TUF root of the run's own, without `REGISTRY_AUTH_FILE` and
+podman's places, and without any variable `cosign env` lists, among them `COSIGN_REPOSITORY`, which
+moves where a signature is read from, and the `SIGSTORE_*` files and `TUF_*` settings, which change
+what is trusted. It runs `verify` and no other subcommand. Nothing it prints reaches the output: its
+error for a host that does not resolve names the resolver's address.
+
+An issuer is `^`, a literal with every dot escaped, and `$`. A subject is `^`, a literal with every
+dot escaped up to and including the `@` that begins its ref (the whole subject, for an identity
+without a ref), the ref, which alone may hold a bracket expression, a quantifier or a group with an
+alternation inside it, and `$`, the subject's only `$`; no bare dot, backslash class, lazy
+quantifier or flag group. That is syntax Go's regular expressions and POSIX extended ones read
+alike, so what bash matches in the tests is what Flux and cosign match. Both compile the patterns
+with Go's `regexp.Compile` and match them with `MatchString`, unanchored (cosign's
+`pkg/cosign/verify.go` for a signature at the signature tag, sigstore-go's
+`pkg/verify/certificate_identity.go` for a bundle; source-controller hands its `matchOIDCIdentity`
+to them as `IssuerRegExp` and `SubjectRegExp`), so a pattern without its anchors also accepts a
+longer identity, such as another repository's workflow whose path ends the same way. And a block
+with an empty `matchOIDCIdentity` checks no identity of a signature at the signature tag: any
+certificate of Sigstore's public authority passes (`CheckCertificatePolicy` checks identities only
+when there are some), which is why every block names exactly one.
+
+### What Flux's verification needs
+
+The FluxInstance pins Flux's manifests to the operator's version, and at the version its values
+pin, `flux-operator-manifests:v0.62.1`, the distribution installs source-controller v1.10.1 and
+helm-controller v1.7.1 (`flux/v2.10.0/source-controller.yaml` and `helm-controller.yaml` of that
+artifact). That source-controller is built with cosign v3.1.4, the version `mise.toml` pins for the
+check (its `go.mod`). What this section says of the controllers is read at those versions and moves
+with those two pins; no test holds them together, so a bump of the operator's manifests artifact or
+of cosign is read against the same sources again.
+
+For a keyless block source-controller looks for a Sigstore bundle among the artifact's referrers,
+through the registry's referrers API or the referrers tag, and otherwise for a signature at the
+signature tag (`internal/oci/cosign/cosign.go`, `Verify`), as the pinned cosign's `verify` does
+(`cmd/cosign/cli/verify/verify.go`), so a row the check verifies is one the controller can verify; a
+source the check could verify only with something the controller does not do takes `cluster: false`
+instead of a block. For a key it builds a verifier over SHA-256 alone and does not consult the
+transparency log (`NewCosignVerifier`), so cert-manager's chart, signed over SHA-512, has no block.
+The controller needs the registry and Sigstore's TUF repository. The trusted root a bundle is
+verified with it loads once, and while that fails retries at most once a minute; what a signature
+at the signature tag is verified with, the transparency log's and certificate logs' keys and the
+authority's certificates, it reads for every verifier it builds, through cosign's older TUF client,
+which retries a failed update on every call, with no such limit (`NewCosignVerifier`:
+`GetRekorPubs`, `GetCTLogPubs`, `fulcio.GetRoots` and `GetIntermediates`); only a failed start of
+that client, which reads its local store and not the network, lasts until the controller restarts
+(`pkg/tuf/client.go` of `sigstore/sigstore` v1.11.1, which its `go.mod` takes). It asks the
+transparency log only about a signature that does not carry its entry. It reaches them through
+`flux-system`'s egress, which Flux's own `allow-egress` policy leaves open
+([What the namespaces let through](#what-the-namespaces-let-through)), the egress the sync source's
+and Flux's two charts' verification take, so no policy or exception changes for the other blocks. A
+rotation of Sigstore's public keys is not noticed, and a verified revision is not verified again
+until it, or the object's spec, changes (Flux's documentation of `OCIRepository` verification).
+
+Flux's substitution leaves the patterns as they are written: it substitutes `${var}` alone, and a
+`$` not followed by `{` stays (`fluxcd/pkg/envsubst`, `parse/scan.go`), so a pattern ending in `$`
+reaches the cluster as written, which `just signatures-check` proves on the builds. A `$$` would
+come out as `$`; the grammar allows one `$`. The FluxInstance's values, which hold the sync source's
+patch, are in a ConfigMap substitution leaves alone.
+
+No step of a rebuild applies a block before it can verify. Of the applications installed with helm
+before Flux, from the `url` and `ref` of their `ocirepository.yaml`
+([Applications installed before Flux](#applications-installed-before-flux)), Cilium, the Flux
+Operator and the Flux instance have blocks, which helm does not read; Flux applies them once it
+runs, over the pod network Cilium already gives. The kubelet serving certificate approver, installed
+the same way, is unsigned and has none.
+
+### When a verification fails
+
+source-controller verifies an `OCIRepository` with a block when its revision changes, when its spec
+changes, which adding or changing a block does, when the last verification failed, and when the
+verification policy changes (`internal/controller/ocirepository_controller.go`, `reconcileSource`).
+A verified revision reports `SourceVerified` `True`, reason `Succeeded`; a failed one
+`SourceVerified` `False` and `Ready` `False`, reason `VerificationError`, and the controller keeps
+the artifact it holds and pulls nothing new. A failure leaves the object's observed generation where
+it was. helm-controller then treats the source as not ready while its generation is newer than the
+one observed (`isSourceReady` and `isReady` in `internal/controller/helmrelease_controller.go`):
+
+- after a change of the spec, a block added or changed, every HelmRelease that reads the source
+  reports `SourceNotReady` and changes nothing, so the release that runs stays as it is and is
+  neither upgraded nor removed. An application whose Kustomization waits (`wait: true`) fails its
+  health check on the source, and every Kustomization that names it in `dependsOn`, directly or
+  through others, waits;
+- after a new revision of an unchanged spec, a tag moved to an artifact signed otherwise, the source
+  keeps its artifact, and helm-controller goes on reconciling the release from it, so the release
+  that runs stays as it is. The source also reports `Reconciling` `True`, reason
+  `ProgressingWithRetry` (`internal/reconcile/reconcile.go`), which the health check of a
+  Kustomization reads as still in progress: an application whose Kustomization waits fails its
+  health check at its next reconcile, and every Kustomization that names it in `dependsOn`,
+  directly or through others, waits, as after a change of the spec.
+
+The artifact is kept while source-controller's pod runs: its storage is an `emptyDir`
+(`flux/v2.10.0/source-controller.yaml`), so a new pod, after a Flux upgrade or a drained node,
+holds none, the object's artifact is cleared (`reconcileStorage`), and the source pulls it again
+only once it verifies. Until then every HelmRelease that reads it reports `SourceNotReady`, as the
+source has no artifact, and nothing reconciles the release, which goes on running as it is.
+
+A source fires `FluxSourceNotReady` after 15 minutes, the sync source `FluxRootSyncNotReady` after
+10, and a release or Kustomization that stops with it `FluxApplierNotReady` ([Alerts](#alerts)).
+`just cluster-signatures` reads the cluster's `OCIRepository` objects and says, for each, whether it
+is as its row says: one the cluster verifies has exactly its row's block, reports `SourceVerified`
+`True` for its current generation and is Ready for that generation, and any other has no block. It
+prints `pass` or `FAIL`, the namespace and name and one line of why, with the condition's reason,
+never a message or an address, and exits 0 only when none fails.
+
+A pin whose signature no longer matches its row, because its publisher's identity changed or another
+identity signed it, is handled as a possible compromise, and its block stays: the release keeps the
+artifact it runs. `just signatures-verify` fails such a pin as well, with `cluster: false` or
+without, so no pull request that only takes the block out passes `ci`; and without the block,
+source-controller would pull the artifact that failed and helm-controller would upgrade the release
+to it. Either the new identity is read from the publisher's page and from the certificate of the
+signature, and once it verifies the row and the block change to it in one pull request, as in
+[Adding a source](#adding-a-source), or the source is pinned to a digest whose signature still
+verifies with the row.
+
+### Taking a block out
+
+A block is taken out only for a signature the pinned controller cannot read though the check
+verifies it. A refused signature and a controller that cannot reach what verification needs both
+set `SourceVerified` and `Ready` `False` with reason `VerificationError` (`reconcileSource`, which
+wraps every error of `NewCosignVerifier` and `Verify` alike), so read the message first:
+`flux get sources oci --namespace <namespace>` shows `Ready`'s, which on a failed verification is
+`SourceVerified`'s, and `kubectl --namespace <namespace> describe ocirepository <name>` shows both.
+
+- A message that the verifier could not be built (`unable to initialize trusted root`,
+  `unable to get Rekor public keys`, `unable to get CTLog public keys`,
+  `unable to get Fulcio root certs` or `intermediate certs`, `unable to create Rekor client`), one
+  that names a network error, a timeout or a registry's error, and `no signatures found`, which a
+  failed referrers call can also end in, as the controller then looks at the signature tag alone,
+  are the cluster's reach. The block stays, the reach is fixed
+  ([What Flux's verification needs](#what-fluxs-verification-needs)), and the controller retries
+  by itself, the trusted root at most once a minute, and verifies the source once it reaches them.
+- A message that no signature matched, `no matching signatures` or `no matching attestations` and
+  why, with no network error in it, is a signature the controller refused. The block is taken out
+  only if `just signatures-verify` passes the row at that same digest: the revision the object
+  reports, its artifact's or the new one its `Reconciling` message names, with the source pinned
+  to that digest for the run if its tag has moved since.
+
+One pull request removes the block from every `OCIRepository` of the source's url, four files for
+app-template's row, and gives the row `cluster: false` with the reason, what the cluster showed
+when it refused the signature. `just signatures-check` accepts exactly that, and refuses a block
+removed alone or from only some of a url's objects. Once applied, the object's new generation has
+no block: source-controller removes its `SourceVerified` condition and reconciles as an unsigned
+source, Ready with the artifact of its tag, and `just cluster-signatures` passes it as verified
+before merge alone. `just signatures-verify` goes on verifying the row, so a mismatch still shows
+before merge. A pin that fails `just signatures-verify` as well is not taken out
+([When a verification fails](#when-a-verification-fails)).
+
+### Adding a source
+
+A new `OCIRepository` or `HelmRepository` url, a new sync source or another tools image name gets
+its row in the same change, in its place in the order. Read the publisher's page on signing, then
+run the pinned cosign anonymously, as the check does, against the pinned tag: a keyless signature's
+identity is the one the page states, or the one cosign names when an identity does not match; a key
+is the one the publisher's page gives, or, where the publisher gives none, as OpenFeature does, the
+one the transparency log entry of its signature records, which the row's `from` says; with no
+signature, the row is unsigned and says what the page says. A keyless row's pattern verifies the
+pinned tag and the release before or after it, and fails with one character of the subject's
+repository changed, before its block is added, with the comment the other blocks have.
+`just signatures-check` and `just signatures-verify` pass.
+
+What the checks do not cover: images, admission, the charts the bootstrap installs with helm before
+Flux runs, a source's own content beyond its signature, and commits of a `GitRepository`, which hold
+no chart and have no row; a signature in a repository other than the source's own, such as
+Kyverno's, is not read.
 
 ## The render diff
 
@@ -7986,7 +12242,10 @@ the API server requires, and only its served versions count; an object that is o
 names no API. A well-shaped definition in the tree, or in a chart, does name its versions, which is
 what the cluster would serve once it is applied. Objects are selected by their exact name and
 namespace, as the controllers look them up: a `valuesFrom` or chart source named `x-*` selects
-nothing that is not called `x-*`. A HelmRelease whose name is not a DNS subdomain or whose
+nothing that is not called `x-*`. A `valuesFrom` entry whose ConfigMap is not in the application, or
+whose `valuesKey` the ConfigMap does not hold, fails the render naming the release, the ConfigMap
+and the key, as helm-controller fails the release, unless the entry is `optional`, which both skip.
+A HelmRelease whose name is not a DNS subdomain or whose
 namespace is not a DNS label is refused, naming its file (or its application's directory), before
 anything is read from it. The render reads the tree's `kubernetes/` and `versions.yaml` alone, and
 refuses a tree from which a build would read outside it, or a document a tool would read otherwise

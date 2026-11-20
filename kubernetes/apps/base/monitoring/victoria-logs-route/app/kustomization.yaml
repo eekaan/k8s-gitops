@@ -5,3 +5,5 @@ kind: Kustomization
 # The SecurityPolicy and the route for the sign-in paths come from components/sso, which ks.yaml adds.
 resources:
   - httproute.yaml
+  - httproutefilter.yaml
+  - probe.yaml

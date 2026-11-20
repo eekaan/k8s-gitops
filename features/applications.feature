@@ -29,7 +29,7 @@ Feature: Applications
   Scenario: A cluster that does not select n8n builds none of it, and one that selects it without what it depends on is refused
     Given the lab-sto2 overlay, which selects n8n with two entries, the namespace directory ai-system and the application's ks.yaml
     When it is built with both entries, with only the namespace directory's and with neither, and then with both and each application n8n depends on left out in turn
-    Then with both it applies the namespace ai-system, its app-template-defaults ConfigMap and the Kustomization n8n; with only the namespace directory's, the namespace and the ConfigMap and nothing else of ai-system; with neither, nothing of ai-system; and with both but one of cloudnative-pg, prometheus-operator-crds, external-secrets, openbao-store, volsync, linstor-cluster and gateway-public left out, it is refused, naming n8n and the missing application
+    Then with both it applies the namespace ai-system, its app-template-defaults ConfigMap and the Kustomization n8n; with only the namespace directory's, the namespace and the ConfigMap and nothing else of ai-system; with neither, nothing of ai-system; and with both but one of cloudnative-pg, plugin-barman-cloud, prometheus-operator-crds, external-secrets, openbao-store, volsync, linstor-cluster, gateway-public and blackbox-exporter left out, it is refused, naming n8n and the missing application
 
   Scenario: n8n runs its code nodes in a task runner of its own version beside it
     Given the n8n application as the lab-sto2 overlay applies it
@@ -39,7 +39,7 @@ Feature: Applications
   Scenario: Open WebUI is selected by one overlay entry and builds nothing when it is not
     Given the lab-sto2 overlay, which lists the namespace directory ai-system and selects Open WebUI with the application's ks.yaml alone
     When it is built with that entry and without it, and then with the entry and each application Open WebUI depends on left out in turn
-    Then with the entry it applies the Kustomization open-webui beside the namespace ai-system and its app-template-defaults ConfigMap; without it, nothing of Open WebUI and the same namespace; and with one of external-secrets, gateway-public, linstor-cluster, openbao-store and volsync left out, it is refused, naming open-webui and the missing application
+    Then with the entry it applies the Kustomization open-webui beside the namespace ai-system and its app-template-defaults ConfigMap; without it, nothing of Open WebUI and the same namespace; and with one of blackbox-exporter, external-secrets, gateway-public, linstor-cluster, openbao-store and volsync left out, it is refused, naming open-webui and the missing application
 
   Scenario: Open WebUI starts with no secret seeded and no model backend
     Given the open-webui application as the lab-sto2 overlay applies it

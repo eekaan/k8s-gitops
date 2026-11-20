@@ -17,3 +17,9 @@ spec:
   ref:
     # renovate: datasource=docker depName=gsoci.azurecr.io/charts/giantswarm/silence-operator
     tag: 0.22.0
+  # Go regular expressions, kept to syntax POSIX extended expressions read the same way (no \d).
+  verify:
+    provider: cosign
+    matchOIDCIdentity:
+      - issuer: '^https://oidc\.circleci\.com$'
+        subject: '^https://circleci\.com/api/v2/projects/c8f4d22e-ef11-47ef-ae72-71c531dbae88/pipeline-definitions/70bae409-80ea-5dae-b228-784922f660fa$'

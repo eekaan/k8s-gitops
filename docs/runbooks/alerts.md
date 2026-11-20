@@ -20,11 +20,17 @@ member's readiness probe is `bao status`, which fails while it is sealed, so Rea
 Look at first: `kubectl --namespace openbao get pods`, and the member's log,
 `kubectl --namespace openbao logs <pod>`, which says why it could not unseal or rejoin.
 
-Usually: the seal key's Secret `openbao-seal-1` is missing or changed, so the member cannot unseal
-([bringing the seal key back](openbao.md#bringing-the-seal-key-back)); the member started with data
-of another cluster ([a member that does not rejoin](openbao.md#a-member-that-does-not-rejoin)); or
-its volume is not attached to the worker it was moved to yet, in which case the pod is Pending
-and the alert clears by itself.
+Usually: the Secret of a seal key the stanza names, `openbao-seal-1` today and after a rotation the
+previous key's too, is missing or changed, so the member cannot unseal
+([bringing the seal key back](openbao.md#bringing-the-seal-key-back)); during a rotation of the seal
+key, the member waits for the new key's Secret, which External Secrets has not written yet, or its
+pod is from before the rotation and restarted after a member on the new configuration took the lead
+and sealed the root key with the new key, which that pod mounts no Secret of, so it cannot start or
+unseal until the rollout replaces it, or the release was rolled back or reverted to the stanza from
+before the rotation, which holds no key of the new id, and is taken forward again as
+[Rotating](openbao.md#rotating) says; the member started with data of another cluster ([a member that does not rejoin](openbao.md#a-member-that-does-not-rejoin)); or its
+volume is not attached to the worker it was moved to yet, in which case the pod is Pending and the
+alert clears by itself.
 
 ## OpenBaoNoActiveMember
 
@@ -97,26 +103,72 @@ alert counts the others, which are lost.
 
 Look at first: the component named in the alert and the collector's own log,
 `kubectl --namespace monitoring logs <pod>`, which says why it drops: an event too large for the
-sink, or one the store refuses with a status Vector does not retry.
+sink, or one vmauth or the store refuses with a status Vector does not retry. For the sink
+`victoria_logs`, which status:
+`sum by (pod, status) (rate(vector_http_client_responses_total{component_id="victoria_logs"}[5m]))`.
 
 Usually: a record the store rejects, such as a line dated beyond the store's accepted time range; a
-change to the collector's configuration whose transform fails on lines it did not see before.
+change to the collector's configuration whose transform fails on lines it did not see before; or
+vmauth refusing the collector, with 401, every request of it, as the collector's credential is not
+the one vmauth holds. Each reads it from the Secret `vmauth-vector` when it starts, so the two
+disagree once the Secret was made again and only one of them has been restarted since ([Who may
+call the log store](../kubernetes.md#who-may-call-the-log-store)). It shows as 401 in the query
+above, as `sum by (reason) (rate(vmauth_http_request_errors_total{reason="invalid_auth_token"}[5m]))`
+rising in vmauth's metrics, and in when the Secret was made,
+`kubectl --namespace monitoring get secret vmauth-vector --output jsonpath='{.metadata.creationTimestamp}'`,
+against the age of vmauth's and the collector's pods, `kubectl --namespace monitoring get pods`;
+`kubectl --namespace monitoring get externalsecrets` shows whether each ExternalSecret is Ready. The
+fix: restart vmauth,
+`kubectl --namespace monitoring rollout restart deployment/vmauth`, and once both its pods are
+available every collector pod at once,
+`kubectl --namespace monitoring delete pods --selector app.kubernetes.io/name=vector`.
 
 ## LogCollectorSendFailing
 
-A collector's sink to the store has reported errors for 15 minutes. The lines wait in the disk
-buffer on the node, 256 MiB, and once it is full the collector stops reading on that node until the
-store takes lines again, and the lines of files rotated away meanwhile are lost
-([Logs](../kubernetes.md#logs)).
+A collector's sink has sent requests to the store, through vmauth, and had none accepted for 15
+minutes: at each evaluation in that time, none of its requests of the 5 minutes before was
+accepted, each refused, answered with an error or left unanswered, and it tries a store that has
+failed it again within 30 seconds. The lines wait in the disk buffer on the node, 256 MiB, and once
+it is full the collector stops reading on that node until the store takes lines again, and the
+lines of files rotated away meanwhile are lost ([Logs](../kubernetes.md#logs)). A store away for
+less than about 20 minutes, the 5 minutes of the rate and the 15 of `for`, raises nothing. The
+alert is raised for each collector, one per node: on every node it points at vmauth or the store,
+on one node at the path from that node to vmauth.
 
-Look at first: whether the store is up: `kubectl --namespace monitoring get pods`, and
-`just logs '*' --since 5m --limit 1`, which fails with the store's own message when it is away or
-read-only. The collector's log, `kubectl --namespace monitoring logs <pod>`, names the error.
+Look at first: whether vmauth and the store are up: `kubectl --namespace monitoring get pods`, and
+`just logs '*' --since 5m --limit 1`, which fails with vmauth's message when the store is away and
+with the store's own when it is read-only. Then how the requests fail, by a query in Grafana's
+Explore behind `just grafana` and by the lines in the collector's log, which the collector does not
+ship, so they are read with
+`kubectl --namespace monitoring logs <pod> | grep -E 'Endpoint is unhealthy|Retrying after|Request timed out'`:
 
-Usually: the store moved to another worker and is starting, which clears by itself; the store's
-volume is full and it answers every insert with HTTP 429 (its metric `vl_storage_is_read_only` is 1);
-or Cilium's tunnel between the collector's node and the store's is down, which no recipe checks: the
-collector's log shows connection errors to `victoria-logs` while the store's pod is Running.
+- `sum by (pod, error_kind) (rate(vector_http_client_errors_total{component_id="victoria_logs"}[5m]))`
+  shows connections refused or a name that does not resolve, with `Retrying after error.` in the
+  log, and `Endpoint is unhealthy.` once, where the sink stopped sending until its next try: vmauth
+  is not running, or its Service has no ready endpoint.
+- `sum by (pod, status) (rate(vector_http_client_responses_total{component_id="victoria_logs"}[5m]))`
+  shows what vmauth answers: while the store does not answer it, as when the store is not running,
+  502 for a request whose body vmauth keeps to try again, with `all the 1 backends for the user
+  "vector" are unavailable` in vmauth's own log, and 503 for one whose body is larger than the
+  16 KiB it keeps for that (`-maxRequestBodySizeToRetry`), as a large batch is, with `cannot proxy
+  the request to` the store's address (`app/vmauth/main.go` of VictoriaMetrics v1.156.0); 429 while
+  the store is read-only, its `vl_storage_is_read_only` 1, with
+  `Retrying after response. reason=too many requests` in the log; another 5xx while the store fails
+  its inserts, with `Retrying after response.` and, once, `Endpoint is unhealthy.`; 401 while vmauth
+  refuses the collector's credential, below.
+- Neither, while requests are sent: they time out, with `Request timed out.` in the log, as when
+  Cilium's tunnel between the nodes is down or the store hangs.
+
+vmauth refusing the collector, with 401, or the store refusing every insert with another 4xx, raises
+this alert together with [LogCollectorDiscardingEvents](#logcollectordiscardingevents), as the sink
+drops each request it is refused; that alert's section says how to see and mend the 401. A 2xx
+whose body reports errors counts as accepted here: it is that alert's, not this one's.
+
+Usually: the store not running for longer than a move to another worker takes, as when its volume
+cannot be attached there; vmauth not running, as when its pods wait for a Secret that is missing,
+which `kubectl --namespace monitoring get externalsecrets` shows; the store's volume full, so it
+answers every insert with 429; or, on one node only, Cilium's tunnel between the collector's node
+and vmauth's down, which no recipe checks: the requests time out while vmauth's pods are Running.
 
 ## CertManagerCertificateNotReady
 
@@ -207,6 +259,9 @@ What fires it:
   scope), a connection to the provider that cannot be made, or the Kubernetes API failing the
   source. The pod then crash-loops, its target goes, and its series with it. A pod that never
   starts, as when its Secret is missing, and a release that is not installed have none either.
+- **A removal**: `just cluster-dns-remove` stops external-dns before a teardown, so a cluster it ran
+  on fires the alert, as expected, until the cluster is destroyed or external-dns is started again
+  ([rebuild.md](rebuild.md#taking-it-down), [edge.md](edge.md#the-way-back)).
 
 Look at first: `kubectl --namespace external-dns get pods`, which shows a crash loop or a pod that
 does not start, and the controller's log, `just logs 'kubernetes.pod_namespace:external-dns' --since
@@ -278,6 +333,24 @@ Usually: the registry of a chart is down or limits the cluster's pulls, which cl
 chart version that Renovate moved to is not published yet or was withdrawn; the keyless identity of
 a chart's publisher no longer matches what the OCIRepository verifies; or, for the ArtifactGenerator,
 a path of the artifact of `main` that is not there.
+
+A refused signature and a source-controller that cannot reach what verification needs both read
+`VerificationError` in the OCIRepository's `SourceVerified` and Ready conditions, and only the
+message tells them apart, so read it first: `flux get sources oci --namespace <namespace>` or the
+describe above. A message that the verifier could not be built (the trusted root, the Rekor or CT
+log keys, Fulcio's certificates), that names a network error, a timeout or a registry's error, or
+that no signatures were found is the cluster's reach: the block stays, the reach is fixed, and
+source-controller retries and verifies the source by itself. `just cluster-signatures` names every
+OCIRepository that is not verified as its row of `signatures.yaml` says. The table of who signs, in
+[Signatures](../kubernetes.md#signatures), gives each source's identity, and the row's `from` in
+`signatures.yaml` says where it was read. `just signatures-verify` tells apart a registry that is
+out of reach, a pin whose signature no longer matches its row, which it fails, and a pin that
+verifies, which it passes. Only a message that no signature matched (`no matching signatures` or
+`no matching attestations`) with no network error in it, at a digest `just signatures-verify`
+passes, takes the pull request of [Taking a block out](../kubernetes.md#taking-a-block-out). A pin
+that no longer matches is a possible compromise: its block stays, and the new identity is read and
+verified, or a digest that still verifies is pinned
+([When a verification fails](../kubernetes.md#when-a-verification-fails)).
 
 ## FluxResourceSuspended
 
@@ -384,8 +457,10 @@ resync of a large volume takes a while, and the alert waits 15 minutes for it. T
 
 Usually: the node was down or unreachable and the replica is catching up, which clears by itself;
 the connection between two nodes is lost, so the replica cannot sync, as when a satellite is offline
-([LinstorSatelliteOffline](#linstorsatelliteoffline)) or Cilium's tunnel between them is down; or the
-node's data volume returns I/O errors, which the node's kernel log shows (`talosctl dmesg`).
+([LinstorSatelliteOffline](#linstorsatelliteoffline)) or the nodes' firewall drops DRBD's ports
+between them, as a node without the rule `drbd` does
+([cluster.md](../cluster.md#what-each-node-admits)); or the node's data volume returns I/O errors,
+which the node's kernel log shows (`talosctl dmesg`).
 
 ## DrbdResourceWithoutQuorum
 
@@ -416,8 +491,30 @@ linstor node list`, whose state says OFFLINE, or a version mismatch or an authen
 `just cluster-check` says whether the node is Ready.
 
 Usually: the node is down, rebooting or drained, which clears when it is back; the satellite's pod
-crashes, which its log shows, `kubectl --namespace piraeus-datastore logs <pod>`; or the controller
-cannot reach the satellite over the pod network, on TCP 3366 or 3367.
+crashes, which its log shows, `kubectl --namespace piraeus-datastore logs <pod>`; the controller
+cannot reach the satellite at its node's address, on TCP 3367, as when the node lacks the rule
+`linstor-satellite` of the nodes' firewall, which `just cluster-talos`'s dry run then shows as a
+change it would make ([cluster.md](../cluster.md#what-each-node-admits)); or `linstor node list`
+shows the node `(SSL)` but OFFLINE, as the satellite's certificate is not issued or is not one the
+controller trusts, or the controller's is not one the satellite trusts
+([kubernetes.md](../kubernetes.md#who-may-call-linstor)). Then `kubectl --namespace
+piraeus-datastore get certificates` says whether `linstor-internal-ca`,
+`linstor-controller-internal-tls` and the node's `linstor-satellite.<node>` are Ready; the node's
+`LinstorSatellite`, `kubectl get linstorsatellite <node> --output yaml`, carries the operator's
+conditions; the satellite's log, or the controller's, names a handshake it refused and why; and
+Piraeus' trust check, run where kubectl reaches the cluster, reads each Secret's `tls.crt` and
+`ca.crt` alone, never `tls.key`:
+
+```bash
+kubectl --namespace piraeus-datastore get secret <node>-tls \
+  --output go-template='{{ index .data "tls.crt" | base64decode }}' > satellite.crt
+kubectl --namespace piraeus-datastore get secret linstor-controller-internal-tls \
+  --output go-template='{{ index .data "ca.crt" | base64decode }}' > controller-ca.crt
+openssl verify -CAfile controller-ca.crt satellite.crt
+```
+
+The same with the two Secrets swapped checks the controller's certificate against the satellite's
+authority.
 
 ## LinstorStoragePoolFilling
 
@@ -576,12 +673,17 @@ Grafana's Explore, behind `just grafana`, shows it with the Prometheus query
 
 Kyverno's admission controller, `kyverno-admission-controller`, has had no available replica for 10
 minutes. It is the pod that evaluates each admitted object against the rules and writes its
-admission report. Its webhooks that match workloads fail open and it only reports, so no workload is
-refused and nothing else stops. What is missed is the reports of the objects admitted meanwhile,
-which the reports controller's next background scan, within the hour, makes up for. Its webhooks on
-its own kinds fail closed, so while no pod answers, a write of a Kyverno policy, PolicyException or
-GlobalContextEntry is refused: Flux cannot apply or change a rule, and `kyverno-policies` retries
-until a pod answers ([Admission policy](../kubernetes.md#admission-policy)).
+admission report. Its webhooks that match workloads fail open, so no workload is refused and nothing
+else stops, and the one rule that refuses goes unheld: a pod created in a namespace labelled
+`k8s-gitops/sandbox` is admitted without its tier, and keeps running without it, as the rule judges
+a pod only when it is created ([The sandbox tier rule](../kubernetes.md#the-sandbox-tier-rule)).
+What is missed besides is the reports of the objects admitted meanwhile, which the reports
+controller's next background scan, within the hour, makes up for, and which reports such a pod as a
+`fail` of `sandbox-tier` unless a PolicyException that names the policy matches the pod. Its
+webhooks on its own kinds fail closed, so while no pod answers, a write of a Kyverno policy,
+PolicyException or GlobalContextEntry is refused: Flux cannot apply or change a rule, and
+`kyverno-policies` retries until a pod answers
+([Admission policy](../kubernetes.md#admission-policy)).
 
 Look at first: `kubectl --namespace kyverno get pods` and `kubectl --namespace kyverno describe
 deployment kyverno-admission-controller`; the pod's log, `kubectl --namespace kyverno logs
@@ -655,6 +757,22 @@ jsonpath='{.spec.initContainers[*].name}'`). Once the operator reaches the plugi
 replicas and then the primary, in place, with the sidecar, and the primary archives what has piled
 up.
 
+While the primary still runs, growing `CNPG_STORAGE_SIZE` in the application's `ks.yaml`, in a pull
+request, can buy time while the cause is found ([PostgreSQL](../kubernetes.md#postgresql)). The new
+size reaches the `Cluster` only once the application's Kustomization reconciles, which Flux does
+only while every Kustomization it names in `dependsOn` is Ready, `plugin-barman-cloud` among them;
+`flux get kustomization <application>` names the one it waits for. The operator then grows every
+instance's volume to it only once its pass over the cluster reaches the volumes, which it does not
+while, among others, it cannot reach the plugin, an instance's pod is not active (pending, finished
+or being deleted, as one is while its worker is down), an instance is being made or a switchover or
+failover is under way. `get cluster` shows the phase the cluster is in; one other than `Cluster in
+healthy state`, such as `Waiting for the instances to become active`, is the sign to look for. When
+the claims' capacity does not grow (`kubectl --namespace <namespace> get pvc --selector
+cnpg.io/cluster=<name>`), grow the primary's claim by hand, as below for a primary whose volume
+filled. `kubectl --namespace <namespace> exec <name>-<n>
+--container postgres -- df -h /var/lib/postgresql/data/pgdata` shows the room left on the primary's
+volume, the file system of its data directory, which holds `pg_wal`.
+
 A primary whose volume filled meanwhile does not run: its `postgres` container restarts over and
 over, last terminated with exit code 4, its log holding `no free disk space for WALs`, and once the
 operator reconciles the cluster its phase is `Not enough disk space`. In that phase the operator
@@ -664,7 +782,8 @@ frees the volume. The way out the operator's documentation gives is to grow the 
 (`linstor-node-local` allows expansion). Once the volume has room the `postgres` container starts by
 itself and the operator goes on as above. Then set `CNPG_STORAGE_SIZE` in the application's
 `ks.yaml` to the same size, in a pull request, so the `Cluster` asks for what its volumes have; the
-operator grows the other instances' volumes to it, and never shrinks one.
+operator grows the other instances' volumes to it once its pass reaches the volumes, as above, and
+never shrinks one.
 
 The plugin's two certificates are renewed every 75 days, each with a new key. The operator takes a
 renewed Secret at once and the plugin's pods once the kubelet updates their Secret volumes, within
@@ -739,3 +858,326 @@ ends with `user already exist`. Delete the pod, `kubectl --namespace crowdsec de
 name>`, and its Deployment makes one under a new name, which registers; or delete the old machine,
 `kubectl --namespace crowdsec exec deployment/crowdsec-lapi -- cscli machines delete <pod name>`,
 and the same pod registers at its next try.
+
+## RestoreDrillStale
+
+The check of an application's restore drill, the CronJob `<app>-drill-check`, has not passed for
+36 hours, a night's check missed and half a day of grace, or it has never passed and was created
+more than 36 hours ago ([The restore drill](../kubernetes.md#the-restore-drill)). The backups may
+still be good: what is unproved, for that long, is that the newest one restores, with recent data.
+It is a warning for the working day. The alert reads kube-state-metrics' record of the CronJob, so it
+is quiet for an application younger than 36 hours. Its labels name the `namespace` and the
+`application`.
+
+Look at first:
+
+- the check's one line, which names the case: `kubectl --namespace <namespace> get cronjob,job,pod`
+  for what the checks did, then `kubectl --namespace <namespace> logs job/<job>`. A pod that never
+  started says why in `kubectl --namespace <namespace> describe pod <pod>`, a `Multi-Attach` event
+  when the scratch claim was still attached to another node;
+- the drill's ReplicationDestination:
+  `kubectl --namespace <namespace> get replicationdestination <app>-drill --output yaml`, whose
+  `status.lastSyncTime` and `status.lastSyncDuration` say when the last restore ended and how long
+  it took, and `status.latestMoverStatus` its result and the tail of the mover's log, which says
+  `No eligible snapshots found` when the repository holds no backup;
+- the backup's ReplicationSource, `kubectl --namespace <namespace> get replicationsource <app>
+  --output yaml`, the same fields, and the backup alerts,
+  [VolSyncSourceOutOfSync](#volsyncsourceoutofsync) and
+  [VolSyncSourceMissedIntervals](#volsyncsourcemissedintervals).
+
+Usually:
+
+- no backup newer than the bound: the backups failed two nights running, which the backup alerts
+  report, and the check's line gives the heartbeat's age;
+- the repository Secret `<app>-volsync` is missing, because the secret store lacks the key `volsync`
+  or the External Secrets operator cannot read it (`just bao-seed-volsync`): no mover runs, and the
+  scratch claim keeps the files of the last restore or none;
+- the canary's pod is not writing: it does not run, or its heartbeat is old on its own volume, so
+  every backup holds an old one (`kubectl --namespace <namespace> get pod`);
+- a restore still running when the check started, on another node, so the claim could not attach:
+  the check's pod waited for the volume until its deadline, and the restore's `lastSyncDuration`
+  shows how long it ran;
+- a changed `APP` or bucket prefix, so the repository's path holds nothing: the restore finds no
+  snapshot, and the claim keeps the previous files, which fail on their age, or holds none, which the
+  check reports as the restore having brought nothing back.
+
+Once the cause is fixed, a restore that was waiting for it runs soon after, as VolSync keeps retrying
+one whose repository Secret is missing or whose mover failed; otherwise the next restore runs at the
+schedule's time. To restore sooner, delete the drill's ReplicationDestination and have Flux make it
+again, as a new one restores at once; the scratch claim is not VolSync's and keeps its files
+meanwhile: `kubectl --namespace <namespace> delete replicationdestination <app>-drill`, then
+`flux reconcile kustomization <app>`. A manual trigger set with kubectl does not stay: Flux takes
+over the fields kubectl writes on an object it applies and removes the trigger at its next
+reconcile. Once a restore has run, run a check by hand, which clears the alert when it passes:
+`kubectl --namespace <namespace> create job --from=cronjob/<app>-drill-check <name>`.
+
+## RestoreDrillJobFailing
+
+The latest scheduled run of the CronJob `<app>-drill-check` has not passed, half an hour after it
+was scheduled, which is longer than the 600 seconds its job may take to be made and the 600 it may
+then run: the check failed, or its pod never started. The alert clears once a check passes. The
+backups are as they were; [RestoreDrillStale](#restoredrillstale) fires when no check has passed for
+36 hours. A check's job that failed, scheduled or by hand, also raises the stock `KubeJobFailed`, a
+warning, 15 minutes after it failed, and that one does not clear when a check passes: it fires for
+as long as the failed job exists, and the CronJob keeps its three newest failed jobs for their logs.
+Once the job's log is read, delete the job, which clears it:
+`kubectl --namespace <namespace> delete job <job>`.
+
+Look at first, and usually: as for [RestoreDrillStale](#restoredrillstale), the check's one line
+first: it says whether the restore brought nothing back, the claim holds no heartbeat, the heartbeat
+is not a number of seconds or lies in the future, or it is older than the bound, with its age. On the
+first night after an application takes the drill, a check fails once when the restore before it
+found a backup without a heartbeat, as every backup taken before the application wrote one is: when
+the canary comes with the drill, as `volsync-demo`'s does, the first check fails if both are applied
+from a few minutes before the backup's time, as the backup can be taken before the replaced pod has
+written its first heartbeat, until the check's. It fails too when no restore has used the scratch
+claim yet, as when the repository Secret came only after the check's time: the claim is made empty
+for the check, which reports that the restore brought nothing back. The next night's passes; delete
+the failed job as above. Run a check by hand as above.
+
+## PublicEndpointDown
+
+The probe of a public hostname has had no answer for 5 minutes. The blackbox exporter asks the
+Gateway's proxies for the hostname from inside the cluster, and no response came back: the
+connection was refused or timed out, or the TLS handshake failed, which a certificate for another
+name does, or one that the trust of the cluster's issuer does not verify: the cluster's authority
+for `cluster-ca`, the system's roots for `letsencrypt-production`; under `letsencrypt-staging` the
+probe verifies no certificate ([Probes](../kubernetes.md#probes)). The alert names the hostname; the
+apex of the domain is the redirect's probe, over plain HTTP.
+
+Look at first: `just gateway-check`, which reads the Gateway, its Service, the proxies and the
+certificate and says which fails; then `kubectl --namespace envoy-gateway-system get pods,svc` for
+the proxies and their Service. To see the probe's own reason, ask the exporter for it, the same
+request Prometheus makes, from a port-forward to its Service:
+`kubectl --namespace monitoring port-forward svc/blackbox-exporter 9115` and, in another terminal,
+`curl 'http://127.0.0.1:9115/probe?module=public_https&hostname=<hostname>&target=https://<Service>/&debug=true'`
+with the module, the Service's name and the path from the Probe (`public_https_signin` for a route
+behind sign-in), which prints the exporter's log of that probe.
+
+Usually: both proxies are gone or not Ready, which `kubectl --namespace envoy-gateway-system get
+pods` shows; the Gateway's certificate is not issued or is for another name
+(`kubectl --namespace envoy-gateway-system get certificate`); the exporter's trust does not match
+the issuer, so the handshake fails verification: the Gateway serves a certificate of another issuer
+than the overlay's `PROBE_ISSUER` names, as while a new issuer's certificate is not Ready yet and
+the proxies still serve the old one, or, with the cluster's own CA, after the authority was replaced
+and the exporter's Secret `blackbox-exporter-trust` was not renewed yet
+(`kubectl --namespace monitoring get certificate blackbox-exporter-trust`). A probe that fails
+while `just gateway-check` passes through the edges points at the exporter or the cluster's
+network, not at the Gateway: the pods of `kubectl --namespace monitoring get pods` and Cilium, and
+`just network-drops`, which lists the exporter's flows to the proxies on 10443 or 10080 when the
+proxies' policy does not take them ([Probes](../kubernetes.md#probes)). Every hostname at once,
+with a name the exporter cannot resolve in its log of the probe, means the proxies' Service is not
+named as the Probes' targets name it, as after an update of Envoy Gateway that names it otherwise:
+`kubectl --namespace envoy-gateway-system get svc` shows the name the controller gave it.
+
+## PublicEndpointWrongStatus
+
+The Gateway answers the probe of a public hostname, but with a status the probe does not accept,
+for 5 minutes: a 200 is what a route's probe wants, a 302, the redirect to sign-in, what the probe
+of a route behind sign-in wants, and a 301 the redirect's. The Gateway and the certificate are fine,
+since the handshake succeeded and verified, and the route or its backend is not: Envoy answers 503
+for a route whose backend has no ready endpoint, 403 for a route behind sign-in while oauth2-proxy
+cannot answer, and 404 for a hostname it holds no route for ([Probes](../kubernetes.md#probes)).
+
+Look at first: the status the probe got: the exporter's `probe_http_status_code` for that hostname
+in Prometheus' web interface, or the debug request in [PublicEndpointDown](#publicendpointdown).
+Then the route: `kubectl get httproute --all-namespaces` shows the routes of the Gateway and
+`kubectl --namespace <namespace> describe httproute <name>` its conditions, `Accepted` and
+`ResolvedRefs`.
+
+Usually: a 503 means the backend Service has no ready pods
+(`kubectl --namespace <namespace> get endpointslices`), as for an application whose pods wait for a
+secret the owner writes to the store, until it is there: n8n for its encryption key, and dex and
+after it oauth2-proxy for the sign-in's
+([What the owner does, in order](../kubernetes.md#what-the-owner-does-in-order)); a 404 means the
+route is not accepted, as its namespace lost the label `k8s-gitops/gateway: public`, or the hostname
+changed under the route. For a route behind sign-in, a 403 means oauth2-proxy did not answer
+(`kubectl --namespace sso-system get pods`), and a 200 means the backend answers without a session:
+the route's `SecurityPolicy` is gone or not accepted
+(`kubectl --namespace <namespace> describe securitypolicy <route>`), which leaves the page open to
+anyone until it is back. For the redirect, any status but 301 means another route took the http
+listener, which `just gateway-check` reports.
+
+## PublicCertificateExpiring
+
+The certificate the Gateway serves for a public hostname expires within 14 days and the probe still
+sees it: cert-manager renews it with two fifths of its lifetime left. The probe reads the earliest
+end among the certificates the proxies send (`probe_ssl_earliest_cert_expiry`), which are the
+listener's certificate and the intermediates of its chain, so it is the listener's certificate while
+its intermediates outlive it, and an intermediate that ends sooner raises the alert although the
+certificate is renewed ([Probes](../kubernetes.md#probes)). A renewal that fails also raises
+[CertManagerCertificateExpiringSoon](#certmanagercertificateexpiringsoon) for `public-wildcard`,
+which reads the certificate cert-manager stored; this alert alone means the proxies serve an older
+certificate than the one stored, cert-manager is not scraped, or it is an intermediate that ends.
+
+Look at first: `kubectl --namespace envoy-gateway-system get certificate public-wildcard` and
+`kubectl --namespace envoy-gateway-system describe certificate public-wildcard`: its `Ready`
+condition, its `Not After` and `Renewal Time`, and the events of the issuance;
+`kubectl --namespace cert-manager logs deployment/cert-manager` says why cert-manager does not
+issue. A stored `Not After` later than the alert's days has one of two causes: the proxies serve an
+older certificate than the one stored, or the certificate that ends is an intermediate of the chain,
+not the listener's. The certificate served tells them apart. The debug request in
+[PublicEndpointDown](#publicendpointdown) prints the probe's series, among them
+`probe_ssl_last_chain_info`, whose `serialnumber` and `issuer` are those of the listener's
+certificate as the proxies serve it; the stored one's are printed by
+`kubectl --namespace envoy-gateway-system get secret public-wildcard-tls --output jsonpath='{.data.tls\.crt}' | base64 --decode | openssl x509 -noout -serial -issuer -enddate`,
+which reads the first certificate of the Secret's chain, the listener's, and prints no key. Another
+serial number (the two write the same hex digits in different case) means the proxies hold an older
+certificate. The same one means an intermediate ends first: the issuer gives its chain with each
+certificate, and the next issuance, which cert-manager starts once two fifths of the listener's
+lifetime are left, can be weeks away. To issue sooner, mark the `Certificate` for issuance with
+cert-manager's command-line tool, which is not one of this repository's pinned tools:
+`cmctl renew --namespace envoy-gateway-system public-wildcard`. An issuance from Let's Encrypt
+counts against its rate limits ([The ACME issuers](../kubernetes.md#the-acme-issuers)).
+
+Usually: the issuer cannot sign, as the cluster's authority's Secret is gone, an ACME order fails
+([Choosing the public Gateway's issuer](../kubernetes.md#choosing-the-public-gateways-issuer)) or
+the `ClusterIssuer` is not Ready (`kubectl get clusterissuer`); or cert-manager is not running. A
+renewed certificate reaches the proxies within seconds, and the alert clears after the next probe.
+The proxies serve the certificate the controller last sent them, so one older than the stored
+certificate means the controller has not sent the new one: it is not running, or the proxies cannot
+reach it on 18000 (`kubectl --namespace envoy-gateway-system get pods` and the controller's log).
+
+## PublicCertificateExpiryImminent
+
+The same as [PublicCertificateExpiring](#publiccertificateexpiring), within 3 days: the certificate
+was not renewed in the 11 days since the warning, and the hostname's clients will refuse it soon.
+Treat it as an outage in progress.
+
+Look at first, and usually: as for [PublicCertificateExpiring](#publiccertificateexpiring). The
+renewal is cert-manager's and follows by itself once the issuer signs again; nothing in this
+repository renews a certificate by hand.
+
+## ProbeNotRunning
+
+A declared probe of a public hostname has not been scraped through the exporter for 10 minutes:
+Prometheus' `up` of its target in the job `public-endpoints` is 0, so the probe writes nothing and
+the other alerts on that hostname say nothing. The exporter is gone, the `Probe` names another
+prober or a module the exporter does not have, or the probe takes longer than the scrape allows. A
+cluster that declares no `Probe` never raises it ([Probes](../kubernetes.md#probes)).
+
+Look at first: `kubectl --namespace monitoring get pods,svc` for the exporter's two pods and its
+Service `blackbox-exporter`, and `kubectl get probes --all-namespaces` for the Probes, which are in
+the namespaces of their routes. In Prometheus' web interface, Status, Targets shows each Probe's
+scrape and its error: a refused connection when the Service has no ready pod, an HTTP 400 for a
+module the exporter does not have.
+`kubectl --namespace monitoring get helmrelease blackbox-exporter` says whether the release, which
+reads the values of the cluster's `PROBE_ISSUER`, failed.
+
+Usually: both exporter pods are Pending or not Ready, as after a drain of the workers they ran on;
+the exporter's Kustomization is not applied, which
+`kubectl --namespace flux-system get kustomization blackbox-exporter` shows; or a Probe was given a
+prober or a module by hand that the tree does not have. A release that failed three times is Stalled
+until its failure count is reset, which helm-controller does when the release's chart or values
+change, and `flux reconcile helmrelease blackbox-exporter -n monitoring --reset` does by hand.
+Until the exporter's Kustomization is Ready again, Flux applies no change to the Gateway or to an
+application with a route, which wait for it, from each one's next reconcile
+([Probes](../kubernetes.md#probes)).
+
+## EscapeCanaryStale
+
+A CronJob of the escape canary, `escape-canary-network` or `escape-canary-rights`, has had no
+successful run for 3 hours, three hourly runs in a row, or it was created more than 3 hours ago and
+has never succeeded ([The escape canary](../kubernetes.md#the-escape-canary)). Network policy, the
+node firewall and RBAC hold or not whatever the canary says: what is missing is the hourly proof that
+what they forbid still gives the result its table records. It is a warning for the working day. Its
+labels name the `namespace` and the `cronjob`.
+
+Look at first: `kubectl --namespace escape-canary get cronjob,job,pod --output wide` for what the
+runs did and on which nodes, `kubectl get nodes` for the workers, and the lines of the latest run's
+pods, `kubectl --namespace escape-canary logs --selector batch.kubernetes.io/job-name=<job> --prefix
+--tail=-1`, one line for each attempt and a summary. A Job's condition says why it failed:
+`kubectl --namespace escape-canary get job <job> --output jsonpath='{.status.conditions}'`.
+
+Usually: a worker cordoned or full, so a run's third pod found no worker free of the other two and
+the Job failed at its deadline with `DeadlineExceeded`, the two other pods' lines all `ok`; a worker
+lost between runs, `NotReady` in `kubectl get nodes`, which leaves the third pod pending too and
+fails most runs at once on the `secret-store` attempt, which
+[EscapeCanaryUnexpectedResult](#escapecanaryunexpectedresult) reports as well; a worker lost while a
+pod of a scheduled run was on it, which stops the CronJob (below); an image that does not pull,
+which the pod's events name; the runs failing on a result, which that alert reports too, or at their
+deadline on lookups that the resolver does not answer, as
+[EscapeCanaryUnexpectedResult](#escapecanaryunexpectedresult) says; or no run at all, a suspended
+CronJob or one whose runs could not start within 600 seconds of their time. Once the cause is gone,
+a run by hand clears it when it succeeds:
+`kubectl --namespace escape-canary create job --from=cronjob/<cronjob> <name>`.
+
+A worker lost while a pod of a scheduled run was on it, placed, starting or running, stops that
+run's CronJob: `kubectl --namespace escape-canary get cronjob` shows it with one active Job and a
+last schedule hours old, its latest event says `JobAlreadyActive`, and that Job holds a pod
+`Terminating` on the `NotReady` worker, whose lines cannot be read. The Job controller adds no
+`Failed` condition to the Job while that pod terminates, so the Job stays active, the CronJob starts
+no run while it is (`concurrencyPolicy: Forbid`), and neither
+[EscapeCanaryUnexpectedResult](#escapecanaryunexpectedresult) nor `KubeJobFailed` fires; this alert
+does, 3 hours after the last success ([The escape canary](../kubernetes.md#the-escape-canary)). A
+run made by hand and stuck the same way stops no schedule, as the CronJob does not count it among
+its active Jobs, but its Job stays active until its pod is removed. Runs start again once the
+worker answers and its kubelet ends the pod, or once the pod is removed:
+`kubectl --namespace escape-canary delete pod <pod> --force --grace-period=0`. The Job then fails,
+the alerts of a failed Job read it, and the next schedule starts a run. The taint
+`node.kubernetes.io/out-of-service` and the deletion of the Node act on every pod of the worker, the
+taint on its volumes as well: they belong to taking a lost worker out for good, which frees the
+canary's pod too.
+
+## EscapeCanaryUnexpectedResult
+
+A CronJob of the escape canary owns a Job that failed because a pod exited non-zero, and that
+started after the CronJob's last success: an attempt gave a result its table, `expected.tsv`, does
+not give for the mode the canary is set to, or the check could not run
+([The escape canary](../kubernetes.md#the-escape-canary)). An attempt that now succeeds where the
+table says it is blocked or forbidden is a layer that no longer holds; one that now fails where the
+table says open is a target or a path gone, or a lost worker's OpenBao member (below). It clears
+once a later run of the CronJob succeeds. A Job that failed at its deadline does not raise it
+([EscapeCanaryStale](#escapecanarystale) does, after three).
+
+Look at first: the failed Job's lines,
+`kubectl --namespace escape-canary logs --selector batch.kubernetes.io/job-name=<job> --prefix
+--tail=-1`: each `UNEXPECTED` line names the node, the attempt, its result and the one the table
+expects, and a check that could not run says why on a line of its own that starts
+`escape-canary <check> error:`. The lines there are those of the pod that failed and of any pod that
+had already ended: once one pod fails, the Job fails and its controller deletes the pods still
+running, whose lines go with them. `kubectl --namespace escape-canary get job,pod --output wide`
+says which pods failed. The table's row of the attempt says what decides its result; for the flows,
+the record of what policy drops, `just network-audit 1h`, shows what the policies made of them, and
+for the rights check, the account's grants:
+`kubectl auth can-i --list --as system:serviceaccount:escape-canary:escape-canary-rights`.
+
+Usually:
+
+- a result of the rights check that is `allowed`: a binding that names the account, its namespace's
+  accounts, every account or every authenticated caller, from a chart or applied by hand, which is a
+  finding to remove, never a row to change;
+- a network result that is `open` where the table says `blocked`: the cluster enforces and the
+  canary's mode is still `audit`, or the other way round, which `tests/escape-canary.bats` refuses in
+  the tree, so the cluster runs another mode than its values say; or a node rule that admits pods
+  where `talos/firewall.yaml` does not;
+- `attempt=secret-store result=blocked expected=open`, with a worker `NotReady` in
+  `kubectl get nodes`: the worker is lost, and OpenBao's member on it is still one of the three
+  backends of the Service `openbao`, which publishes members that are not ready, until its pod
+  object is removed; a connection that lands on it, one time in three, gets no answer. Isolation
+  holds; once the worker is back, a run succeeds and clears the alert;
+- `refused` where the table says `open`: a target without endpoints, as `hello` or OpenBao with no
+  pod, whose Service's address Cilium refuses (`service-no-backend-response: reject` in the rendered
+  `cilium-config`); or, for `secret-store`, an OpenBao member starting, in a rollout or a restart,
+  which is a backend of the Service as soon as its pod has an address, while its init containers
+  run and before it listens, as the Service publishes members that are not ready;
+- `attempt=resolver result=blocked`, with `unresolved` for the attempts by name: the pods' resolver
+  does not answer. `nc` looks a name up before its 3 seconds start, so each of those attempts waits
+  out the resolver's timeouts, and a run whose lookups outlast its 300 seconds fails at its deadline
+  instead, which [EscapeCanaryStale](#escapecanarystale) reports;
+- `other`: a message of the tool the check does not know, such as `nc`'s `No route to host`, which
+  the check does not print, as the tools' messages name addresses;
+- an `error:` line: a table or a script the check cannot read, or an unknown mode in `ks.yaml`;
+- no `UNEXPECTED` line and no `error:` line: a pod deleted from outside during the seconds of a run,
+  as by an eviction, which `kubectl --namespace escape-canary get events` names, the descheduler's
+  among them. The Job controller counts a pod deleted before it succeeded as failed (`isPodFailed`
+  in `pkg/controller/job/job_controller.go` of Kubernetes v1.37.1), so the Job fails with
+  `BackoffLimitExceeded` even when every line that pod printed was `ok`, and its lines go with it.
+
+A live result that differs from the table is reported with its reason, never answered by changing the
+table. Once the cause is fixed, a run by hand clears the alert when it succeeds:
+`kubectl --namespace escape-canary create job --from=cronjob/<cronjob> <name>`. Each failed Job,
+scheduled or by hand, also raises the stock `KubeJobFailed`, a warning, 15 minutes after it failed,
+and that one does not clear when a run succeeds: it fires for as long as the failed Job exists, and
+the CronJob keeps its three newest failed Jobs for their pods' lines. Once those are read, delete the
+Job, which clears it: `kubectl --namespace escape-canary delete job <job>`.

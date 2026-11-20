@@ -33,6 +33,27 @@
 #   a pod of the pods file named cilium-* on a node is a second agent pod of that node, in its phase
 #   agent-unreadable  reading a Cilium agent pod fails, as when the API does not answer it
 #   kube-proxy        a kube-proxy pod runs in kube-system
+#   every node of the nodes file runs a Running Cilium agent pod, cilium-<hostname>, in the list of
+#   all pods, which answers cilium-dbg encrypt status --output json, through kubectl exec in its
+#   container cilium-agent, as an agent that encrypts with WireGuard through cilium_wg0 with a peer
+#   for every other node, naming its public key, a marker
+#   no-wireguard      the ConfigMap cilium-config in kube-system holds no enable-wireguard, and every
+#                     agent reports encryption Disabled; without it, it holds enable-wireguard "true"
+#   cilium-config-unreadable  reading cilium-config fails, and kubectl's error names an address
+#   encrypt-no-agent.<hostname>  no Cilium agent pod runs on the node
+#   encrypt-agent-name.<hostname>  the name of the node's Cilium agent pod instead of cilium-<hostname>
+#   encrypt-mode.<hostname>  the encryption mode the node's agent reports instead; with Disabled its
+#                     answer holds no WireGuard device, as the kernel then has none
+#   encrypt-peers.<hostname>  how many peers the node's device has instead of the other nodes' number;
+#                     0 leaves the count out of the answer, as cilium-dbg does
+#   encrypt-interface.<hostname>  the names of the node's WireGuard devices instead of cilium_wg0, one
+#                     device per word, each with the node's peers
+#   encrypt-msg.<hostname>  the node's answer carries a message, of the agent's and the kernel's states
+#                     of the device disagreeing, which names public keys
+#   encrypt-silent.<hostname>  the node's agent answers only after a minute, ending at once on TERM
+#   encrypt-answer.<hostname>  what the node's agent prints instead of its answer, and it exits 0:
+#                     nothing at all when the file is empty
+#   encrypt-exit.<hostname>  the status the node's agent exits with after its answer, instead of 0
 #   pods              more pods, one per line as <namespace> <name> <phase> [<node> [<reason>]], on
 #                     cp-1 when no node is given; kubectl delete pod removes them
 #   no-flux           the namespace flux-system does not exist, and no pod runs in it
@@ -234,7 +255,13 @@ pod() {
 
 pods() {
   local namespace name phase node reason
-  pod kube-system cilium-a1b2c Running cilium
+  while IFS= read -r node; do
+    if [[ -n $node ]] && ! listed "encrypt-no-agent.$node"; then
+      name=cilium-$node
+      [[ ! -e $state/encrypt-agent-name.$node ]] || name=$(< "$state/encrypt-agent-name.$node")
+      pod kube-system "$name" Running cilium "$node"
+    fi
+  done < "$state/nodes"
   pod kube-system coredns-c3d4e Running kube-dns
   pod kube-system kubelet-csr-approver-e5f6g Running
   pod kube-system etcd-defrag-h7i8j Succeeded
@@ -382,7 +409,59 @@ targets() {
         health: (if ($down | index($t | join(" "))) != null or ($t[0] == "my-app") then "down" else "up" end)}]}}'
 }
 
+# cilium_config: the ConfigMap cilium-config, with enable-wireguard "true" unless no-wireguard.
+cilium_config() {
+  if listed cilium-config-unreadable; then
+    echo "Unable to connect to the server: dial tcp 198.51.100.66:6443: i/o timeout" >&2
+    exit 1
+  fi
+  jq -n --argjson wireguard "$(listed no-wireguard && echo false || echo true)" '{
+    metadata: {namespace: "kube-system", name: "cilium-config"},
+    data: ({"routing-mode": "tunnel", "tunnel-protocol": "vxlan"}
+      + if $wireguard then {"enable-wireguard": "true", "wireguard-persistent-keepalive": "0s"} else {} end)}'
+}
+
+# encrypt_status POD: what cilium-dbg encrypt status --output json prints in the agent pod POD, as
+# the pinned Cilium prints it: the mode the agent reports and the kernel's WireGuard device, with its
+# public key, a marker, and its peer count, left out when it is 0.
+encrypt_status() {
+  local node=${1#cilium-} mode=Wireguard device=cilium_wg0 peers msg=''
+  if [[ $1 != cilium-* ]] || ! grep -qxF -- "$node" "$state/nodes" || listed "encrypt-no-agent.$node"; then
+    echo "Error from server (NotFound): pods \"$1\" not found" >&2
+    exit 1
+  fi
+  if listed "encrypt-silent.$node"; then
+    trap 'kill "$!" 2> /dev/null; exit 143' TERM
+    sleep 60 &
+    wait "$!"
+  fi
+  if listed "encrypt-answer.$node"; then
+    cat "$state/encrypt-answer.$node"
+    exit 0
+  fi
+  ! listed no-wireguard || mode=Disabled
+  [[ ! -e $state/encrypt-mode.$node ]] || mode=$(< "$state/encrypt-mode.$node")
+  [[ ! -e $state/encrypt-interface.$node ]] || device=$(< "$state/encrypt-interface.$node")
+  peers=$(($(grep -c . "$state/nodes") - 1))
+  [[ ! -e $state/encrypt-peers.$node ]] || peers=$(< "$state/encrypt-peers.$node")
+  if listed "encrypt-msg.$node"; then
+    msg="wireguard state mismatch between kernel and agent: interface \"$device\": public key mismatch (agent=marker-wireguard-key-agent=, kernel=marker-wireguard-key-$node=)"
+  fi
+  jq -n --arg mode "$mode" --arg device "$device" --argjson peers "$peers" --arg msg "$msg" --arg node "$node" '
+    {mode: $mode}
+    + if $msg == "" then {} else {msg: $msg} end
+    + if $mode == "Disabled" then {} else {wireguard: {interfaces: [$device | splits(" +") | {"listen-port": 51871,
+        name: ., peers: null, "public-key": "marker-wireguard-key-\($node)="}
+        + if $peers == 0 then {} else {"peer-count": $peers} end]}} end'
+  [[ ! -e $state/encrypt-exit.$node ]] || exit "$(< "$state/encrypt-exit.$node")"
+}
+
 case $args in
+  " exec --namespace kube-system --container cilium-agent "*" -- cilium-dbg encrypt status --output json ")
+    [[ $7 == -- ]] || { echo "unexpected call: kubectl $*" >&2; exit 1; }
+    encrypt_status "$6"
+    ;;
+  *" get configmap cilium-config --namespace kube-system "*) cilium_config ;;
   *" get service kube-prometheus-stack-prometheus "*)
     listed no-monitoring || echo service/kube-prometheus-stack-prometheus
     ;;

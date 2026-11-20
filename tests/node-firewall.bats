@@ -233,8 +233,8 @@ overlapping() {
       checked=$((checked + 1))
     done
   done
-  # Thirteen rules on each control plane, seven on each worker.
-  [ "$checked" -eq 60 ]
+  # Seventeen rules on each control plane, eleven on each worker.
+  [ "$checked" -eq 84 ]
 }
 
 @test "etcd accepts control planes only" {
@@ -261,7 +261,7 @@ overlapping() {
   members=$(yq '.nodes[].private_address' "$FIXTURE")
   [ "$(wc -l <<< "$members")" -eq 6 ]
   reached=$(yq '.listeners[] | select(.from[] == "pods") | .name' "$INVENTORY" | sort -u)
-  for listener in etcd-metrics kube-controller-manager kube-scheduler kubelet hubble node-exporter cilium-agent-metrics; do
+  for listener in etcd-metrics kube-controller-manager kube-scheduler kubelet hubble node-exporter cilium-agent-metrics linstor-satellite drbd-reactor; do
     grep -qxF "$listener" <<< "$reached"
   done
 
@@ -284,8 +284,8 @@ overlapping() {
       checked=$((checked + 1))
     done
   done
-  # Eight on each control plane, four on each worker.
-  [ "$checked" -eq 36 ]
+  # Ten on each control plane, six on each worker.
+  [ "$checked" -eq 48 ]
 }
 
 @test "Cilium's overlay and health checks accept the nodes' own addresses only" {
@@ -302,6 +302,36 @@ overlapping() {
       diff <(echo "$members") <(subnets "$hostname" "$rule")
     done
   done
+}
+
+@test "Every node admits Cilium's WireGuard port from the nodes' own addresses alone" {
+  # A WireGuard peer's endpoint is the address its node is registered with, on the node network,
+  # and only the Cilium agents send to it.
+  members=$(yq '.nodes[].private_address + "/32"' "$FIXTURE" | sort)
+  [ "$(wc -l <<< "$members")" -eq 6 ]
+  # The load balancer's address on the node network and the floating addresses, which are no node's
+  # own.
+  endpoint=$(yq '.endpoint' "$FIXTURE")
+  [[ $endpoint =~ ^https://([0-9.]+):6443$ ]]
+  others=$(printf '%s\n' "${BASH_REMATCH[1]}/32" "$(yq '.nodes[].floating_ip + "/32"' "$FIXTURE")" | sort)
+  [ "$(wc -l <<< "$others")" -eq 7 ]
+  [ -z "$(comm -12 <(echo "$members") <(echo "$others"))" ]
+
+  checked=0
+  for hostname in $(nodes); do
+    # Every rule of the node that admits UDP 51871, alone or in a range.
+    admitting=$(rules "$hostname" | while read -r name protocol ports; do
+      if [[ $protocol == udp ]] && overlapping "$ports" 51871; then
+        echo "$name $protocol $ports"
+      fi
+    done)
+    echo "$hostname: ${admitting:-no rule} admits UDP 51871"
+    [ "$admitting" = 'cilium-wireguard udp 51871' ]
+    diff <(echo "$members") <(subnets "$hostname" cilium-wireguard)
+    [ -z "$(comm -12 <(echo "$others") <(subnets "$hostname" cilium-wireguard))" ]
+    checked=$((checked + 1))
+  done
+  [ "$checked" -eq 6 ]
 }
 
 # pods_at_talos_api DIRECTORY: for each fixture node's configuration in DIRECTORY, a line when the
@@ -425,8 +455,8 @@ unnamed_ports() {
   run unnamed_ports "$ROOT/docs/cluster.md"
   echo "$output"
   [ "$status" -eq 0 ]
-  # Thirteen rules, each of one port or one range.
-  [ "$output" = "13 ports looked for" ]
+  # Seventeen rules, each of one port or one range.
+  [ "$output" = "17 ports looked for" ]
 
   # The same on copies of the page with one change each to the section: a port gone, a port there
   # only inside a longer number, and a range with one end gone. The table under "What each node
@@ -438,13 +468,13 @@ unnamed_ports() {
   }
   page gone 'gsub(/8472/, "")'
   run unnamed_ports "$BATS_TEST_TMPDIR/gone.md"
-  [ "$output" = "8472 of cilium-vxlan"$'\n'"13 ports looked for" ]
+  [ "$output" = "8472 of cilium-vxlan"$'\n'"17 ports looked for" ]
   page longer 'gsub(/50001/, "150001")'
   run unnamed_ports "$BATS_TEST_TMPDIR/longer.md"
-  [ "$output" = "50001 of trustd"$'\n'"13 ports looked for" ]
+  [ "$output" = "50001 of trustd"$'\n'"17 ports looked for" ]
   page range 'gsub(/2379-2380/, "2379")'
   run unnamed_ports "$BATS_TEST_TMPDIR/range.md"
-  [ "$output" = "2379-2380 of etcd"$'\n'"13 ports looked for" ]
+  [ "$output" = "2379-2380 of etcd"$'\n'"17 ports looked for" ]
   for port in 8472 50001 2379-2380; do
     section "$BATS_TEST_TMPDIR/gone.md" '### What each node admits' | grep -qwF -- "$port"
   done

@@ -13,12 +13,13 @@
 exceptions:
   - namespace: kube-system
     reason: Cilium's agent, its Envoy and its operator run in the host's network namespace, which a
-      pod policy does not select; the cluster's resolver takes queries from every namespace; and the
-      flows of the pod-network workloads (Spegel, Hubble Relay, metrics-server, which the API server
-      calls as the metrics API, the descheduler, kubelet-csr-approver, Reflector, Reloader and the
-      VPA recommender) are not yet enumerated
-    covered-by: the node firewall (ADR 0017) for the host-network pods, and the namespace's Pod
-      Security level
+      pod policy does not select; the cluster's resolver takes queries from every namespace; Hubble
+      Relay takes the flow recorder of security-system on 4245, the container port its Service's
+      port 80 targets; and the other flows of the pod-network workloads (Spegel, Hubble Relay,
+      metrics-server, which the API server calls as the metrics API, the descheduler,
+      kubelet-csr-approver, Reflector, Reloader and the VPA recommender) are not yet enumerated
+    covered-by: the node firewall (ADR 0017) for the host-network pods; the flow recorder's egress,
+      which names Hubble Relay's pods on 4245 alone; and the namespace's Pod Security level
   - namespace: flux-system
     reason: the Flux operator and the controllers it installs reach the API server and the
       registries that hold the signed artifact and the charts; their flows are not yet enumerated as
@@ -31,18 +32,22 @@ exceptions:
   - namespace: monitoring
     reason: Prometheus scrapes pods of every namespace and the nodes, the node exporter runs in the
       host's network namespace, the API server calls the Prometheus operator's admission webhook,
-      VictoriaLogs takes the public Gateway's proxies on 9428 for the route logs, and the flows of
-      the log collector, VictoriaLogs and Grafana are not yet enumerated; Alertmanager reaches the
-      cluster's resolver and, outside the cluster, the destination of its notifications and that of
-      its heartbeat, each on the port of its URL, hosts that are deployment values in the secret
-      store and so are named by no policy, and a default deny of this namespace needs a rule for
-      both flows
-    covered-by: the public Gateway's proxies, whose egress here names VictoriaLogs' pod on 9428
-      alone, the container port the route logs sends to, which limits them once the agents enforce
-      the policies rather than audit them (docs/kubernetes.md, Service addresses, says which), and
-      which forward to its Service only the paths of the store's interface and queries, after the
-      cluster's sign-in has admitted the request (components/sso); the namespace's Pod Security
-      level and the node firewall (ADR 0017)
+      vmauth takes the public Gateway's proxies on 8427 for the route logs, not VictoriaLogs on
+      9428, and the flows of the log collector, vmauth, VictoriaLogs and Grafana are not yet
+      enumerated; Alertmanager reaches the cluster's resolver and, outside the cluster, the
+      destination of its notifications and that of its heartbeat, each on the port of its URL,
+      hosts that are deployment values in the secret store and so are named by no policy, and a
+      default deny of this namespace needs a rule for both flows; the blackbox exporter takes
+      Prometheus' probe requests and its own scrape on 9115 and reaches the cluster's resolver and
+      the public Gateway's proxies on 10080 and 10443 through their Service's cluster address
+    covered-by: the public Gateway's proxies, whose egress here names vmauth's pod on 8427 alone,
+      the container port the route logs sends to, which limits them once the agents enforce the
+      policies rather than audit them (docs/kubernetes.md, Service addresses, says which), and which
+      send to vmauth's Service only the paths of the store's interface and queries, after the
+      cluster's sign-in has admitted the request (components/sso); vmauth admits those reads alone,
+      with the route's own credential, and forwards them to the store with the store's
+      (docs/kubernetes.md, Who may call the log store); the namespace's Pod Security level and the
+      node firewall (ADR 0017)
   - namespace: openbao
     reason: the secret store takes connections from External Secrets, from Prometheus and from its
       own replicas, and reaches the API server to review the tokens its clients present; the
@@ -81,11 +86,14 @@ exceptions:
       flows are not yet enumerated
     covered-by: the namespace's Pod Security level and the node firewall (ADR 0017)
   - namespace: piraeus-datastore
-    reason: the CSI node plugin runs in the host's network namespace, which a pod policy does not
-      select; the LINSTOR controller, the satellites and the CSI plugins talk to each other, the
-      satellites replicate over the pod network, and the API server calls the operator's webhook;
-      its flows are not yet enumerated
-    covered-by: the namespace's Pod Security level and the node firewall (ADR 0017)
+    reason: the CSI node plugin and the satellites run in the host's network namespace, which a pod
+      policy does not select, and DRBD replicates between the nodes' addresses; the LINSTOR
+      controller, the satellites and the CSI plugins talk to each other, and the API server calls
+      the operator's webhook; its flows are not yet enumerated
+    covered-by: LINSTOR's API, which takes only clients holding a certificate its own authority
+      signs, and the controller and the satellites, which take only each other's certificates, from
+      an authority of their own (docs/kubernetes.md, Who may call LINSTOR); the namespace's Pod
+      Security level and the node firewall (ADR 0017)
   - namespace: volsync-system
     reason: the operator reaches the API server and Prometheus scrapes its metrics; the movers run
       in the applications' namespaces, under their policies; its flows are not yet enumerated
@@ -132,7 +140,10 @@ exceptions:
       cannot hold the default deny. Its one pod takes Prometheus' scrape of its metrics port 7979,
       through the chart's ServiceMonitor, and the kubelet's probes on that port, and no other
       connection; it reaches the API server to watch Gateways, HTTPRoutes and Namespaces, the DNS
-      provider's API on 443, outside the cluster, and the cluster's resolver
+      provider's API on 443, outside the cluster, and the cluster's resolver. The Jobs that just
+      cluster-dns-remove runs from its pod template are selected by no Service and reach only the
+      provider's API and the resolver, as their source asks the API server for nothing and no
+      service account token is mounted in them
     covered-by: the provider's API token, from the store's entry cert-manager/cloudflare through an
       ExternalSecret, whose Secrets are in this namespace and cert-manager's alone, and which the
       operator scopes to zone read and DNS edit on the cluster's one zone; the name filter, which

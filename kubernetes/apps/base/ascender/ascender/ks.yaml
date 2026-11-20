@@ -1,0 +1,52 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/kustomization-kustomize-v1.json
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: ascender
+  namespace: flux-system
+  labels:
+    # The database's three instances start one after another and the operator's first run waits for
+    # the schema's migration, so the first rollout takes longer than the default.
+    k8s-gitops/timeout: long
+spec:
+  path: ./apps/base/ascender/ascender/app
+  targetNamespace: ascender
+  # The database, from the cnpg-cluster component: Ascender keeps all its state there.
+  components:
+    - ../../../../../components/cnpg-cluster
+  postBuild:
+    substitute:
+      CNPG_CLUSTER_NAME: ascender-db
+      CNPG_NAMESPACE: ascender
+      # Every job's events are rows here until the system job Cleanup Job Details removes those
+      # older than its 120 days, each Sunday (docs/kubernetes.md, Ascender).
+      CNPG_STORAGE_SIZE: 5Gi
+  # The AWX is of the kind the operator's chart defines, and the operator's application is Ready once
+  # the database's Secret the AWX names exists; the Cluster and its PodMonitor are of the operator's
+  # and Prometheus Operator's kinds, and its ObjectStore the Barman Cloud plugin's; the component's
+  # backups and its dump job read their keys through ExternalSecrets from the secret store; the route
+  # names the public Gateway, and its Probe is answered by the blackbox exporter; the network policies
+  # are a kind Cilium's operator defines.
+  dependsOn:
+    - name: ascender-operator
+    - name: cloudnative-pg
+    - name: plugin-barman-cloud
+    - name: prometheus-operator-crds
+    - name: external-secrets
+    - name: openbao-store
+    - name: gateway-public
+    - name: cilium
+    - name: blackbox-exporter
+  wait: true
+  # Ready once the operator's last run for the AWX ended without a failure. The operator, Ansible's
+  # operator of operator-sdk, sets Successful False when a run starts and True when it ends without
+  # a failure; a failed run sets Failure True, which stays True into the next run until it succeeds,
+  # so a failed expression would fail a run that is about to succeed, and none is given.
+  healthCheckExprs:
+    - apiVersion: awx.ansible.com/v1beta1
+      kind: AWX
+      current: has(status.conditions) && status.conditions.exists(c, c.type == 'Successful' && c.status == 'True')
+  sourceRef:
+    kind: ExternalArtifact
+    name: ascender

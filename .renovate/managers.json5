@@ -1,6 +1,6 @@
 {
   $schema: "https://docs.renovatebot.com/renovate-schema.json",
-  description: "Where this repository keeps versions beyond Renovate's default file patterns, the one it reads but must not propose, and the ones it may propose only within the line the tree runs.",
+  description: "Where this repository keeps versions beyond Renovate's default file patterns, the one it reads but must not propose, and the ones it may propose only within the line the tree runs. grafana-plugins is the datasource that reads a Grafana plugin's versions from the catalogue Grafana installs it from.",
   // HelmRelease, OCIRepository, GitRepository and Flux Kustomization images. Helm values files,
   // kustomization.yaml, mise.toml, GitHub Actions workflows and OpenTofu files are found by their
   // managers' default patterns.
@@ -50,6 +50,18 @@
       ],
     },
   ],
+  // A Grafana plugin's versions, by the plugin's id, from the grafana.com listing that Grafana's
+  // image installs the plugin from at every start, and a version missing from it stops Grafana from
+  // starting (docs/kubernetes.md, Grafana). The listing holds a publisher's GitHub releases later,
+  // and some never, so a pin under '# renovate: datasource=custom.grafana-plugins' moves only to a
+  // version it lists, aged from the listing's createdAt for that version.
+  customDatasources: {
+    "grafana-plugins": {
+      defaultRegistryUrlTemplate: "https://grafana.com/api/plugins/{{packageName}}/versions",
+      format: "json",
+      transformTemplates: ["{'sourceUrl': items[0].url, 'releases': [items.{'version': version, 'releaseTimestamp': createdAt}]}"],
+    },
+  },
   packageRules: [
     {
       // To move mise-action's checksum, Renovate first fetches the current release by the tag the
@@ -92,6 +104,52 @@
       // release, and the moving tags latest, main and 0, the last two with -busybox variants too.
       description: "coraza-proxy-wasm: releases, not their busybox variants or the moving tags",
       matchPackageNames: ["ghcr.io/corazawaf/coraza-proxy-wasm"],
+      allowedVersions: "/^[0-9]+\\.[0-9]+\\.[0-9]+$/",
+    },
+    {
+      // The operator runs valkey 9-alpine by default (roles/installer/defaults/main.yml of its tag),
+      // the major its configuration is written for, and the AWX pins its newest release by patch.
+      // The registry also lists 9.x tags without a patch, other bases and release candidates.
+      description: "valkey, the AWX's: releases of the alpine build on major 9",
+      matchPackageNames: ["ghcr.io/valkey-io/valkey"],
+      allowedVersions: "/^9\\.[0-9]+\\.[0-9]+-alpine$/",
+    },
+    {
+      // The ascender-operator chart names its kube-rbac-proxy by a tag of its own, which the
+      // HelmRelease's post-renderer pins by digest, and tests/ascender.bats fails unless the tag is
+      // the chart's: a newer tag on its own never passes. So Renovate proposes only new digests of
+      // that tag here, and the tag moves with the chart, in the chart's pull request
+      // (docs/kubernetes.md, Ascender).
+      description: "kube-rbac-proxy of the Ascender operator's chart: digests only, as its tag is the chart's",
+      matchFileNames: ["kubernetes/apps/base/ascender/ascender-operator/app/helmrelease.yaml"],
+      matchPackageNames: ["quay.io/brancz/kube-rbac-proxy"],
+      matchUpdateTypes: ["major", "minor", "patch"],
+      enabled: false,
+    },
+    {
+      // Locust's registry tags each build of its master branch as the next patch with .devN after
+      // it, such as 2.47.1.dev61, beside its releases, and also holds the moving tags master,
+      // latest and reallylatest, tags of single commits and old pre-releases.
+      description: "Locust: releases, not the builds of its master branch or the moving tags",
+      matchPackageNames: ["docker.io/locustio/locust"],
+      allowedVersions: "/^[0-9]+\\.[0-9]+\\.[0-9]+$/",
+    },
+    {
+      // The Browser library's registry tags each release as x.y.z and also holds the moving tags of
+      // its major and minor, such as 21 and 21.0, and latest, which follow the newest release.
+      description: "Robot Framework's Browser library image: its releases, not the moving tags",
+      matchPackageNames: ["docker.io/marketsquare/robotframework-browser"],
+      allowedVersions: "/^[0-9]+\\.[0-9]+\\.[0-9]+$/",
+    },
+    {
+      // OpenShell's registry lists, beside its stable releases, nightly pre-releases such as
+      // 0.1.10-pre.2, the build of each commit under the commit's 40 hexadecimal digits, and latest.
+      // Renovate's docker versioning sets a pre-release and a hash aside only by their form, and
+      // reads a hash of decimal digits alone as a number greater than any release, so this rule
+      // names what may be proposed: the stable releases, which OpenShell's support matrix names for
+      // production use.
+      description: "OpenShell's images: stable releases, not pre-releases or the builds of commits",
+      matchPackageNames: ["ghcr.io/nvidia/openshell/**"],
       allowedVersions: "/^[0-9]+\\.[0-9]+\\.[0-9]+$/",
     },
     {

@@ -17,3 +17,9 @@ spec:
   ref:
     # renovate: datasource=docker depName=quay.io/cilium/charts/cilium
     tag: 1.20.4
+  # Go regular expressions, kept to syntax POSIX extended expressions read the same way (no \d).
+  verify:
+    provider: cosign
+    matchOIDCIdentity:
+      - issuer: '^https://token\.actions\.githubusercontent\.com$'
+        subject: '^https://github\.com/cilium/cilium/\.github/workflows/release\.yaml@refs/heads/main$'
