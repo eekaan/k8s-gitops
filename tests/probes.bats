@@ -1186,7 +1186,7 @@ probe_rates() {
       ($probes[] | select(.spec | has("interval"))
         | "\($id): the Probe \(.metadata.namespace)/\(.metadata.name) sets an interval of its own, \(.spec.interval), in place of the \($interval) seconds Prometheus gives it"),
       (select($count * 5 > $limit.requests)
-        | "\($id): its Probes make \($count) a \($limit.unit), more than a fifth of its \($limit.requests)")' "$1" | sort
+        | "\($id): its Probes make \($count) a \($limit.unit), more than a fifth of its \($limit.requests)")' "$1" | LC_ALL=C sort
 }
 
 @test "The probes of a rate-limited route stay well under its limit" {
@@ -1205,7 +1205,7 @@ probe_rates() {
   # signed-in route's 300.
   rates="$(probe_rates "$objects")"
   echo "$rates"
-  [ "$rates" = "$(printf '%s\n' 'demo/hello: 1 a Second against 5' 'demo/hello-sso: 2 a Minute against 300' 'kromgo/kromgo: 2 a Minute against 300')" ]
+  [ "$rates" = "$(printf '%s\n' 'demo/hello-sso: 2 a Minute against 300' 'demo/hello: 1 a Second against 5' 'kromgo/kromgo: 2 a Minute against 300')" ]
   # The demo route limited to 4 a second would leave its Probe more than a fifth of it.
   jq '(.[] | select(.kind == "BackendTrafficPolicy" and .metadata.namespace == "demo" and .metadata.name == "hello")
     | .spec.rateLimit.local.rules[0].limit.requests) = 4' "$objects" >"$BATS_TEST_TMPDIR/four.json"
