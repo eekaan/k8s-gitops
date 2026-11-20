@@ -1,7 +1,19 @@
 ---
-# The cluster's VictoriaLogs, through the Service its chart puts in front of it (ADR 0014). Grafana's
-# server queries it, so a browser needs no way to it. The type is the VictoriaLogs plugin's, which
-# Grafana does not ship.
+# The cluster's VictoriaLogs (ADR 0014), through vmauth's Service as the user grafana, which vmauth
+# lets read the store and nothing else. Grafana's server queries it, so a browser needs no way to it.
+# The type is the VictoriaLogs plugin's, which Grafana does not ship.
+#
+# The password is the Secret vmauth-grafana's, which the operator puts in place of ${password}, the
+# placeholder below, each time it applies the datasource: every minute, by resyncPeriod, reading
+# the Secret then, so a Secret made again reaches Grafana within a minute (controllers/
+# datasource_controller.go in grafana-operator v5.25.0). Every child Kustomization substitutes
+# Flux's ${...} variables, which would leave the placeholder empty, so this object opts out. The
+# operator logs the value it puts in place only at verbosity 1, and runs at info. Grafana does not
+# wait for vmauth. While the Secret is missing, as on a new cluster until vmauth's application
+# writes it, the operator cannot build the datasource, keeps what Grafana has, none on a new
+# cluster, and tries again after a wait that doubles each time up to about 17 minutes,
+# controller-runtime's default: its watch of Secrets sees only those labelled for it (main.go), so
+# the Secret's arrival does not wake it, and the datasource can come that long after the Secret.
 #
 # This is the one thing Grafana fetches from the network. The operator hands the plugin below to
 # Grafana's container as GF_INSTALL_PLUGINS, and grafana.yaml sets GF_INSTALL_PLUGINS_FORCE there,
@@ -29,12 +41,15 @@ apiVersion: grafana.integreatly.org/v1beta1
 kind: GrafanaDatasource
 metadata:
   name: victoria-logs
+  annotations:
+    kustomize.toolkit.fluxcd.io/substitute: disabled
 spec:
   instanceSelector:
     matchLabels:
       app.kubernetes.io/instance: grafana
   # A restarted Grafana starts without it. The operator applies it again every minute, and retries
-  # a failed attempt after 10 seconds, doubling the wait up to two minutes while Grafana starts.
+  # a failed attempt, as while Grafana starts, after the wait above that doubles up to about 17
+  # minutes.
   resyncPeriod: 1m
   # The dashboard names the datasource by this, so it finds it however Grafana numbers its own.
   uid: victoria-logs
@@ -46,4 +61,14 @@ spec:
     name: VictoriaLogs
     type: victoriametrics-logs-datasource
     access: proxy
-    url: http://victoria-logs.monitoring.svc:9428
+    url: http://vmauth.monitoring.svc:8427
+    basicAuth: true
+    basicAuthUser: grafana
+    secureJsonData:
+      basicAuthPassword: ${password}
+  valuesFrom:
+    - targetPath: secureJsonData.basicAuthPassword
+      valueFrom:
+        secretKeyRef:
+          name: vmauth-grafana
+          key: password

@@ -15,9 +15,10 @@
 #
 # The store does the counting: scripts/logs is run once, with one LogsQL query that unpacks each of
 # the recorder's lines and counts them by the fields above, so the limit of the answer, 10000,
-# bounds groups and never flows. Groups that differ only in what a line leaves out, a pod's name
-# under its workload or a label, are summed here. An answer of as many groups as the limit is cut:
-# that is said, and the run fails.
+# bounds groups and never flows. It asks through vmauth with the operator's credential, so the
+# kubeconfig must be able to read the Secret vmauth-operator and forward a port in monitoring.
+# Groups that differ only in what a line leaves out, a pod's name under its workload or a label, are
+# summed here. An answer of as many groups as the limit is cut: that is said, and the run fails.
 #
 # After the table, on standard error: how many of the recorder's lines in the window are not flows
 # (events Hubble lost, a node Hubble Relay could not read, the CLI's own errors), with the just logs

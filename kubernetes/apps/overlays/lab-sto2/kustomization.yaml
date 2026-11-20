@@ -31,6 +31,7 @@ resources:
   - ../../base/open-feature-operator
   - ../../base/locust
   - ../../base/robot
+  - ../../base/escape-canary
   - ../../base/ai-system/n8n/ks.yaml
   - ../../base/ai-system/open-webui/ks.yaml
   - ../../base/backstage/backstage/ks.yaml
@@ -82,6 +83,7 @@ resources:
   - ../../base/monitoring/silence-operator/ks.yaml
   - ../../base/monitoring/vector/ks.yaml
   - ../../base/monitoring/victoria-logs/ks.yaml
+  - ../../base/monitoring/vmauth/ks.yaml
   - ../../base/openbao/openbao/ks.yaml
   - ../../base/openbao/openbao-snapshots/ks.yaml
   - ../../base/piraeus-datastore/linstor-cluster/ks.yaml
@@ -113,6 +115,7 @@ resources:
   - ../../base/robot/robot/ks.yaml
   - ../../base/robot/robot-ascender/ks.yaml
   - ../../base/locust/locust-route/ks.yaml
+  - ../../base/escape-canary/escape-canary/ks.yaml
 
 patches:
   # The issuer of the public Gateway's certificate, the place this cluster chooses it, which the next

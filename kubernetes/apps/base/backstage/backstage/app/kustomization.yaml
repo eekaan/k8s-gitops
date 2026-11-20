@@ -58,6 +58,7 @@ configMapGenerator:
       - catalogue/domain.yaml
       - catalogue/envoy-gateway-crds.yaml
       - catalogue/envoy-gateway.yaml
+      - catalogue/escape-canary.yaml
       - catalogue/etcd-snapshots.yaml
       - catalogue/external-dns-dashboard.yaml
       - catalogue/external-dns.yaml
@@ -115,6 +116,7 @@ configMapGenerator:
       - catalogue/vector.yaml
       - catalogue/victoria-logs-route.yaml
       - catalogue/victoria-logs.yaml
+      - catalogue/vmauth.yaml
       - catalogue/volsync-demo.yaml
       - catalogue/volsync.yaml
       - catalogue/vpa.yaml

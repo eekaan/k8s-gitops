@@ -1123,7 +1123,8 @@ section() {
   workload CronJob robot-suites
   # The window of every nightly job of the render, from its start to its start with both its
   # deadlines for a CronJob, which a CronJob without one counts as nothing to start and 30 minutes to
-  # run, and 30 minutes for a base backup or a volume backup; an hour of */N is each Nth hour from 0.
+  # run, and 30 minutes for a base backup or a volume backup; an hour of */N is each Nth hour from 0,
+  # and an hour of * every hour, as the escape canary's checks run.
   real_render
   while IFS= read -r job; do
     kind="$(yq '.kind' "$job")" name="$(yq '.metadata.namespace + "/" + .metadata.name' "$job")"
@@ -1140,6 +1141,8 @@ section() {
       hours="${fields[1]//,/ }"
     elif [[ ${fields[1]} =~ ^\*/([1-9][0-9]?)$ ]]; then
       hours="$(seq 0 "${BASH_REMATCH[1]}" 23 | paste -sd' ' -)"
+    elif [[ ${fields[1]} == '*' ]]; then
+      hours="$(seq 0 23 | paste -sd' ' -)"
     else
       echo "$kind $name runs at the hours '${fields[1]}', which this test cannot read"
       return 1

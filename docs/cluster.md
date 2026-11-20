@@ -1199,11 +1199,17 @@ take one now, `kubectl --namespace etcd-snapshots create job --from=cronjob/etcd
   job it creates, and needs the cluster's kubeconfig.
 - `just logs '<query>' [--since <duration>] [--limit <n>] [cluster]` prints the records a LogsQL
   query matches, one line each, the oldest first, from the last 15 minutes and at most 200 unless
-  told otherwise ([kubernetes.md](kubernetes.md#logs)): `kubectl get --raw` through the Kubernetes
-  API's service proxy to VictoriaLogs, so no port is forwarded. It prints the records and, when it
-  fails, the message of the error the API server or the store answered with, the store's own for a
-  query it refuses, or that the API did not answer, without an address and none of kubectl's other
-  output. It changes nothing on the cluster and needs the cluster's kubeconfig.
+  told otherwise ([kubernetes.md](kubernetes.md#logs)): through vmauth as its user `operator`
+  ([kubernetes.md](kubernetes.md#who-may-call-the-log-store)), with that user's credential, which
+  one `kubectl get secret` reads from the Secret `vmauth-operator` in `monitoring` into a variable,
+  through a `kubectl port-forward` on 127.0.0.1 to the Service `vmauth`, which it stops on every
+  exit, and curl, which gets the credential as a header through a file descriptor; the credential is
+  never printed, written to a file or an argument. It prints the records and, when it fails, the
+  store's own message for a query it refuses, that vmauth refused the credential, vmauth's status
+  and message for any other answer, or why the Secret could not be read, the forward did not start,
+  or vmauth or the API did not answer, without an address and none of kubectl's or curl's other
+  output. It changes nothing on the cluster and needs the cluster's kubeconfig, which must be able
+  to read that Secret and forward a port in `monitoring`.
 - `just cluster-reboot <node> [cluster] [--yes] [--tolerate <seconds>] [--no-bgp-wait]` reboots one
   node, named by its hostname in the cluster's `talman.yaml`, while it watches the Kubernetes API
   through its load balancer; for a control plane, that is the check that the API does not go away

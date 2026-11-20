@@ -103,48 +103,72 @@ alert counts the others, which are lost.
 
 Look at first: the component named in the alert and the collector's own log,
 `kubectl --namespace monitoring logs <pod>`, which says why it drops: an event too large for the
-sink, or one the store refuses with a status Vector does not retry.
+sink, or one vmauth or the store refuses with a status Vector does not retry. For the sink
+`victoria_logs`, which status:
+`sum by (pod, status) (rate(vector_http_client_responses_total{component_id="victoria_logs"}[5m]))`.
 
 Usually: a record the store rejects, such as a line dated beyond the store's accepted time range; a
-change to the collector's configuration whose transform fails on lines it did not see before.
+change to the collector's configuration whose transform fails on lines it did not see before; or
+vmauth refusing the collector, with 401, every request of it, as the collector's credential is not
+the one vmauth holds. Each reads it from the Secret `vmauth-vector` when it starts, so the two
+disagree once the Secret was made again and only one of them has been restarted since ([Who may
+call the log store](../kubernetes.md#who-may-call-the-log-store)). It shows as 401 in the query
+above, as `sum by (reason) (rate(vmauth_http_request_errors_total{reason="invalid_auth_token"}[5m]))`
+rising in vmauth's metrics, and in when the Secret was made,
+`kubectl --namespace monitoring get secret vmauth-vector --output jsonpath='{.metadata.creationTimestamp}'`,
+against the age of vmauth's and the collector's pods, `kubectl --namespace monitoring get pods`;
+`kubectl --namespace monitoring get externalsecrets` shows whether each ExternalSecret is Ready. The
+fix: restart vmauth,
+`kubectl --namespace monitoring rollout restart deployment/vmauth`, and once both its pods are
+available every collector pod at once,
+`kubectl --namespace monitoring delete pods --selector app.kubernetes.io/name=vector`.
 
 ## LogCollectorSendFailing
 
-A collector's sink has sent requests to the store and had none accepted for 15 minutes: at each
-evaluation in that time, none of its requests of the 5 minutes before was accepted, each refused,
-answered with an error or left unanswered, and it tries a store that has failed it again within 30
-seconds. The lines wait in the disk buffer on the node, 256 MiB, and once it is full the
-collector stops reading on that node until the store takes lines again, and the lines of files
-rotated away meanwhile are lost ([Logs](../kubernetes.md#logs)). A store away for less than about 20
-minutes, the 5 minutes of the rate and the 15 of `for`, raises nothing. The alert is raised for each
-collector, one per node: on every node it points at the store, on one node at the path from that
-node to the store.
+A collector's sink has sent requests to the store, through vmauth, and had none accepted for 15
+minutes: at each evaluation in that time, none of its requests of the 5 minutes before was
+accepted, each refused, answered with an error or left unanswered, and it tries a store that has
+failed it again within 30 seconds. The lines wait in the disk buffer on the node, 256 MiB, and once
+it is full the collector stops reading on that node until the store takes lines again, and the
+lines of files rotated away meanwhile are lost ([Logs](../kubernetes.md#logs)). A store away for
+less than about 20 minutes, the 5 minutes of the rate and the 15 of `for`, raises nothing. The
+alert is raised for each collector, one per node: on every node it points at vmauth or the store,
+on one node at the path from that node to vmauth.
 
-Look at first: whether the store is up: `kubectl --namespace monitoring get pods`, and
-`just logs '*' --since 5m --limit 1`, which fails with the store's own message when it is away or
-read-only. Then how the requests fail, by a query in Grafana's Explore behind `just grafana` and by
-the lines in the collector's log, which the collector does not ship, so they are read with
+Look at first: whether vmauth and the store are up: `kubectl --namespace monitoring get pods`, and
+`just logs '*' --since 5m --limit 1`, which fails with vmauth's message when the store is away and
+with the store's own when it is read-only. Then how the requests fail, by a query in Grafana's
+Explore behind `just grafana` and by the lines in the collector's log, which the collector does not
+ship, so they are read with
 `kubectl --namespace monitoring logs <pod> | grep -E 'Endpoint is unhealthy|Retrying after|Request timed out'`:
 
 - `sum by (pod, error_kind) (rate(vector_http_client_errors_total{component_id="victoria_logs"}[5m]))`
   shows connections refused or a name that does not resolve, with `Retrying after error.` in the
-  log, and `Endpoint is unhealthy.` once, where the sink stopped sending until its next try: the
-  store is not running, or its Service has no ready endpoint.
+  log, and `Endpoint is unhealthy.` once, where the sink stopped sending until its next try: vmauth
+  is not running, or its Service has no ready endpoint.
 - `sum by (pod, status) (rate(vector_http_client_responses_total{component_id="victoria_logs"}[5m]))`
-  shows what the store answers: 429 while it is read-only, its `vl_storage_is_read_only` 1, with
-  `Retrying after response. reason=too many requests` in the log; a 5xx while it fails its inserts,
-  with `Retrying after response.` and, once, `Endpoint is unhealthy.`.
+  shows what vmauth answers: while the store does not answer it, as when the store is not running,
+  502 for a request whose body vmauth keeps to try again, with `all the 1 backends for the user
+  "vector" are unavailable` in vmauth's own log, and 503 for one whose body is larger than the
+  16 KiB it keeps for that (`-maxRequestBodySizeToRetry`), as a large batch is, with `cannot proxy
+  the request to` the store's address (`app/vmauth/main.go` of VictoriaMetrics v1.156.0); 429 while
+  the store is read-only, its `vl_storage_is_read_only` 1, with
+  `Retrying after response. reason=too many requests` in the log; another 5xx while the store fails
+  its inserts, with `Retrying after response.` and, once, `Endpoint is unhealthy.`; 401 while vmauth
+  refuses the collector's credential, below.
 - Neither, while requests are sent: they time out, with `Request timed out.` in the log, as when
   Cilium's tunnel between the nodes is down or the store hangs.
 
-A store that refuses every insert with another 4xx raises this alert together with
-[LogCollectorDiscardingEvents](#logcollectordiscardingevents), as the sink drops each request it is
-refused. A 2xx whose body reports errors counts as accepted here: it is that alert's, not this one's.
+vmauth refusing the collector, with 401, or the store refusing every insert with another 4xx, raises
+this alert together with [LogCollectorDiscardingEvents](#logcollectordiscardingevents), as the sink
+drops each request it is refused; that alert's section says how to see and mend the 401. A 2xx
+whose body reports errors counts as accepted here: it is that alert's, not this one's.
 
 Usually: the store not running for longer than a move to another worker takes, as when its volume
-cannot be attached there; the store's volume full, so it answers every insert with 429; or, on one
-node only, Cilium's tunnel between the collector's node and the store's down, which no recipe
-checks: the requests time out while the store's pod is Running.
+cannot be attached there; vmauth not running, as when its pods wait for a Secret that is missing,
+which `kubectl --namespace monitoring get externalsecrets` shows; the store's volume full, so it
+answers every insert with 429; or, on one node only, Cilium's tunnel between the collector's node
+and vmauth's down, which no recipe checks: the requests time out while vmauth's pods are Running.
 
 ## CertManagerCertificateNotReady
 
@@ -1049,3 +1073,111 @@ change, and `flux reconcile helmrelease blackbox-exporter -n monitoring --reset`
 Until the exporter's Kustomization is Ready again, Flux applies no change to the Gateway or to an
 application with a route, which wait for it, from each one's next reconcile
 ([Probes](../kubernetes.md#probes)).
+
+## EscapeCanaryStale
+
+A CronJob of the escape canary, `escape-canary-network` or `escape-canary-rights`, has had no
+successful run for 3 hours, three hourly runs in a row, or it was created more than 3 hours ago and
+has never succeeded ([The escape canary](../kubernetes.md#the-escape-canary)). Network policy, the
+node firewall and RBAC hold or not whatever the canary says: what is missing is the hourly proof that
+what they forbid still gives the result its table records. It is a warning for the working day. Its
+labels name the `namespace` and the `cronjob`.
+
+Look at first: `kubectl --namespace escape-canary get cronjob,job,pod --output wide` for what the
+runs did and on which nodes, `kubectl get nodes` for the workers, and the lines of the latest run's
+pods, `kubectl --namespace escape-canary logs --selector batch.kubernetes.io/job-name=<job> --prefix
+--tail=-1`, one line for each attempt and a summary. A Job's condition says why it failed:
+`kubectl --namespace escape-canary get job <job> --output jsonpath='{.status.conditions}'`.
+
+Usually: a worker cordoned or full, so a run's third pod found no worker free of the other two and
+the Job failed at its deadline with `DeadlineExceeded`, the two other pods' lines all `ok`; a worker
+lost between runs, `NotReady` in `kubectl get nodes`, which leaves the third pod pending too and
+fails most runs at once on the `secret-store` attempt, which
+[EscapeCanaryUnexpectedResult](#escapecanaryunexpectedresult) reports as well; a worker lost while a
+pod of a scheduled run was on it, which stops the CronJob (below); an image that does not pull,
+which the pod's events name; the runs failing on a result, which that alert reports too, or at their
+deadline on lookups that the resolver does not answer, as
+[EscapeCanaryUnexpectedResult](#escapecanaryunexpectedresult) says; or no run at all, a suspended
+CronJob or one whose runs could not start within 600 seconds of their time. Once the cause is gone,
+a run by hand clears it when it succeeds:
+`kubectl --namespace escape-canary create job --from=cronjob/<cronjob> <name>`.
+
+A worker lost while a pod of a scheduled run was on it, placed, starting or running, stops that
+run's CronJob: `kubectl --namespace escape-canary get cronjob` shows it with one active Job and a
+last schedule hours old, its latest event says `JobAlreadyActive`, and that Job holds a pod
+`Terminating` on the `NotReady` worker, whose lines cannot be read. The Job controller adds no
+`Failed` condition to the Job while that pod terminates, so the Job stays active, the CronJob starts
+no run while it is (`concurrencyPolicy: Forbid`), and neither
+[EscapeCanaryUnexpectedResult](#escapecanaryunexpectedresult) nor `KubeJobFailed` fires; this alert
+does, 3 hours after the last success ([The escape canary](../kubernetes.md#the-escape-canary)). A
+run made by hand and stuck the same way stops no schedule, as the CronJob does not count it among
+its active Jobs, but its Job stays active until its pod is removed. Runs start again once the
+worker answers and its kubelet ends the pod, or once the pod is removed:
+`kubectl --namespace escape-canary delete pod <pod> --force --grace-period=0`. The Job then fails,
+the alerts of a failed Job read it, and the next schedule starts a run. The taint
+`node.kubernetes.io/out-of-service` and the deletion of the Node act on every pod of the worker, the
+taint on its volumes as well: they belong to taking a lost worker out for good, which frees the
+canary's pod too.
+
+## EscapeCanaryUnexpectedResult
+
+A CronJob of the escape canary owns a Job that failed because a pod exited non-zero, and that
+started after the CronJob's last success: an attempt gave a result its table, `expected.tsv`, does
+not give for the mode the canary is set to, or the check could not run
+([The escape canary](../kubernetes.md#the-escape-canary)). An attempt that now succeeds where the
+table says it is blocked or forbidden is a layer that no longer holds; one that now fails where the
+table says open is a target or a path gone, or a lost worker's OpenBao member (below). It clears
+once a later run of the CronJob succeeds. A Job that failed at its deadline does not raise it
+([EscapeCanaryStale](#escapecanarystale) does, after three).
+
+Look at first: the failed Job's lines,
+`kubectl --namespace escape-canary logs --selector batch.kubernetes.io/job-name=<job> --prefix
+--tail=-1`: each `UNEXPECTED` line names the node, the attempt, its result and the one the table
+expects, and a check that could not run says why on a line of its own that starts
+`escape-canary <check> error:`. The lines there are those of the pod that failed and of any pod that
+had already ended: once one pod fails, the Job fails and its controller deletes the pods still
+running, whose lines go with them. `kubectl --namespace escape-canary get job,pod --output wide`
+says which pods failed. The table's row of the attempt says what decides its result; for the flows,
+the record of what policy drops, `just network-audit 1h`, shows what the policies made of them, and
+for the rights check, the account's grants:
+`kubectl auth can-i --list --as system:serviceaccount:escape-canary:escape-canary-rights`.
+
+Usually:
+
+- a result of the rights check that is `allowed`: a binding that names the account, its namespace's
+  accounts, every account or every authenticated caller, from a chart or applied by hand, which is a
+  finding to remove, never a row to change;
+- a network result that is `open` where the table says `blocked`: the cluster enforces and the
+  canary's mode is still `audit`, or the other way round, which `tests/escape-canary.bats` refuses in
+  the tree, so the cluster runs another mode than its values say; or a node rule that admits pods
+  where `talos/firewall.yaml` does not;
+- `attempt=secret-store result=blocked expected=open`, with a worker `NotReady` in
+  `kubectl get nodes`: the worker is lost, and OpenBao's member on it is still one of the three
+  backends of the Service `openbao`, which publishes members that are not ready, until its pod
+  object is removed; a connection that lands on it, one time in three, gets no answer. Isolation
+  holds; once the worker is back, a run succeeds and clears the alert;
+- `refused` where the table says `open`: a target without endpoints, as `hello` or OpenBao with no
+  pod, whose Service's address Cilium refuses (`service-no-backend-response: reject` in the rendered
+  `cilium-config`); or, for `secret-store`, an OpenBao member starting, in a rollout or a restart,
+  which is a backend of the Service as soon as its pod has an address, while its init containers
+  run and before it listens, as the Service publishes members that are not ready;
+- `attempt=resolver result=blocked`, with `unresolved` for the attempts by name: the pods' resolver
+  does not answer. `nc` looks a name up before its 3 seconds start, so each of those attempts waits
+  out the resolver's timeouts, and a run whose lookups outlast its 300 seconds fails at its deadline
+  instead, which [EscapeCanaryStale](#escapecanarystale) reports;
+- `other`: a message of the tool the check does not know, such as `nc`'s `No route to host`, which
+  the check does not print, as the tools' messages name addresses;
+- an `error:` line: a table or a script the check cannot read, or an unknown mode in `ks.yaml`;
+- no `UNEXPECTED` line and no `error:` line: a pod deleted from outside during the seconds of a run,
+  as by an eviction, which `kubectl --namespace escape-canary get events` names, the descheduler's
+  among them. The Job controller counts a pod deleted before it succeeded as failed (`isPodFailed`
+  in `pkg/controller/job/job_controller.go` of Kubernetes v1.37.1), so the Job fails with
+  `BackoffLimitExceeded` even when every line that pod printed was `ok`, and its lines go with it.
+
+A live result that differs from the table is reported with its reason, never answered by changing the
+table. Once the cause is fixed, a run by hand clears the alert when it succeeds:
+`kubectl --namespace escape-canary create job --from=cronjob/<cronjob> <name>`. Each failed Job,
+scheduled or by hand, also raises the stock `KubeJobFailed`, a warning, 15 minutes after it failed,
+and that one does not clear when a run succeeds: it fires for as long as the failed Job exists, and
+the CronJob keeps its three newest failed Jobs for their pods' lines. Once those are read, delete the
+Job, which clears it: `kubectl --namespace escape-canary delete job <job>`.

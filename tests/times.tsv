@@ -33,6 +33,7 @@ tests/dashboards.bats	289
 tests/edge-forward.bats	0
 tests/edge-routers.bats	1
 tests/edge-scripts.bats	62
+tests/escape-canary.bats	250
 tests/etcd-snapshots.bats	3
 tests/external-dns.bats	67
 tests/external-secrets.bats	3
@@ -51,6 +52,7 @@ tests/kromgo.bats	232
 tests/kubernetes-check.bats	196
 tests/kubernetes-validate.bats	469
 tests/locust.bats	129
+tests/log-store-access.bats	49
 tests/logs.bats	151
 tests/monitoring.bats	10
 tests/network-audit.bats	147

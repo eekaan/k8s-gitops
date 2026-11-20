@@ -412,3 +412,21 @@ Feature: Alerts
     Given the exporter running, its own metrics scraped, no Probe of the public hostnames declared, and a target of another job down
     When the rule is evaluated over time
     Then the alert never fires
+
+  @by:rules-check
+  Scenario: The alert EscapeCanaryStale fires after its time in the failing case and stays quiet in the healthy one
+    Given a CronJob of the escape canary whose last success is older than 3 hours, one that has never succeeded and was created more than 3 hours ago, one that succeeded within the hour, one younger than 3 hours with no success yet, and a CronJob of another namespace as old as the first
+    When the rule is evaluated over time
+    Then the alert fires after its time for the first two, naming the CronJob, and never for the others
+
+  @by:rules-check
+  Scenario: The alert EscapeCanaryUnexpectedResult fires after its time in the failing case and stays quiet in the healthy one
+    Given a CronJob of the escape canary that owns a Job failed because a pod exited non-zero, started after the CronJob's last success, one that has never succeeded and owns such a Job, one whose such Job started before its last success, and a Job of another namespace failed the same way
+    When the rule is evaluated over time
+    Then the alert fires after its time for the first two, naming the CronJob, and never for the others
+
+  @by:rules-check
+  Scenario: The alert EscapeCanaryUnexpectedResult stays quiet while a run fails at its deadline, and clears once a run succeeds
+    Given a CronJob of the escape canary whose Job failed at its deadline, and one whose Job failed because a pod exited non-zero and whose next run then succeeds
+    When the rule is evaluated over time
+    Then the alert never fires for the first, fires after its time for the second and clears once its later run succeeds

@@ -1,0 +1,12 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/yannh/kubernetes-json-schema/master/master-standalone-strict/poddisruptionbudget-policy-v1.json
+# A drain evicts one of the two pods only while the other is available.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: vmauth
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vmauth
