@@ -324,7 +324,7 @@ renovate-pins:
 # renovate: datasource=docker depName=docker.io/timberio/vector
 vector_image := "docker.io/timberio/vector:0.61.0-distroless-libc@sha256:1a3451978644d5cd4b99a0b28c990791e2f7e1efbea4184122f1c59a56448143"
 
-# Check the log collector's rendered configuration with Vector itself, in the image the collector runs: it loads, and Vector's unit tests of it in tests/vector pass
+# Check the log collector's rendered configuration with Vector itself, in the image the collector runs: it loads, Vector's unit tests of it in tests/vector pass, and without VMAUTH_PASSWORD Vector refuses it, naming the variable, as it does when it fills the sink's placeholder from its environment
 [script]
 vector-check:
     set -o pipefail
@@ -333,8 +333,24 @@ vector-check:
     # docker is run with none of the secrets a recipe's environment may hold.
     . scripts/lib/tools.sh
     scripts/vector-config "$dir"
-    docker run --rm --network none -e VECTOR_SELF_NODE_NAME=node-1 -v "$dir":/check:ro {{ vector_image }} validate --no-environment /check/vector.yaml
-    docker run --rm --network none -e VECTOR_SELF_NODE_NAME=node-1 -v "$dir":/check:ro {{ vector_image }} test /check/vector.yaml /check/tests.yaml
+    # The environment the DaemonSet gives Vector: the node's name, interpolation of ${...} allowed,
+    # which fails the load of a variable that is not set, and a placeholder for the collector's
+    # credential to vmauth.
+    env=(-e VECTOR_SELF_NODE_NAME=node-1 -e VECTOR_DANGEROUSLY_ALLOW_ENV_VAR_INTERPOLATION=true -e VMAUTH_PASSWORD=vector-check)
+    docker run --rm --network none "${env[@]}" -v "$dir":/check:ro {{ vector_image }} validate --no-environment /check/vector.yaml
+    docker run --rm --network none "${env[@]}" -v "$dir":/check:ro {{ vector_image }} test /check/vector.yaml /check/tests.yaml
+    # Without the credential's variable, Vector must refuse the configuration as a configuration
+    # error, 78, naming the variable: that shows it fills ${VMAUTH_PASSWORD} from its environment,
+    # where a Vector that ignored the switch would load the placeholder itself as the password,
+    # which vmauth refuses, and the sink drops what it refuses.
+    unset_env=(-e VECTOR_SELF_NODE_NAME=node-1 -e VECTOR_DANGEROUSLY_ALLOW_ENV_VAR_INTERPOLATION=true)
+    status=0
+    out=$(docker run --rm --network none "${unset_env[@]}" -v "$dir":/check:ro {{ vector_image }} validate --no-environment /check/vector.yaml 2>&1) || status=$?
+    if [[ $status -ne 78 || $out != *VMAUTH_PASSWORD* ]]; then
+      printf '%s\n' "$out"
+      echo "vector-check: Vector exited $status without VMAUTH_PASSWORD set; it must refuse the configuration with 78, naming the variable"
+      exit 1
+    fi
 
 # Check the alert rules the tree renders with promtool, in the image of the Prometheus the rendered chart deploys, which scripts/rules-config finds in the render: every rule of every cluster, the charts' and the applications' own, is valid, every own alert has a severity, a summary, a description, a runbook heading that exists and a test in which it fires and one in which it stays quiet, and the unit tests in tests/rules pass; then promtool's check rules must refuse, naming each, a chart's rule and an own alert it cannot parse and an own alert defined twice, in rule files no unit test loads. The image is the chart's, by the tag Renovate moves with the chart, and nothing else pins it; needs docker, as vector-check does, which just ci's module does not
 [script]

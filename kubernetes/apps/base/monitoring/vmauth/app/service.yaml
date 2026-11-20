@@ -1,0 +1,16 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/yannh/kubernetes-json-schema/master/master-standalone-strict/service-v1.json
+# What every client of the log store sends to: vmauth's proxy port alone. Its internal port, with
+# its health, its metrics and its keyed endpoints, is reached on the pods' own addresses by the
+# kubelet's probes and Prometheus' scrape, never through this Service.
+apiVersion: v1
+kind: Service
+metadata:
+  name: vmauth
+spec:
+  selector:
+    app.kubernetes.io/name: vmauth
+  ports:
+    - name: http
+      port: 8427
+      targetPort: http

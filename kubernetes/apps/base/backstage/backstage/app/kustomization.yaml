@@ -115,6 +115,7 @@ configMapGenerator:
       - catalogue/vector.yaml
       - catalogue/victoria-logs-route.yaml
       - catalogue/victoria-logs.yaml
+      - catalogue/vmauth.yaml
       - catalogue/volsync-demo.yaml
       - catalogue/volsync.yaml
       - catalogue/vpa.yaml

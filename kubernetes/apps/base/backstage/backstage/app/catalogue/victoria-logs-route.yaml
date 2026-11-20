@@ -19,4 +19,4 @@ spec:
     - component:default/blackbox-exporter
     - resource:default/gateway-public
     - component:default/oauth2-proxy
-    - component:default/victoria-logs
+    - component:default/vmauth
