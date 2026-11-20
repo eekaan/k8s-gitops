@@ -66,6 +66,11 @@ Feature: Cilium
     When the chart is rendered
     Then values.yaml sets policyAuditMode, the rendered cilium-config holds policy-audit-mode "true" and enable-policy "default", the agents' pod template carries the configmap checksum so they restart into it, and the docs open a paragraph with "The cluster audits network policy." exactly when the value is set
 
+  Scenario: Cilium encrypts traffic between pods on different nodes with WireGuard, changes nothing else in its configuration, and the docs say so
+    Given the pinned chart, values.yaml and docs/kubernetes.md
+    When the chart is rendered with the values, and with the same values but encryption off
+    Then values.yaml sets encryption enabled, type wireguard and node encryption off and nothing else under the key, the rendered cilium-config differs from the other render by exactly enable-wireguard "true" and wireguard-persistent-keepalive "0s", with no node encryption, strict mode, IPsec or ztunnel key, every other object is the same but for the configmap checksum that rolls the agents and the operator and the generated Secrets' data, no ztunnel object is rendered but the operator's Role and RoleBinding the chart renders either way, the configuration keeps tunnel mode over VXLAN, kube-proxy replacement without DSR or XDP acceleration, a Service's address translated at the pod's interface, no host firewall, no MTU and the chart's default monitor aggregation, and the docs open one paragraph, under Encryption between nodes, with "Traffic between pods on different nodes is encrypted."
+
   Scenario: A fresh bootstrap still installs Cilium before its own resource definitions exist
     Given a cluster with no Cilium and so none of Cilium's resource definitions
     When the install script runs against recording tools, and every application is built as Flux builds it

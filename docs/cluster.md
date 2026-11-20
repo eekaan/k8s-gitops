@@ -407,12 +407,12 @@ reads:
 - A port that a process on the host network opens without declaring it in its pod: Cilium's health
   checks on TCP 4240, which the agent serves on its node's address
   ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/pkg/health/server/server.go#L436-L465)),
-  Envoy's health listener on TCP 9878, the kernel's VXLAN port, UDP 8472, and DRBD's replication,
-  which the kernel serves on a TCP port of 7000-7999 for each volume a node holds. No rule admits
-  such a port unless the inventory names it, so one that a client off the node needs and that has
-  no rule shows as a path that does not work, as the health checks, the overlay and DRBD's
-  replication would without theirs. Their rules are entries under `no-pod`, which say in prose what
-  listens there.
+  Envoy's health listener on TCP 9878, the kernel's VXLAN port, UDP 8472, Cilium's WireGuard
+  device on UDP 51871, and DRBD's replication, which the kernel serves on a TCP port of 7000-7999
+  for each volume a node holds. No rule admits such a port unless the inventory names it, so one
+  that a client off the node needs and that has no rule shows as a path that does not work, as the
+  health checks, the overlay, its encryption and DRBD's replication would without theirs. Their
+  rules are entries under `no-pod`, which say in prose what listens there.
 - A pod that an operator creates at run time, which no render holds. LINSTOR's CSI node plugin and
   its satellites are such pods on the host network, from the operator's templates: the plugin's
   ports are accounted for in prose, under [What gets no rule](#what-gets-no-rule), and the
@@ -484,6 +484,7 @@ BGP sessions to it, and ICMP at up to five packets a second.
 | `kube-scheduler` | TCP 10259 | control planes | `members`, `pods` | The scheduler's secure port, which Prometheus scrapes. |
 | `kubelet` | TCP 10250 | all | `members`, `pods` | The kubelet: the API server, for logs, exec and port forwarding, and metrics-server and Prometheus, for metrics. metrics-server serves the API's metrics, so a node it cannot reach makes that API unavailable, which breaks API discovery and the deletion of namespaces. |
 | `cilium-vxlan` | UDP 8472 | all | `members` | Cilium's overlay, which carries pod traffic between nodes in VXLAN on Linux's default port ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/Documentation/operations/system_requirements.rst#firewall-rules)). Cilium trusts the identity a VXLAN packet carries, so only the nodes may send it. |
+| `cilium-wireguard` | UDP 51871 | all | `members` | Cilium's WireGuard device, which each agent makes in the kernel and which the overlay's packets to another node pass through, encrypted, once Cilium's values turn WireGuard on: a peer's endpoint is the address its node is registered with, on this port ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/Documentation/operations/system_requirements.rst#firewall-rules), [kubernetes.md](kubernetes.md#encryption-between-nodes)). Only the agents send to it. |
 | `cilium-health` | TCP 4240 | all | `members` | Cilium's health checks between nodes; the ICMP echo they send as well is admitted by Talos itself. |
 | `hubble` | TCP 4244 | all | `members`, `pods` | The Hubble server in each node's Cilium agent, from which Hubble Relay reads the node's flows. |
 | `node-exporter` | TCP 9100 | all | `members`, `pods` | node-exporter, on the host network, which Prometheus scrapes. |
@@ -645,8 +646,9 @@ machine, each of these must pass, in this order:
    never answered, as it does not when the firewall drops it, which of its checks were still
    failing, or that it stopped answering at its own address once ready.
 8. `just cluster-check` passes: the Kubernetes API through the load balancer, every node Ready, the
-   pods of `kube-system` running, a pod's logs fetched through its kubelet and no scrape target of
-   the cluster's own components down.
+   pods of `kube-system` running, a pod's logs fetched through its kubelet, no scrape target of
+   the cluster's own components down, and, while Cilium's configuration turns WireGuard on, every
+   node's Cilium agent encrypting with a peer for every other node.
 9. The node's Talos API still reports the configuration in effect. Talos reverts a tried
    configuration once and for all, so one still in effect was in effect throughout the checks.
 
@@ -678,18 +680,21 @@ tried node, the checks open fresh connections on these paths:
 These are reached in the window as well, but on a connection that may be older than the try, so
 they are not proved there: the kubelet, TCP 10250, which the API server may reach on a connection it
 keeps (checks 3 and 8); Cilium's health port, TCP 4240, which Cilium probes on connections it keeps
-(check 4). And these are not reached in the window at all: etcd's peer and client ports, TCP
-2379-2380, whose members hold their streams open; etcd's metrics, the controller manager's and the
-scheduler's ports, TCP 2381, 10257 and 10259, and node-exporter's and the kubelet's from Prometheus,
-which keeps its scrape connections; the Cilium agents' metrics, TCP 9962, which Prometheus scrapes
-on a connection it keeps as well, and which no check asks for: their job, `cilium-agent`, is none of
-those `cluster-check` reads ([kubernetes.md](kubernetes.md#ciliums-metrics)); Hubble, TCP 4244,
-which Hubble Relay keeps; LINSTOR's satellites, TCP 3366-3367, to each of which the LINSTOR
-controller keeps its connection; DRBD's replication, TCP 7000-7999, whose peers keep theirs; the
-DRBD reactors' metrics, TCP 9942, which Prometheus scrapes on connections it keeps, and which no
-check asks for either; any path from a pod on the node itself, from the pod range; trustd, TCP
-50001, which a worker reaches when it joins; the CI host; and the nodes' floating addresses.
-`tests/node-firewall.bats` pins their rules offline.
+(check 4); Cilium's WireGuard port, UDP 51871, which carries the overlay's packets to another node
+while Cilium's values turn WireGuard on, on a connection each pair of devices keeps, as each sends
+to its peer from that port to that port (check 4, and item 7 below). And these
+are not reached in the window at all: etcd's peer and client ports, TCP 2379-2380, whose members
+hold their streams open; etcd's metrics, the controller manager's and the scheduler's ports, TCP
+2381, 10257 and 10259, and node-exporter's and the kubelet's from Prometheus, which keeps its scrape
+connections; the Cilium agents' metrics, TCP 9962, which Prometheus scrapes on a connection it keeps
+as well, and which no check asks for: their job, `cilium-agent`, is none of those `cluster-check`
+reads ([kubernetes.md](kubernetes.md#ciliums-metrics)); Hubble, TCP 4244, which Hubble Relay keeps;
+LINSTOR's satellites, TCP 3366-3367, to each of which the LINSTOR controller keeps its connection;
+DRBD's replication, TCP 7000-7999, whose peers keep theirs; the DRBD reactors' metrics, TCP 9942,
+which Prometheus scrapes on connections it keeps, and which no check asks for either; any path from
+a pod on the node itself, from the pod range; trustd, TCP 50001, which a worker reaches when it
+joins; the CI host; and the nodes' floating addresses. `tests/node-firewall.bats` pins their rules
+offline.
 
 After the rollout, each of these is proved once its client opens a new connection, which a restart
 makes it do. Until each has been, watch:
@@ -711,7 +716,18 @@ makes it do. Until each has been, watch:
    `linstor resource list` shows its resource Connected between the nodes that hold it, whose
    kernels connect to each other afresh on its port of 7000-7999
    ([kubernetes.md](kubernetes.md#storage)).
-7. trustd and the CI host stay unproved until a worker joins and the CI host connects; the paths
+7. Cilium's WireGuard, once Cilium's values turn it on and every agent has restarted into them
+   ([kubernetes.md](kubernetes.md#encryption-between-nodes)):
+   in each agent's `cilium-dbg debuginfo --output json`, every peer of `cilium_wg0` has a recent
+   `last-handshake-time`, and `cilium-health status` reports every node reachable through the
+   overlay, which then runs through the device. The handshakes do not prove the rule on every
+   node: the device sends from UDP 51871 to a peer's UDP 51871
+   ([Linux](https://github.com/gregkh/linux/blob/v6.18.63/drivers/net/wireguard/socket.c#L20-L95),
+   [the endpoint](https://github.com/cilium/cilium/blob/v1.20.4/pkg/wireguard/agent/agent.go#L575-L584)),
+   so a node's packets to a peer and the peer's to it are one connection to the firewall, and what
+   reaches a node from a peer it has sent to is a reply, which Talos admits whatever the rules say.
+   The rule is what admits a peer's packets that arrive before the node has sent that peer anything.
+8. trustd and the CI host stay unproved until a worker joins and the CI host connects; the paths
    from pods on a node to the node itself, until a pod there, such as Prometheus on a control
    plane, uses one.
 
@@ -1125,8 +1141,18 @@ take one now, `kubectl --namespace etcd-snapshots create job --from=cronjob/etcd
   as before `just cluster-config` has run, the check of its pods is skipped, and its line and the
   last line say so. The scrape check is skipped, saying why, while Prometheus's Service does not
   exist, as before the monitoring application is installed, and when it cannot be asked or does not
-  answer; its silence is never a pass. It runs `kubectl get` and `kubectl logs` only. It needs the
-  cluster's `talman.yaml` and kubeconfig.
+  answer; its silence is never a pass. While the ConfigMap `cilium-config` in `kube-system` turns
+  WireGuard on (`enable-wireguard: "true"`), the Running Cilium agent on every node the API lists
+  is asked `cilium-dbg encrypt status --output json` through `kubectl exec`, each call stopped
+  after 20 seconds, and must report the mode `Wireguard`, no message, which is where the agent's
+  and the kernel's states of the device disagreeing show, the one device `cilium_wg0` and as many
+  peers as there are other nodes, which it counts without matching them to the nodes; an answer
+  that is not one JSON object is no answer. A FAIL names each node and why, never a public key
+  ([kubernetes.md](kubernetes.md#encryption-between-nodes)). The check is skipped, saying so, while
+  `cilium-config` does not turn WireGuard on, and fails when it cannot be read. It runs
+  `kubectl get` and `kubectl logs`, and that one `kubectl exec`, so the kubeconfig then needs exec
+  on the agents' pods in `kube-system`, as `just network-drops` does. It needs the cluster's
+  `talman.yaml` and kubeconfig.
 - `just gateway-check [cluster]` says, reading only, whether the cluster's public Gateway serves:
   its objects through the kubeconfig, then requests through each edge router's floating address
   with `curl --resolve`, verified against the cluster CA's certificate, then the DNS records of the

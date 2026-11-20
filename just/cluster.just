@@ -87,7 +87,7 @@ postgres-dump-check namespace name dump='latest' cluster='lab-sto2':
 cluster-restore snapshot *args:
     scripts/cluster-restore "$@"
 
-# Check a cluster's health, reading only: /readyz through the kubeconfig, every node Ready and as many as talman.yaml lists, no Ready worker out of BGP, no kube-proxy, every pod in kube-system and flux-system Running or Succeeded, no certificate signing request Pending, a pod's logs fetched, no scrape target of the cluster's own components down in Prometheus; pass, FAIL or skip per check
+# Check a cluster's health, reading only: /readyz through the kubeconfig, every node Ready and as many as talman.yaml lists, no Ready worker out of BGP, no kube-proxy, every pod in kube-system and flux-system Running or Succeeded, no certificate signing request Pending, a pod's logs fetched, no scrape target of the cluster's own components down in Prometheus, and, while cilium-config turns WireGuard on, every node's Cilium agent encrypting with WireGuard with a peer for every other node, asked by its own cilium-dbg through kubectl exec, so the kubeconfig then needs exec on the agents' pods in kube-system; pass, FAIL or skip per check
 cluster-check cluster='lab-sto2':
     scripts/cluster-check {{ quote(cluster) }}
 

@@ -625,6 +625,7 @@ kube-controller-manager: no-pod
 kube-scheduler: no-pod
 kubelet: no-pod
 cilium-vxlan: no-pod
+cilium-wireguard: no-pod
 cilium-health: no-pod
 hubble: kube-system DaemonSet/cilium tcp 4244
 node-exporter: monitoring DaemonSet/kube-prometheus-stack-prometheus-node-exporter tcp 9100
@@ -1112,7 +1113,7 @@ kube-system Deployment/cilium-operator tcp 9234: no rule of the inventory admits
 kube-system Deployment/cilium-operator tcp 9963: no rule of the inventory admits it and the exceptions file does not list it under no-rule' ]
   on_copy rules
   [ "$status" -eq 1 ]
-  [ "$(grep -c 'a stale rule, or a listener to name there$' <<< "$output")" -eq 13 ]
+  [ "$(grep -c 'a stale rule, or a listener to name there$' <<< "$output")" -eq 14 ]
   on_copy monitors
   [ "$status" -eq 1 ]
   [ "$output" = 'the exceptions file does not exist' ]
@@ -1152,7 +1153,7 @@ no-pod entry 1 has the unknown key port'
   malformed 'the exceptions file has no list no-rule'
   copy not-a-map
   yq -i '.["no-pod"] += ["apid"]' "$COPY/exceptions.yaml"
-  malformed 'no-pod entry 14 is not a map of rule, reason'
+  malformed 'no-pod entry 15 is not a map of rule, reason'
   copy not-lists
   echo '[]' > "$COPY/exceptions.yaml"
   malformed 'the exceptions file is not a map of the lists no-rule and no-pod'

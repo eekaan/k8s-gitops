@@ -23,6 +23,11 @@ Feature: Nodes firewall themselves
     When every node's configuration is rendered
     Then every node's rules for UDP 8472 and TCP 4240 accept exactly the six nodes' own addresses, each as a single address, and not the node network
 
+  Scenario: Every node admits Cilium's WireGuard port from the nodes' own addresses alone
+    Given every node's machine configuration rendered offline from the fixture, and the inventory
+    When each node's rules are read
+    Then each of the six nodes has exactly one rule admitting UDP 51871, named cilium-wireguard, accepting exactly the six nodes' own addresses, each as a single address, and nothing else, the load balancer's and the floating addresses not among them, and no other rule admits that port
+
   Scenario: The Talos API and the Kubernetes API accept the operator allowlist, the nodes, the load balancer and the CI host, and nobody else
     Given fixture node data with an operator allowlist of two networks, the load balancer's address and pool on the node network, and the CI host's address there
     When every node's configuration is rendered
@@ -86,7 +91,7 @@ Feature: Nodes firewall themselves
   Scenario: The account of what a rollout proves names every port the firewall admits
     Given the inventory in talos/firewall.yaml and the section of docs/cluster.md on what the rollout's checks prove and what to watch afterwards
     When the section is read
-    Then every port and every port range of the inventory's sixteen rules is in it as a whole word
+    Then every port and every port range of the inventory's seventeen rules is in it as a whole word
 
   Scenario: The first rollout applies to one node in a self-reverting mode and stops unless the checks pass
     Given a cluster whose configuration changes a worker and a control plane

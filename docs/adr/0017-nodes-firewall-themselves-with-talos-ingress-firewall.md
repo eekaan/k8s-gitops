@@ -18,6 +18,8 @@
 - Amended: 2026-11-19, LINSTOR's satellites and their DRBD reactor run on the host network and,
   with DRBD's replication, are listeners of every node as well
   ([What each node admits](../cluster.md#what-each-node-admits))
+- Amended: 2026-11-19, Cilium's WireGuard port is a listener of every node as well, which accepts
+  the nodes' own addresses alone ([What each node admits](../cluster.md#what-each-node-admits))
 
 ## Context
 
