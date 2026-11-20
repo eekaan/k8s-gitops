@@ -93,7 +93,9 @@ extensions:
   ([Kata Containers](https://github.com/kata-containers/kata-containers/blob/main/docs/install/README.md)).
   On a node without it, a pod that selects `kata` does not start.
 
-No workload selects either runtime class. `infra-check` refuses the QEMU guest agent extension
+No workload of the tree selects either runtime class; `just runtime-check` runs pods under the one
+it is given while it checks whether a pod under it could host a sandbox
+([kubernetes.md](kubernetes.md#runtime-classes)). `infra-check` refuses the QEMU guest agent extension
 ([runbooks/image-replacement.md](runbooks/image-replacement.md)).
 
 ## Upgrades

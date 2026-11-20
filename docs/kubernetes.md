@@ -1570,10 +1570,11 @@ image adds ([cluster.md](cluster.md#the-node-image)), with the handler the exten
 gives: `gvisor`, handler `runsc`, and `kata`, handler `kata`, which also carries the overhead of
 Kata's virtual machine from that README, counted on top of a pod's requests. A RuntimeClass is
 cluster-scoped, so the application's `targetNamespace`, `kube-system` as for the resource
-definitions, gives it none. A pod selects one with `runtimeClassName`; none does. Flux applies them
-whatever image the nodes run, and a pod that selects one on a node whose image lacks its handler
-does not start. `tests/baseline.bats` builds the application as Flux applies it and checks the two
-classes and their handlers.
+definitions, gives it none. A pod selects one with `runtimeClassName`. No workload of the tree
+selects one; `just runtime-check` runs pods under the class it is given while it checks it (below).
+Flux applies them whatever image the nodes run, and a pod that selects one on a node whose image
+lacks its handler does not start. `tests/baseline.bats` builds the application as Flux applies it
+and checks the two classes and their handlers.
 
 **Pods under a sandbox runtime reach Services.** Serving Services in place of kube-proxy, Cilium by
 default translates a Service's address to a backend's where a socket connects or sends, in hooks on
@@ -1624,6 +1625,62 @@ the runtime classes Flux builds, in the applications and besides them, are exact
 renders no chart but Cilium's, so a class another chart would render goes unseen), the value is
 set, the agents' rendered configuration holds it beside kube-proxy replacement, and one paragraph,
 in this section, opens with the first sentence of the paragraph above.
+
+**Whether a runtime class can host a sandbox.** `just runtime-check <class> [cluster]`, for
+`kata`, `gvisor` or `none` (the default runtime), says check by check whether a pod under that class
+could host an OpenShell sandbox, whose runtime confines its agent with Landlock, seccomp user
+notification and reads of the task's memory and fails closed without them. It runs three pods on
+one node. `probe` runs OpenShell's own capability probe, the sandbox runtime of the image
+`openshell_sandbox_image` pins run as `capability-probe`, under the class and with the security
+context OpenShell 0.1.9 gives a sandbox's workload pod: user and group 10001, `fsGroup` 10001 and no
+other supplementary group (`supplementalGroupsPolicy: Strict`), the runtime's seccomp profile, the
+sysctl `net.ipv4.ip_unprivileged_port_start=0`, no privilege escalation and every capability
+dropped, with a `/tmp` of its own, as the image has none. `net`, under the class, and `reference`,
+under the default runtime on `net`'s node, run a script in the Cilium agents' image
+(`cilium_agent_image`). The recipe prints a line naming the class, the node, the kernel release and
+the LSMs `net` saw, then `pass` or `FAIL`, with the reason, for each of four checks. `kernel`:
+whether the probe exited 0 with a report that says qualified; the line names, of what the probe
+found, the Landlock ABI, seccomp user notification with its descriptor hand-over and the copy of a
+task's memory, facilities
+[OpenShell's support matrix](https://github.com/NVIDIA/OpenShell/blob/v0.1.9/docs/about/support-matrix.mdx#kernel-requirements)
+requires; otherwise it shows the exit code and the end of the probe's diagnostic. `name`: whether
+`kube-dns.kube-system.svc` resolves within 10 seconds; `service`: whether a TCP connection to the
+address it gave opens on port 53 within 5. Both go to the resolver's Service address, which every
+pod off the host network relies on, so they fail where Service addresses are not translated for
+pods under the class. `mtu`: whether the MTU of `net`'s default route, the route's own or else its
+device's, is `reference`'s. Cilium's CNI gives a pod's device the device MTU and its default route
+that MTU less the tunnel's overhead, 50 for VXLAN over IPv4 (`pkg/mtu/mtu.go`,
+`plugins/cilium-cni/cmd/cmd.go`), and, Cilium's guide says, Kata copies the device's MTU into its
+virtual machine and not the route's
+([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/Documentation/network/kubernetes/kata.rst#limitations)).
+gVisor's `runsc`, at the release the node image's extension ships, gives its network stack each
+route's MTU as it finds it in the pod's network namespace (`runsc/sandbox/network.go`), but that
+stack reports no route MTU and serves no `/sys/class/net`, so under `gvisor` neither can be read and
+`mtu` fails on what it cannot read in the pod, not on a route MTU that differs. A pod that does not
+start or end fails the checks it feeds, with what it says of itself and the namespace's Warning
+events for it. The run exits non-zero when a check fails, and it judges no class. Its pods run in
+the namespace `runtime-check`, which it makes and deletes however it ends, naming it when it stays,
+and saying, when its create got no answer and none is there, that one may yet come of it; the
+namespace enforces the `restricted` level and holds the tree's default deny and one policy of its
+own, which lets `net` and `reference` reach the resolver on 53, UDP and TCP, and nothing else, so
+whether the cluster audits or enforces network policy changes nothing for these flows. An earlier
+run's namespace, known by the label `app.kubernetes.io/managed-by: runtime-check`, is deleted first,
+and one without the label is refused. Beside that, the run deletes only what it made: each deletion
+carries the uid of the namespace it means as a precondition the API server checks, the uid the
+create answered with or, when that answer did not come, that of the namespace there if it carries
+the label, which may then be another checkout's run's. A namespace another party made, found when
+the run makes its own or in its place, is left alone, and the run says so. The run judges only the
+pods it made, each known by the uid its create answered with. Before it makes a pod it checks that
+its namespace is the one it made and not being deleted; as a create cannot be made conditional on
+the namespace's uid, another can still take its place in between, and the run then fails. It reads
+its pods' logs by name, so once it has read one it checks that its namespace is still the one it
+made, and when another has taken its place, as when another checkout's run deletes the run's as an
+earlier run's and makes its own, it prints no check and fails. A run whose namespace went without its
+own deletion answered as done fails too, as another party's deletion and a lost answer look alike.
+The run holds the cluster's lock, which binds this checkout's recipes alone, and
+`RUNTIME_CHECK_TIMEOUT` (300 seconds) bounds each of its waits and the pods' own deadline. Run it
+after every change of the node image, a Talos upgrade or a new version of an extension, and after a
+change of Cilium's values.
 
 **A namespace asks for a sandbox tier.** The label `k8s-gitops/sandbox` on a namespace's
 `namespace.yaml` names the isolation every pod of the namespace runs with, one of three values,

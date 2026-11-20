@@ -76,6 +76,7 @@ tests/render.bats	92
 tests/renovate-pins.bats	22
 tests/robot.bats	222
 tests/rules-check.bats	974
+tests/runtime-check.bats	171
 tests/scenarios-check.bats	1
 tests/secret-rotate.bats	47
 tests/signatures.bats	141
