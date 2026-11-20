@@ -118,7 +118,7 @@ EOF
   )
   reset_environment
   CHECKS=('/readyz' 'nodes Ready' 'node count' 'workers in BGP' 'no kube-proxy' 'pods in kube-system' 'pods in flux-system'
-    'certificate requests' 'pod logs' 'scrape targets')
+    'certificate requests' 'pod logs' 'scrape targets' 'encryption')
 }
 
 teardown() {
@@ -285,6 +285,11 @@ no_tofu() {
   [ "$(grep -cE '^(pass|FAIL|skip)  ' <<< "$output")" -eq "${#CHECKS[@]}" ]
   [[ $(line_of 'nodes Ready') == *"6 nodes"* ]]
   [[ $output == *"cluster-check: every check of lab-sto2 passes"* ]]
+  # Every node's agent encrypts with WireGuard and has a peer for each of the five other nodes; each
+  # was asked once, and no public key or address is printed.
+  [ "$(line_of encryption)" = 'pass  encryption: the agents of all 6 nodes encrypt with WireGuard through cilium_wg0, each with a peer for each of the other 5' ]
+  [ "$(calls '^kubectl exec ' | sort)" = "$(sed 's/.*/kubectl exec --namespace kube-system --container cilium-agent cilium-& -- cilium-dbg encrypt status --output json/' "$STATE/nodes" | sort)" ]
+  [[ $output != *marker-wireguard-key* && $output != *198.51.100.* ]]
 
   # The same cluster by name.
   recipe cluster-check lab-sto2
@@ -364,8 +369,11 @@ no_tofu() {
   [ "$status" -ne 0 ]
   calls '^kubectl get ' | grep -q .
   calls '^kubectl logs ' | grep -q .
-  # Every call the record holds is a kubectl get or logs.
-  [ "$(grep -cvE '^kubectl (get|logs) ' "$RECORD/argv")" -eq 0 ]
+  calls '^kubectl exec ' | grep -q .
+  # Every call the record holds is a kubectl get or logs, or the one exec, of cilium-dbg encrypt
+  # status --output json in the container cilium-agent of a node's Cilium agent pod.
+  agents=$(sed 's/^/cilium-/' "$STATE/nodes" | paste -sd'|' -)
+  [ "$(grep -cvE "^kubectl (get|logs) |^kubectl exec --namespace kube-system --container cilium-agent ($agents) -- cilium-dbg encrypt status --output json\$" "$RECORD/argv")" -eq 0 ]
   [ "$(snapshot)" = "$before" ]
 }
 
@@ -479,6 +487,85 @@ no_tofu() {
     [[ ${output##*$'\n'} == *"skipped: scrape targets"* ]]
     [[ $output != *198.51.100.* ]]
   done
+}
+
+@test "cluster-check fails, naming the node, while an agent does not encrypt with every other node" {
+  # Each condition as the state file that makes it, what the file holds, and the line it gives.
+  conditions=(
+    'encrypt-mode.cp-2|Disabled|cp-2: mode Disabled'
+    'encrypt-mode.worker-1|IPsec|worker-1: mode IPsec'
+    'encrypt-mode.cp-3|wireguard|cp-3: mode wireguard'
+    'encrypt-peers.worker-2|4|worker-2: 4 of 5 peers'
+    'encrypt-peers.worker-3|6|worker-3: 6 of 5 peers'
+    'encrypt-peers.cp-1|0|cp-1: 0 of 5 peers'
+    'encrypt-interface.cp-2|wg0|cp-2: no single device cilium_wg0'
+    'encrypt-interface.worker-3|cilium_wg0 wg1|worker-3: no single device cilium_wg0'
+    'encrypt-msg.worker-1||worker-1: agent and kernel disagree'
+    'encrypt-silent.worker-2||worker-2: no answer'
+    'encrypt-answer.cp-1||cp-1: no answer'
+    'encrypt-answer.worker-1|Encryption: Wireguard|worker-1: no answer'
+    # A healthy answer counts only from a call that succeeds, and only alone.
+    'encrypt-exit.worker-3|1|worker-3: no answer'
+    'encrypt-answer.cp-2|{"mode":"Wireguard","wireguard":{"interfaces":[{"name":"cilium_wg0","peer-count":5}]}}{"mode":"Wireguard","wireguard":{"interfaces":[{"name":"cilium_wg0","peer-count":5}]}}|cp-2: no answer'
+    'encrypt-no-agent.cp-3||cp-3: no agent running'
+    'encrypt-agent-name.cp-2|cilium-cp-2 --all-namespaces|cp-2: no agent running'
+  )
+  for condition in "${conditions[@]}"; do
+    IFS='|' read -r file content line <<< "$condition"
+    echo "$file: $content"
+    reset_cluster
+    printf '%s' "$content" > "$STATE/$file"
+    started=$SECONDS
+
+    recipe cluster-check
+
+    [ "$status" -ne 0 ]
+    [ "$(line_of encryption)" = "FAIL  encryption: $line" ]
+    for other in "${CHECKS[@]}"; do
+      if [[ $other != encryption ]]; then
+        [[ $(line_of "$other") == "pass  $other: "* ]]
+      fi
+    done
+    [[ $output == *"cluster-check: 1 of ${#CHECKS[@]} checks failed"* ]]
+    # The run still ends naming the step it failed in, as every failing run of the script does.
+    [ "$(script_lines | tail -1)" = 'cluster-check: failed while checking the cluster' ]
+    # Neither a public key, the message that names them, nor an address.
+    [[ $output != *marker-wireguard-key* && $output != *mismatch* && $output != *198.51.100.* ]]
+    if [[ $file == encrypt-silent.* ]]; then
+      # The call is stopped after 20 seconds, well before the agent would answer, and leaves nothing.
+      echo "took $((SECONDS - started))s"
+      [ "$((SECONDS - started))" -lt 50 ]
+      nothing_left
+    fi
+  done
+}
+
+@test "cluster-check skips the encryption check, saying why, while Cilium's configuration does not turn WireGuard on" {
+  : > "$STATE/no-wireguard"
+
+  recipe cluster-check
+
+  [ "$status" -eq 0 ]
+  [ "$(line_of encryption)" = 'skip  encryption: cilium-config does not turn WireGuard on, as its enable-wireguard is not "true", so no agent was asked' ]
+  [ -z "$(calls '^kubectl exec ')" ]
+  for check in "${CHECKS[@]}"; do
+    if [[ $check != encryption ]]; then
+      [[ $(line_of "$check") == "pass  $check: "* ]]
+    fi
+  done
+  [[ ${output##*$'\n'} == *"skipped: encryption"* ]]
+
+  # A ConfigMap that cannot be read fails the check: that silence is no reason to skip it.
+  reset_cluster
+  : > "$STATE/cilium-config-unreadable"
+
+  recipe cluster-check
+
+  [ "$status" -ne 0 ]
+  [ "$(line_of encryption)" = 'FAIL  encryption: kubectl could not read the ConfigMap cilium-config in kube-system' ]
+  [ -z "$(calls '^kubectl exec ')" ]
+  [[ $output == *"cluster-check: 1 of ${#CHECKS[@]} checks failed"* ]]
+  [[ $output != *198.51.100.* ]]
 }
 
 @test "A reboot that the API rides out passes" {
