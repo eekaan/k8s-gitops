@@ -354,17 +354,19 @@ docs() {
     [external-secrets]='/external-secrets/external-secrets/ks.yaml$' [openbao-store]='/external-secrets/openbao-store/ks.yaml$'
     [gateway-public]='/envoy-gateway-system/gateway-public/ks.yaml$' [cilium]='/kube-system/cilium/ks.yaml$'
     [blackbox-exporter]='/monitoring/blackbox-exporter/ks.yaml$')
-  # Who names each dependency: ascender all of them, and ascender-operator cilium and
-  # external-secrets.
-  local -A dependents=([cilium]="ascender-operator ascender" [external-secrets]="ascender-operator ascender")
+  # Who names each dependency: ascender all of them, and ascender-operator cilium,
+  # external-secrets and openbao-store.
+  local -A dependents=([cilium]="ascender-operator ascender" [external-secrets]="ascender-operator ascender"
+    [openbao-store]="ascender-operator ascender")
   # The overlay selects it with three entries: the namespace directory and the two ks.yaml.
   [ "$(yq '.resources[] | select(test("/ascender(/|$)"))' "$OVERLAY_DIR/kustomization.yaml" | LC_ALL=C sort | paste -sd' ' -)" \
     = "../../base/ascender ../../base/ascender/ascender-operator/ks.yaml ../../base/ascender/ascender/ks.yaml" ]
   overlay
   [ "$(of_namespace "$OVERLAY")" = ConfigMap/ascender/app-template-defaults,Kustomization/flux-system/ascender,Kustomization/flux-system/ascender-operator,Namespace/-/ascender,NetworkPolicy/ascender/default-deny ]
   # The operator's application waits for its release and names what its objects need first: the
-  # policies' kind, and External Secrets', whose kinds make the database's Secret.
-  [ "$(yq -N 'select(.kind == "Kustomization" and .metadata.name == "ascender-operator") | .spec.dependsOn | map(.name) | join(" ")' "$OVERLAY")" = "cilium external-secrets" ]
+  # policies' kind, External Secrets', whose kinds make the database's Secret and the secret key's,
+  # and the store's, which the secret key is read from.
+  [ "$(yq -N 'select(.kind == "Kustomization" and .metadata.name == "ascender-operator") | .spec.dependsOn | map(.name) | join(" ")' "$OVERLAY")" = "cilium external-secrets openbao-store" ]
   [ "$(yq -N 'select(.kind == "Kustomization" and .metadata.name == "ascender-operator") | .spec.wait' "$OVERLAY")" = true ]
   [ "$(yq -N 'select(.kind == "Kustomization" and .metadata.name == "ascender-operator") | .spec.targetNamespace' "$OVERLAY")" = "$NAMESPACE" ]
   # Ascender's names the operator, whose chart defines the kind AWX, and what its database, route,
@@ -560,11 +562,13 @@ docs() {
   done
   # The AWX sets these fields and no other: each is modelled in the pods evaluated below (the
   # images, the restricted mode and its pod context) or adds nothing Pod Security reads (settings,
-  # probes, requests, the database's Secret and the instance's shape). Any other field, such as
-  # extra_volumes, a *_extra_volume_mounts or init_container_extra_commands, which add volumes,
-  # mounts and commands to the operator's pods, is refused until those pods model it.
+  # probes, requests, the database's Secret, the secret key's Secret, which names only the Secret
+  # volume the operator's pods mount the key from whether it is set or not, and the instance's
+  # shape). Any other field, such as extra_volumes, a *_extra_volume_mounts or
+  # init_container_extra_commands, which add volumes, mounts and commands to the operator's pods, is
+  # refused until those pods model it.
   echo "the AWX sets: $(jq -r '.spec | keys | join(" ")' "$AWX")"
-  [ "$(jq -r '.spec | keys | join(" ")' "$AWX")" = "admin_user control_plane_ee_image create_preload_data csrf_cookie_secure ee_images ee_resource_requirements extra_settings garbage_collect_secrets image image_version ingress_type init_container_image init_container_image_version init_container_resource_requirements postgres_configuration_secret redis_image redis_image_version redis_resource_requirements replicas restricted_security_context rsyslog_resource_requirements security_context_settings service_type session_cookie_secure task_liveness_initial_delay task_liveness_period task_resource_requirements web_liveness_initial_delay web_liveness_period web_readiness_period web_resource_requirements" ]
+  [ "$(jq -r '.spec | keys | join(" ")' "$AWX")" = "admin_user control_plane_ee_image create_preload_data csrf_cookie_secure ee_images ee_resource_requirements extra_settings garbage_collect_secrets image image_version ingress_type init_container_image init_container_image_version init_container_resource_requirements postgres_configuration_secret redis_image redis_image_version redis_resource_requirements replicas restricted_security_context rsyslog_resource_requirements secret_key_secret security_context_settings service_type session_cookie_secure task_liveness_initial_delay task_liveness_period task_resource_requirements web_liveness_initial_delay web_liveness_period web_readiness_period web_resource_requirements" ]
   docs "group-writable for gid 0"
   # The pods the operator writes from it, web and task, pass restricted; without the restricted
   # mode, with an added capability or with a privileged task container, they do not.
@@ -919,16 +923,19 @@ docs() {
   [ "$(jq -cS '.spec.dataFrom' <<<"$es")" = '[{"sourceRef":{"generatorRef":{"apiVersion":"generators.external-secrets.io/v1alpha1","kind":"Password","name":"ascender-db-app"}}}]' ]
   keys="$(jq -cS '.spec.target.template.data' <<<"$es")"
   [ "$keys" = '{"database":"app","dbname":"app","host":"ascender-db-rw","password":"{{ .password }}","port":"5432","sslmode":"require","type":"unmanaged","username":"app"}' ]
-  [ -z "$(yq -N 'select(.kind == "ExternalSecret" or .kind == "Password") | .metadata.name' "$APP_BUILT" | grep -vE '^ascender-db-(backup|dump-s3)$' || true)" ]
+  [ -z "$(yq -N 'select(.kind == "ExternalSecret") | .metadata.name' "$APP_BUILT" | grep -vE '^ascender-db-(backup|dump-s3)$' || true)" ]
+  [ -z "$(yq -N 'select(.kind == "Password") | .metadata.name' "$APP_BUILT")" ]
   # Every other Cluster of app/ is a restore's, which names as its owner's a Secret of its own name
-  # followed by -app; and every other Password and ExternalSecret of the operator's application is
-  # such a Secret: the copy of ascender-db-app's two that the restore's pull request adds, under that
-  # name, with the restore's host and every other key as it is (the file of step 2 of the
-  # point-in-time restore of docs/runbooks/postgres-restore.md; docs/kubernetes.md, Ascender,
-  # Restoring the database).
+  # followed by -app; and every other Password and ExternalSecret of the operator's application, but
+  # the ExternalSecret of the Secret the AWX names for its secret key (the last test), is such a
+  # Secret: the copy of ascender-db-app's two that the restore's pull request adds, under that name,
+  # with the restore's host and every other key as it is (the file of step 2 of the point-in-time
+  # restore of docs/runbooks/postgres-restore.md; docs/kubernetes.md, Ascender, Restoring the
+  # database).
   restores="$(yq -N -o json -I0 'select(.kind == "Cluster" and .metadata.name != "ascender-db")' "$APP_BUILT" |
     jq -r '.metadata.name + " " + ([(.spec.bootstrap // {})[] | .secret.name // empty] | join(","))' | sort)"
-  copies="$(yq -N 'select((.kind == "Password" or .kind == "ExternalSecret") and .metadata.name != "ascender-db-app") | .kind + " " + .metadata.name' "$OPERATOR_BUILT" | sort)"
+  copies="$(SECRET="$(jq -r '.spec.secret_key_secret // ""' "$AWX")" yq -N 'select((.kind == "Password" or .kind == "ExternalSecret") and .metadata.name != "ascender-db-app"
+    and (.kind != "ExternalSecret" or (.spec.target.name // .metadata.name) != strenv(SECRET))) | .kind + " " + .metadata.name' "$OPERATOR_BUILT" | sort)"
   echo "the restores' Clusters and their owners' Secrets: ${restores:-none}; their copies of ascender-db-app: ${copies:-none}"
   while read -r new secret; do
     [ -n "$new" ] || continue
@@ -949,10 +956,11 @@ docs() {
   done <<<"$restores"
   [ "$(awk '{ print $2 }' <<<"$copies" | sort -u | grep . || true)" = "$(awk '{ print $2 }' <<<"$restores" | sort -u | grep . || true)" ] ||
     { echo "ascender-operator builds a Password or an ExternalSecret that no restore's Cluster names"; return 1; }
-  # The AWX names it as its database, and leaves the admin password and the secret key to the
-  # operator, which keeps the Secrets it makes after the AWX.
-  [ "$(jq -c '[.spec.postgres_configuration_secret, .spec.admin_user, .spec.garbage_collect_secrets, (.spec.admin_password_secret // "unset"), (.spec.secret_key_secret // "unset"), (.spec.broadcast_websocket_secret // "unset")]' "$AWX")" \
-    = '["ascender-db-app","admin",false,"unset","unset","unset"]' ]
+  # The AWX names it as its database, and leaves the admin password and the websocket secret to the
+  # operator, which keeps the Secrets it makes after the AWX; the secret key is the store's (the
+  # last test).
+  [ "$(jq -c '[.spec.postgres_configuration_secret, .spec.admin_user, .spec.garbage_collect_secrets, (.spec.admin_password_secret // "unset"), (.spec.broadcast_websocket_secret // "unset")]' "$AWX")" \
+    = '["ascender-db-app","admin",false,"unset","unset"]' ]
   # The task container's memory limit, which the operator writes as SYSTEM_TASK_ABS_MEM
   # (roles/installer/templates/configmaps/config.yaml.j2 of its tag), the memory the dispatcher
   # sizes its pool of workers by. The sum of connections that follows, under PostgreSQL's default of
@@ -963,4 +971,122 @@ docs() {
   [ -z "$(yq -N 'select(.kind == "Secret") | .metadata.name' "$OPERATOR_BUILT" "$APP_BUILT")" ]
   [ -z "$(grep -rniE '(password|secret_key)[^:]*: *[A-Za-z0-9+/]{16,}' "$BASE" || true)" ]
   docs "kubectl --namespace ascender get secret ascender-admin-password --output jsonpath='{.data.password}' | base64 -d; echo"
+}
+
+# shellcheck disable=SC2016 # the backquotes are Markdown's.
+@test "Ascender's secret key comes from the secret store, and the operator generates none" {
+  local secret es path property lines joined command place last first resume pattern text
+  both
+  overlay
+  # The AWX names the Secret External Secrets writes from the store. The operator takes the key from
+  # a Secret named so whenever it exists at the start of a run, and generates its own only when
+  # neither that one nor its own exists (roles/installer/tasks/secret_key_configuration.yml of its
+  # tag). The admin password and the websocket secret stay the operator's, which keeps them after
+  # the AWX.
+  [ "$(jq -c '[.spec.secret_key_secret, (.spec.admin_password_secret // "unset"), (.spec.broadcast_websocket_secret // "unset"), .spec.garbage_collect_secrets]' "$AWX")" \
+    = '["ascender-secret-key-from-store","unset","unset",false]' ]
+  secret="$(jq -r '.spec.secret_key_secret' "$AWX")"
+  # Not the operator's own Secret, <name>-secret-key, which External Secrets would take over.
+  [ "$secret" != "$(jq -r '.metadata.name' "$AWX")-secret-key" ]
+  # One ExternalSecret writes it, in the application ascender waits for, and none in ascender.
+  [ -z "$(SECRET="$secret" yq -N 'select(.kind == "ExternalSecret" and (.spec.target.name // .metadata.name) == strenv(SECRET)) | .metadata.name' "$APP_BUILT")" ]
+  es="$(SECRET="$secret" yq -N -o json -I0 'select(.kind == "ExternalSecret" and (.spec.target.name // .metadata.name) == strenv(SECRET))' "$OPERATOR_BUILT")"
+  echo "the ExternalSecret of $secret: ${es:-none}"
+  [ "$(grep -c . <<<"$es")" -eq 1 ]
+  # The property secret-key at ascender/ascender of the store, as the key secret_key the operator
+  # mounts; refreshed every 15 minutes, by the periodic policy; orphaned, as the operator strips the
+  # owner references of the Secret it is given on every run; immutable; no template, no generator.
+  [ "$(jq -cS '{name: .metadata.name, spec: .spec}' <<<"$es")" \
+    = '{"name":"ascender-secret-key-from-store","spec":{"data":[{"remoteRef":{"key":"ascender/ascender","property":"secret-key"},"secretKey":"secret_key"}],"refreshInterval":"15m","secretStoreRef":{"kind":"ClusterSecretStore","name":"openbao"},"target":{"creationPolicy":"Orphan","immutable":true,"name":"ascender-secret-key-from-store"}}}' ]
+  # The operator's application waits and names the store's, so the Secret exists before ascender,
+  # which names the operator's, applies the AWX.
+  [ "$(yq -N -o json -I0 'select(.kind == "Kustomization" and .metadata.name == "ascender-operator")' "$OVERLAY" |
+    jq -c '[.spec.wait, (.spec.dependsOn | map(.name) | any(. == "openbao-store"))]')" = '[true,true]' ]
+  [ "$(yq -N -o json -I0 'select(.kind == "Kustomization" and .metadata.name == "ascender")' "$OVERLAY" |
+    jq -c '[.spec.wait, (.spec.dependsOn | map(.name) | any(. == "ascender-operator"))]')" = '[true,true]' ]
+  # The rotation list has the key the ExternalSecret reads as one that data is encrypted under.
+  path="$(jq -r '.spec.data[0].remoteRef.key' <<<"$es")"
+  property="$(jq -r '.spec.data[0].remoteRef.property' <<<"$es")"
+  [ "$(STORE_PATH="$path" KEY="$property" yq -o json -I0 '[.secrets[] | select(.path == strenv(STORE_PATH) and .key == strenv(KEY)) | .rotation]' "$REPO/secret-rotation.yaml" | jq -c .)" = '["re-encryption"]' ]
+  # Nothing built is a Secret. No generator makes the key: its ExternalSecret, held whole above,
+  # reads the store, and the database's test holds every Password to the database's or a restore's.
+  [ -z "$(yq -N 'select(.kind == "Secret") | .metadata.name' "$OPERATOR_BUILT" "$APP_BUILT")" ]
+  # The docs give the first write and the carry of a key the operator made as pipes into bao-put,
+  # and name the recipe for the key nowhere else, so no value goes on a command line; and they give
+  # the line Ascender logs when a stored secret does not open under the key it has
+  # (decrypt_field in awx/main/utils/encryption.py of the pinned image).
+  docs "head -c 32 /dev/urandom | od -An -vtx1 | tr -d ' \n' | just bao-put $path $property"
+  docs "kubectl --namespace ascender get secret ascender-secret-key --output jsonpath='{.data.secret_key}' | base64 -d | just bao-put $path $property"
+  echo "the docs' uses of bao-put for it: $(tr -s '\n ' '  ' <"$REPO/docs/kubernetes.md" | grep -oE '.{2}just bao-put ascender/[^ ]* [^ `]*' | LC_ALL=C sort | uniq -c | paste -sd';' -)"
+  [ "$(tr -s '\n ' '  ' <"$REPO/docs/kubernetes.md" | grep -oE '.{2}just bao-put ascender/[^ ]* [^ `]*' | LC_ALL=C sort -u)" = "| just bao-put $path $property" ]
+  docs "if you've recently restored from a database backup or are running in a clustered environment, check that your \`SECRET_KEY\` value is correct"
+  # The docs' lines, without their indentation, and their text joined, so a command split over lines
+  # is read too.
+  lines="$BATS_TEST_TMPDIR/docs-lines"
+  joined="$BATS_TEST_TMPDIR/docs-joined"
+  sed -E 's/^ +//' "$REPO/docs/kubernetes.md" >"$lines"
+  tr -s '\n ' '  ' <"$REPO/docs/kubernetes.md" >"$joined"
+  # The docs write the Secret again only once the operator's release is suspended, as drift detection
+  # would start the operator again; the operator is stopped, so that no run of it starts the pods or
+  # creates the Secret empty while it is missing; and no pod mounts it, as the kubelet of a node gives
+  # each pod there the copy of an immutable Secret it first read for as long as a pod there that
+  # mounts it runs (pkg/kubelet/util/manager/watch_based_manager.go of Kubernetes). The operator then
+  # starts again, and each pod's key is compared with the Secret's. Each command once, in this order.
+  cat >"$BATS_TEST_TMPDIR/recovery" <<'EOF'
+flux suspend helmrelease ascender-operator --namespace ascender
+kubectl --namespace ascender scale deployment/awx-operator-controller-manager --replicas 0
+kubectl --namespace ascender get pods --selector control-plane=controller-manager --output name
+kubectl --namespace ascender scale deployment/ascender-web deployment/ascender-task --replicas 0
+kubectl --namespace ascender get pods --output json | jq -r '.items[] | select(any(.spec.volumes[]?; .secret.secretName == "ascender-secret-key-from-store")) | "\(.metadata.name) \(.status.phase)"'
+kubectl --namespace ascender delete secret ascender-secret-key-from-store
+kubectl --namespace ascender annotate externalsecret ascender-secret-key-from-store force-sync="$(date +%s)" --overwrite
+kubectl --namespace ascender get secret ascender-secret-key-from-store --output jsonpath='{.data}' | jq -c keys
+kubectl --namespace ascender scale deployment/awx-operator-controller-manager --replicas 1
+flux resume helmrelease ascender-operator --namespace ascender
+[ "$(kubectl --namespace ascender exec "$pod" -c ascender-$app -- sha256sum /etc/tower/SECRET_KEY | cut -d' ' -f1)" = "$(kubectl --namespace ascender get secret ascender-secret-key-from-store --output jsonpath='{.data.secret_key}' | base64 -d | sha256sum | cut -d' ' -f1)" ] && echo "$pod same" || echo "$pod differ"
+EOF
+  last=0
+  while IFS= read -r command; do
+    place="$(grep -nxF -- "$command" "$lines" | cut -d: -f1 | paste -sd' ' -)"
+    echo "line ${place:-none}: $command"
+    [ "$(grep -cxF -- "$command" "$lines")" -eq 1 ]
+    [ "$place" -gt "$last" ]
+    last="$place"
+  done <"$BATS_TEST_TMPDIR/recovery"
+  # From the suspend to the resume the block holds these commands alone, so no other command starts
+  # the operator or the pods while the Secret is missing.
+  first="$(grep -nxF -- "$(head -n 1 "$BATS_TEST_TMPDIR/recovery")" "$lines" | cut -d: -f1)"
+  resume="$(grep -nxF -- 'flux resume helmrelease ascender-operator --namespace ascender' "$lines" | cut -d: -f1)"
+  [ "$(sed -n "${first},${resume}p" "$lines")" = "$(sed -n '1,/^flux resume /p' "$BATS_TEST_TMPDIR/recovery")" ]
+  # Each read is repeated until the next step may follow: the operator's pod gone; every pod that
+  # mounts the Secret finished, either way, as the kubelet lets go of a finished pod's Secrets
+  # (SyncTerminatedPod in pkg/kubelet/kubelet.go of Kubernetes); the Secret written again.
+  docs "the third until it prints nothing, once the operator's pod is gone; the fifth until every pod it prints has finished, \`Succeeded\` or \`Failed\`"
+  docs "the eighth until it prints \`[\"secret_key\"]\`"
+  # Every docs line that runs bao-put for the key, names one of its Secrets, reads secret_key or the
+  # file the pods hold the key in, or lists the namespace's Secrets as YAML or JSON, is one of these,
+  # each once, and no command split over lines adds another: the first write and the carry, the only
+  # writes, so no value goes on a command line; the delete of the store's Secret in the steps above;
+  # the check of the store's Secret's keys; and the comparison of a pod's key with the Secret's inside
+  # the shell, which prints neither the key nor a digest of it.
+  cat >"$BATS_TEST_TMPDIR/key-commands" <<'EOF'
+head -c 32 /dev/urandom | od -An -vtx1 | tr -d ' \n' | just bao-put ascender/ascender secret-key
+kubectl --namespace ascender get secret ascender-secret-key --output jsonpath='{.data.secret_key}' | base64 -d | just bao-put ascender/ascender secret-key
+kubectl --namespace ascender delete secret ascender-secret-key-from-store
+kubectl --namespace ascender get secret ascender-secret-key-from-store --output jsonpath='{.data}' | jq -c keys
+[ "$(kubectl --namespace ascender exec "$pod" -c ascender-$app -- sha256sum /etc/tower/SECRET_KEY | cut -d' ' -f1)" = "$(kubectl --namespace ascender get secret ascender-secret-key-from-store --output jsonpath='{.data.secret_key}' | base64 -d | sha256sum | cut -d' ' -f1)" ] && echo "$pod same" || echo "$pod differ"
+EOF
+  # The file's path in backquotes alone is the docs naming it, not a command reading it.
+  pattern='bao-put ascender/|(^|[^a-z])secrets?[/ ]ascender-secret-key|secret_key\}|data\.secret_key|(^|[^`])/etc/tower/SECRET_KEY'
+  {
+    grep -E -- "$pattern" "$lines"
+    grep -vE -- "$pattern" "$lines" | grep -E 'get secrets?( |$)' |
+      grep -E '(-n|--namespace)[ =]ascender( |$)|(-A|--all-namespaces)( |$)' |
+      grep -E '(-o|--output)[ =]?(yaml|json)([^a-z]|$)' || true
+  } | LC_ALL=C sort >"$BATS_TEST_TMPDIR/key-lines"
+  echo "the docs' lines for the key: $(uniq -c "$BATS_TEST_TMPDIR/key-lines")"
+  [ "$(cat "$BATS_TEST_TMPDIR/key-lines")" = "$(LC_ALL=C sort "$BATS_TEST_TMPDIR/key-commands")" ]
+  for text in 'bao-put ascender/' 'get secret ascender-secret-key' 'data.secret_key'; do
+    [ "$(grep -oF -- "$text" "$joined" | grep -c .)" -eq "$(grep -oF -- "$text" "$BATS_TEST_TMPDIR/key-commands" | grep -c .)" ]
+  done
 }

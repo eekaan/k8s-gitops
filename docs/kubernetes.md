@@ -7616,7 +7616,7 @@ patch whose text names the kind.
 | Rotation | What it says of the key | How the key is rotated |
 | --- | --- | --- |
 | `generated` | Any new random value will do. | `just secret-rotate <path> <key>`, below. `greeting` at `demo/hello` is the only one. |
-| `re-encryption` | Data is encrypted under the value. | By no recipe: a new value loses that data unless it is encrypted again under it, and the application's section says what that would take. They are n8n's encryption key ([n8n](#n8n)), the volume backups' master password ([Volume backups](#the-repository-and-its-password)) and the PostgreSQL backups' customer key ([Backups and restores](#backups-and-restores)), and none is rotated. |
+| `re-encryption` | Data is encrypted under the value. | By no recipe: a new value loses that data unless it is encrypted again under it, and the application's section says what that would take. They are n8n's encryption key ([n8n](#n8n)), Ascender's secret key ([Ascender](#ascender)), the volume backups' master password ([Volume backups](#the-repository-and-its-password)) and the PostgreSQL backups' customer key ([Backups and restores](#backups-and-restores)), and none is rotated. |
 | `issued` | The value is made elsewhere, by a provider that issues it or by the owner who writes it. | A new one is made there and written with `just bao-put <path> <key>`, or with `just bao-seed-volsync --rotate-s3` for the cluster's S3 key; the ExternalSecret brings it into the Secret at its next refresh, within its `refreshInterval`. The application's section says what then reads it. |
 
 `just secret-rotate <path> <key> [--yes] [--wait <seconds>]` (`scripts/secret-rotate`) rotates a
@@ -8809,10 +8809,11 @@ applications and the rendered chart (`features/ascender.feature`).
 
 - **The two applications.** `ascender-operator` installs the chart `ascender-operator` 25.6.3 from
   Ctrl IQ's classic Helm repository, `https://ctrliq.github.io/ascender-operator`, with the chart's
-  definitions of `awx.ansible.com` from its `crds/`, and makes the database's Secret (below). Its
-  `ks.yaml` names `cilium` and `external-secrets` and waits, so it is Ready once the operator runs
-  and the Secret exists. `ascender` applies the `AWX` named `ascender`, the database from
-  `components/cnpg-cluster`, the route, its `Probe`, the Service `ascender-web` and the policies. It
+  definitions of `awx.ansible.com` from its `crds/`, and makes the database's Secret and the secret
+  key's (below). Its `ks.yaml` names `cilium`, `external-secrets` and `openbao-store` and waits, so
+  it is Ready once the operator runs and both Secrets exist. `ascender` applies the `AWX` named
+  `ascender`, the database from `components/cnpg-cluster`, the route, its `Probe`, the Service
+  `ascender-web` and the policies. It
   names `ascender-operator`, `cloudnative-pg`, `plugin-barman-cloud`, `prometheus-operator-crds`,
   `external-secrets`, `openbao-store`, `gateway-public`, `cilium` and `blackbox-exporter`, takes the
   long timeout and is Ready by a `healthCheckExprs` entry for the `AWX`: `current` is its
@@ -8927,15 +8928,75 @@ applications and the rendered chart (`features/ascender.feature`).
   the database up daily and dumps it once a day ([PostgreSQL](#postgresql)), and that database is
   all of Ascender's state: its organisations, inventories, projects, credentials, templates and job
   history.
-- **Secrets.** Nothing secret is in the tree and the tree makes no Secret. The admin password and
-  the secret key are the operator's own: `admin_password_secret` and `secret_key_secret` are unset,
-  so it generates `ascender-admin-password` and `ascender-secret-key`, 32 letters and digits each,
-  and `garbage_collect_secrets` is false, so they outlive the `AWX`. They live in those Secrets, in
-  etcd and in its snapshots, and the admin password also in the API server's audit log (The first
-  sign-in, below). Ascender encrypts every credential it stores, a machine's SSH key or a
-  repository's token, under the secret key: a database restored onto a rebuilt cluster without the
-  old `ascender-secret-key` keeps its rows and loses every such credential, which the owner enters
-  again.
+- **Secrets.** Nothing secret is in the tree and the tree makes no Secret. **The secret key** comes
+  from the secret store, as [n8n's encryption key](#n8n) does: the ExternalSecret
+  `ascender-secret-key-from-store` of `ascender-operator` reads the property `secret-key` at
+  `ascender/ascender` through the ClusterSecretStore `openbao` into the key `secret_key` of the
+  Secret `ascender-secret-key-from-store`, refreshed every 15 minutes, orphaned and immutable
+  (`ascender-operator/app/secret-key.yaml` says why each), and the `AWX` names that Secret in
+  `secret_key_secret`. Ascender encrypts every secret it keeps in its database under keys derived
+  from it, the SHA-512 of the key, the row's primary key and the field's name
+  (`get_encryption_key` in `awx/main/utils/encryption.py`): the secret inputs of its credentials,
+  a machine's SSH key or a repository's token among them, its encrypted settings, the passwords of
+  notification templates and surveys, the start arguments of jobs and the secrets of OAuth
+  applications, the fields `awx-manage regenerate_secret_key` encrypts again
+  (`awx/main/management/commands/regenerate_secret_key.py`). A restored database opens none of them
+  without the key it was written under, and the store's raft snapshots hold that key outside the
+  cluster: on a rebuild the store comes back from its snapshot before the databases
+  ([rebuild.md](runbooks/rebuild.md#building-it-again)). Where the key lives:
+  - in OpenBao, at `secrets/ascender/ascender`, on its members' volumes and in its raft snapshots
+    ([Raft snapshots](#raft-snapshots));
+  - in the Secret `ascender-secret-key-from-store`, and so in etcd and its snapshots;
+  - on a cluster where the operator generated a key before the `AWX` named the store's Secret, in
+    the operator's `ascender-secret-key` too, which stays and is no longer read.
+
+  The operator looks the key up at the start of each run: the Secret the `AWX` names when it
+  exists, else its own `ascender-secret-key`, which it generates only when neither exists
+  (`roles/installer/tasks/secret_key_configuration.yml`). The ExternalSecret is in
+  `ascender-operator`, which `ascender` waits for, so the `AWX` is applied on a cluster only once
+  the Secret exists, and the operator generates no key there. The Secret is deleted by the steps
+  under Restoring the database (below) alone, which stop the operator first: External Secrets
+  counts an orphaned Secret valid even once it is deleted, and writes it again only at its next
+  refresh (`isSecretValid` in `pkg/controllers/externalsecret/externalsecret_controller.go` at
+  v2.15.0), and a run of the operator in between would take `ascender-secret-key`, or generate it
+  where none exists. The web and task pods and the migration Job read the key from the file
+  `/etc/tower/SECRET_KEY`, mounted by `subPath` from a volume named after the Secret
+  (`roles/installer/templates/deployments/web.yaml.j2` and `task.yaml.j2`), so a pod holds the key
+  it started with; a run that finds another Secret named, or another value in it, changes the
+  Deployments' pod template, by that volume or by the annotation that holds a digest of the
+  Secret's data, and the pods roll.
+
+  The key is written into the store once, by the first install or the carry (below), and afterwards
+  only to put back the key the rows were written under (Restoring the database, below): a later
+  value changes nothing in the immutable Secret, which keeps the key the pods run under, and the
+  ExternalSecret stays Ready, as External Secrets writes no data into an immutable Secret it finds
+  (`mutationFunc` in `Reconcile` of `pkg/controllers/externalsecret/externalsecret_controller.go`
+  at v2.15.0). Nothing compares the two, and the store's snapshots hold the later value, so a
+  cluster rebuilt from them runs under it, and none of the restored credentials opens. The key-value mount keeps
+  the last ten versions of a key (`internal/builtin/logical/kv/backend.go` of OpenBao v2.7.2), so a
+  value written by mistake is taken back with a root token
+  ([Restoring access with the recovery keys](runbooks/openbao.md#restoring-access-with-the-recovery-keys)),
+  with OpenBao's CLI on the operator's machine:
+  `just bao-root <file> bao kv metadata get -mount=secrets ascender/ascender` lists the versions and
+  their times, and `just bao-root <file> bao kv rollback -mount=secrets -version=<n> ascender/ascender`
+  writes version `<n>` again as the newest; neither prints a value
+  (`internal/command/kv_rollback.go`).
+
+  The other Secrets Ascender runs with stay where they are made, and on a rebuilt cluster each is
+  made again, harmlessly:
+
+  | Secret | What it holds | Why a new one does no harm |
+  | --- | --- | --- |
+  | `ascender-admin-password` | the password of `admin` | it protects no stored data: the database holds the admin's password hash, and the operator sets the password from the Secret only on a run whose check for the superuser fails (`roles/installer/tasks/initialize_django.yml`), so after a restore the restored password stands |
+  | `ascender-broadcast-websocket` | the secret of the relay between the task and web pods | the pods read it at start and sign the relay's handshake with it (`awx/main/consumers.py`); nothing is stored under it |
+  | `ascender-receptor-ca`, `ascender-receptor-work-signing` | the receptor mesh's CA and work-signing key, made when absent (`roles/installer/tasks/resources_configuration.yml`) | only execution nodes outside the cluster would have to trust them, and the tree runs none |
+  | `ascender-app-credentials` | the settings files with the database's connection and the relay's secret | the operator renders it from the other Secrets on every run |
+  | `ascender-db-app` | the database's connection | it is the tree's, from External Secrets, and on a restored cluster the role's password is set from it (Restoring the database, below) |
+
+  The admin password also lives in the API server's audit log (The first sign-in, below). The
+  operator's own backup, an `AWXBackup`, copies its Secrets and a dump of the database to a claim in
+  the cluster (`roles/backup/tasks/secrets.yml`), which is a LINSTOR volume and goes with the
+  cluster on a rebuild, so the tree makes none.
 - **Restoring the database.** Either restore of [postgres-restore.md](runbooks/postgres-restore.md)
   makes a new cluster, `<NEW>`, beside `ascender-db`, and for Ascender its steps differ as follows.
   The patch of `app/kustomization.yaml` names the component's Cluster by the name it has when
@@ -8957,7 +9018,8 @@ applications and the rendered chart (`features/ascender.feature`).
   (`reconcileUser` in `internal/management/controller/instance_controller.go` of CloudNativePG
   v1.30.1). `tests/ascender.bats` holds every Cluster of `ascender/app/` other than the
   component's to naming `<its name>-app` so, and every `Password` and `ExternalSecret` of
-  `ascender-operator` other than `ascender-db-app`'s to the copy for such a Cluster: the
+  `ascender-operator` other than `ascender-db-app`'s and the secret key's
+  `ascender-secret-key-from-store` to the copy for such a Cluster: the
   original's, metadata included, with only the names, the Secret written, the generator read and
   the host changed. `tests/postgres-restore.bats` makes both of Ascender's restores with the
   runbook's file and holds that file, made for `ascender-db`, to the original. The switch, in a
@@ -8981,9 +9043,144 @@ applications and the rendered chart (`features/ascender.feature`).
   of its policies name `ascender-db` together, so the job keeps its flows after the switch. The
   switch changes the names `tests/ascender.bats` holds the Kustomization, the patch and the
   `AWX` to, which fail the required check until they follow. Neither restore touches
-  `ascender-secret-key`, and the restored rows need it: their
-  credentials are encrypted under it, so a restore onto a rebuilt cluster needs the old Secret
-  back first.
+  the secret key, and the restored rows need the store to hold the
+  key they were written under first, which on a rebuild it does once its snapshot is restored
+  (step 5 of [Building it again](runbooks/rebuild.md#building-it-again)). Under another key every
+  read of a stored secret fails, and the web and task containers log for each, with the row's model
+  in place of `Credential` (`decrypt_field` in `awx/main/utils/encryption.py`):
+
+  ```text
+  Failed to decrypt `Credential(pk=<n>).<field>`; if you've recently restored from a database backup or are running in a clustered environment, check that your `SECRET_KEY` value is correct
+  ```
+
+  A job that uses a credential whose secret input does not open fails, and so does a read of an
+  encrypted setting stored in the database (`awx/conf/settings.py`). No request to the API shows
+  it: secret inputs and encrypted settings read back as `$encrypted$` without being decrypted
+  (`display_inputs` in `awx/main/models/credential/__init__.py`, `SettingFieldMixin` in
+  `awx/conf/serializers.py`). Nothing is lost while the right key can still be written to the
+  store, for instance by taking back an earlier version of `ascender/ascender` (Secrets, above).
+  Once it is there, the Secret is written again from the store, and only while no pod mounts it: an
+  immutable Secret keeps the value it was first written with, so it is deleted and written anew,
+  and the kubelet of a node gives each pod there the copy of an immutable Secret it first read for
+  as long as a pod there that mounts it runs, even once the Secret is deleted
+  (`pkg/kubelet/util/manager/watch_based_manager.go` of Kubernetes). So the operator is stopped
+  first, with its release suspended, as drift detection would start it again, so that no run of it
+  starts the web and task pods again or creates the Secret empty while it is missing (Carrying a
+  key the operator generated, below); then the web and task pods are stopped. Ascender is down
+  until the new pods are ready, so this is done while no job runs. With `KUBECONFIG` set to the
+  file `just cluster-kubeconfig` prints:
+
+  ```sh
+  flux suspend helmrelease ascender-operator --namespace ascender
+  kubectl --namespace ascender scale deployment/awx-operator-controller-manager --replicas 0
+  kubectl --namespace ascender get pods --selector control-plane=controller-manager --output name
+  kubectl --namespace ascender scale deployment/ascender-web deployment/ascender-task --replicas 0
+  kubectl --namespace ascender get pods --output json | jq -r '.items[] | select(any(.spec.volumes[]?; .secret.secretName == "ascender-secret-key-from-store")) | "\(.metadata.name) \(.status.phase)"'
+  kubectl --namespace ascender delete secret ascender-secret-key-from-store
+  kubectl --namespace ascender annotate externalsecret ascender-secret-key-from-store force-sync="$(date +%s)" --overwrite
+  kubectl --namespace ascender get secret ascender-secret-key-from-store --output jsonpath='{.data}' | jq -c keys
+  kubectl --namespace ascender scale deployment/awx-operator-controller-manager --replicas 1
+  flux resume helmrelease ascender-operator --namespace ascender
+  ```
+
+  Each of the three reads is repeated until it shows that the next step may follow: the third until
+  it prints nothing, once the operator's pod is gone; the fifth until every pod it prints has
+  finished, `Succeeded` or `Failed`, as the kubelet lets go of a pod's Secrets once the pod has
+  finished (`SyncTerminatedPod` in `pkg/kubelet/kubelet.go`): within a day of a new version the
+  migration Job's, which the operator keeps for a day (`migration_job_ttl`), or a web or task pod
+  that was evicted; the eighth until it prints `["secret_key"]`, as External Secrets writes the
+  Secret a moment after the annotation. The operator's first run once it starts sets the web and
+  task Deployments back to the `AWX`'s one replica, as it manages their replicas by default
+  (`web_manage_replicas` and `task_manage_replicas` in its definition), and their new pods read the
+  Secret afresh. Each of them then holds the Secret's key, which this compares inside the shell,
+  printing `same` or `differ` for each pod and neither the key nor a digest of it:
+
+  ```sh
+  for app in web task; do
+    for pod in $(kubectl --namespace ascender get pods --selector app.kubernetes.io/name=ascender-$app --output name); do
+      [ "$(kubectl --namespace ascender exec "$pod" -c ascender-$app -- sha256sum /etc/tower/SECRET_KEY | cut -d' ' -f1)" = "$(kubectl --namespace ascender get secret ascender-secret-key-from-store --output jsonpath='{.data.secret_key}' | base64 -d | sha256sum | cut -d' ' -f1)" ] && echo "$pod same" || echo "$pod differ"
+    done
+  done
+  ```
+
+  The check after a restore, or after the key's Secret changed, counts what opens under the key the
+  pods hold: a script on the standard input of `awx-manage shell` in the task container tries every
+  secret input of every credential and every encrypted setting, as `regenerate_secret_key` walks
+  them, and prints the two counts and nothing it opens; under the key the rows were written under it
+  prints `failed 0`:
+
+  ```sh
+  kubectl --namespace ascender exec -i deploy/ascender-task -c ascender-task -- awx-manage shell --no-imports --command 'import sys; exec(sys.stdin.read())' <<'EOF'
+  import logging
+  logging.disable(logging.CRITICAL)
+  from awx.conf import settings_registry
+  from awx.conf.models import Setting
+  from awx.main.models import Credential
+  from awx.main.utils.encryption import decrypt_field
+  counts = [0, 0]
+  def attempt(row, field):
+      try:
+          decrypt_field(row, field)
+          counts[0] += 1
+      except Exception:
+          counts[1] += 1
+  for credential in Credential.objects.iterator():
+      for field in credential.credential_type.secret_fields:
+          if str(credential.inputs.get(field, '')).startswith('$encrypted$'):
+              attempt(credential, field)
+  for setting in Setting.objects.order_by('pk'):
+      if settings_registry.is_setting_encrypted(setting.key) and str(setting.value).startswith('$encrypted$'):
+          attempt(setting, 'value')
+  print('decrypted', counts[0], 'failed', counts[1])
+  EOF
+  ```
+- **The secret key of a first install.** The owner writes the key once, with a random value that
+  is never displayed, as n8n's: 32 bytes from the kernel as 64 hexadecimal digits, piped into the
+  recipe:
+
+  ```sh
+  head -c 32 /dev/urandom | od -An -vtx1 | tr -d ' \n' | just bao-put ascender/ascender secret-key
+  ```
+
+  Until the store holds it, the ExternalSecret reports the key missing, `ascender-operator` is not
+  Ready, `ascender` waits for it, and
+  [`FluxApplierNotReady`](runbooks/alerts.md#fluxappliernotready) fires for `ascender-operator`
+  after 15 minutes. While `openbao-store` itself is not Ready, the reason `ascender-operator` gives
+  is that dependency, which the rule leaves out, and the alert names the store's applications
+  instead. External Secrets tries again after a delay that doubles up to seven minutes
+  ([How an application gets a secret out](#how-an-application-gets-a-secret-out)), so the Secret
+  follows the write within that. A cluster whose database is to be restored is never given a new
+  key: its store comes back from its snapshot with the key the rows need.
+- **Carrying a key the operator generated.** A cluster that ran Ascender before the `AWX` named
+  the store's Secret holds its key in the operator's `ascender-secret-key`, and every credential
+  in its database is encrypted under it. That key is written into the store before the change
+  reaches the cluster, by one pipe, with `KUBECONFIG` set to the file `just cluster-kubeconfig`
+  prints; the value travels only through the pipe, and `bao-put` prints the path and the key's
+  name:
+
+  ```sh
+  kubectl --namespace ascender get secret ascender-secret-key --output jsonpath='{.data.secret_key}' | base64 -d | just bao-put ascender/ascender secret-key
+  ```
+
+  Until the next raft snapshot, within six hours, the store's volumes and etcd hold the only copies
+  of the key; `kubectl --namespace openbao create job --from=cronjob/openbao-snapshots <name>` takes
+  one at once, and `just openbao-snapshots` lists it ([Raft snapshots](#raft-snapshots)).
+  `ascender` is suspended (`flux suspend kustomization ascender`) while the change merges, and
+  resumed once `ascender-operator` is Ready on it with the Secret written, while no job runs: the
+  `AWX` then names another Secret, so the operator's run rolls the web and task pods, and it lets
+  the task pod's jobs finish first only for a new image and only with `upgrade_drain_timeout` set,
+  which the `AWX` leaves at the operator's 0 (`roles/installer/tasks/resources_configuration.yml`
+  and `drain_control_nodes.yml`). The two applications are reconciled from artifacts of their own,
+  and kustomize-controller compares a dependency's revision with its own only when both come from
+  one source (`checkDependencies` in
+  `internal/controller/kustomization_controller.go` of v1.10.1, which the pinned `flux` 2.10.0
+  installs), so `ascender` can apply the new `AWX` while `ascender-operator` is still Ready on its
+  revision of before. A run of the operator that starts before the Secret exists takes
+  `ascender-secret-key`, and at its end removes the owner references of the Secret the `AWX` names
+  by writing it, which creates it empty where it is missing (`roles/installer/tasks/cleanup.yml`,
+  and the `k8s` module of `kubernetes.core` 6.6.0 in the operator's image); External Secrets then
+  keeps that empty Secret, as it writes no data into an immutable target it finds, and the pods of
+  the next run find no key in it. `ascender-secret-key` is left in place.
 - **The first sign-in.** At `https://ascender.${CLUSTER_DOMAIN}/`, as `admin`, with the password the
   operator generated, which this prints, with `KUBECONFIG` set to the file `just cluster-kubeconfig`
   prints:
@@ -9002,7 +9199,17 @@ applications and the rendered chart (`features/ascender.feature`).
   URL, which the API server's audit log on the control planes records ([Logs](#logs)). So the
   password is in that log too: change it in the interface after the first sign-in. The Secret then
   no longer holds the password, and the command above prints the old one; the operator sets it back
-  only on a run whose check fails.
+  only on a run whose check fails. On a cluster whose database was restored, `admin`'s password is
+  the one the restored rows hold, as the check finds the superuser there; on a rebuilt cluster whose
+  database was restored the Secret is made anew, and its password does not sign in. Where the
+  restored password is not known, it is set again in the web container, typed twice at the prompt
+  of Django's `changepassword` and on no command line
+  (`django/contrib/auth/management/commands/changepassword.py` in the image):
+
+  ```sh
+  kubectl --namespace ascender exec -it deploy/ascender-web -c ascender-web -- awx-manage changepassword admin
+  ```
+
 - **The hostname** is `ascender.${CLUSTER_DOMAIN}`, an `HTTPRoute` on the public Gateway's `https`
   listener with one rule to the Service `ascender-web` on 80, every method and path and no filter,
   published as [Giving an application a public hostname](#giving-an-application-a-public-hostname)
@@ -9073,7 +9280,7 @@ applications and the rendered chart (`features/ascender.feature`).
   pull request and never merges it. `auto_upgrade` keeps the operator's default, true: on a new
   version the operator rolls the Deployments and runs the migration Job, which changes the
   database's schema, so a new version is read before it is merged, and what takes it back is a
-  restore of the database, under the same `ascender-secret-key` (Restoring the database, above).
+  restore of the database, under the same secret key (Restoring the database, above).
   After a merge, watch the `AWX`'s conditions, not the Kustomization's Ready: the operator writes no
   `status.observedGeneration`, the one field by which Flux's health check tells a status older than
   its object (`runtime/cel/status_evaluator.go` of `fluxcd/pkg`), and it sets `Successful` to
@@ -9095,7 +9302,14 @@ applications and the rendered chart (`features/ascender.feature`).
   period, as its reconcile period is `0s` (its `Dockerfile`). A restart of the Deployment
   `awx-operator-controller-manager` starts a run at once, the one live change that retries without a
   commit and without that delay. While the operator is down, Ascender runs as it was, and nothing it
-  would make or change is made.
+  would make or change is made. The `AWX`'s `status.secretKeySecret` names the Secret the last run
+  took the key from (`roles/installer/tasks/update_status.yml`): `ascender-secret-key-from-store`,
+  or `ascender-secret-key` after a run that began before the store's Secret existed, which the next
+  run puts right. A new web or task pod that stays in `ContainerCreating` with the event
+  `references non-existent secret key: secret_key` mounts an `ascender-secret-key-from-store`
+  without the key, as one the operator created empty (Carrying a key the operator generated,
+  above): it is written again by the steps of Restoring the database, above, with no write into the
+  store, which holds the key.
 - **Removal.** Taking the three entries out of the overlay prunes the `AWX`, and with it, through
   their owner references, the Deployments, the migration Job, the operator's Service, ConfigMap,
   role and the Secrets it does not keep; the Cluster and its volumes; the release and its
@@ -9103,10 +9317,12 @@ applications and the rendered chart (`features/ascender.feature`).
   whose prune is disabled; the chart's definitions, which Helm installed from `crds/` and leaves;
   and the Secrets whose owner references the operator removes on every run, as
   `garbage_collect_secrets` is false (`roles/installer/tasks/cleanup.yml`):
-  `ascender-admin-password`, `ascender-secret-key`, `ascender-broadcast-websocket`,
-  `ascender-receptor-ca`, `ascender-receptor-work-signing` and the database's `ascender-db-app`,
-  which External Secrets then no longer deletes with its ExternalSecret.
-  `kubectl --namespace ascender get secrets` lists them.
+  `ascender-admin-password`, `ascender-broadcast-websocket`, `ascender-receptor-ca`,
+  `ascender-receptor-work-signing`, the database's `ascender-db-app`, which External Secrets then
+  no longer deletes with its ExternalSecret, and the secret key's `ascender-secret-key-from-store`,
+  which External Secrets orphans in any case; and `ascender-secret-key` where the operator generated
+  one before the `AWX` named the store's. `kubectl --namespace ascender get secrets` lists them.
+  The store keeps the key `ascender/ascender`.
 
 ### Locust
 

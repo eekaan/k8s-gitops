@@ -60,8 +60,11 @@ a failing one ends with a line naming the step it failed in ([cluster.md](../clu
   ([etcd-restore.md](etcd-restore.md#when-to-restore)), so
   [restoring etcd from a snapshot](etcd-restore.md#restoring-etcd-from-a-snapshot) is not one of the
   rebuild's restores. A Secret that an operator generated in the cluster and that no backup holds is
-  lost with it, as Ascender's `ascender-secret-key` is ([Building it again](#building-it-again),
-  step 8).
+  lost with it: for Ascender, the admin password, the websocket secret and the receptor mesh's
+  Secrets its operator makes, which it makes again and which protect no stored data; `admin` signs
+  in with the password the restored database holds, not the new Secret's
+  ([kubernetes.md](../kubernetes.md#ascender)). Ascender's secret key is a key of the secret store
+  ([Building it again](#building-it-again), step 5).
 
 ## Taking it down
 
@@ -143,7 +146,7 @@ The rebuilt cluster brings every database back empty under its old name, with it
 base backups aimed at the old paths, and Flux, once installed, applies each application as soon as
 its dependencies are Ready. So two things are settled first, in step 1, and the restores follow in
 the order each needs the one before: the secret store, which holds the volumes' and the archives'
-keys, then the volumes, then the databases.
+keys and Ascender's secret key, then the volumes, then the databases.
 
 1. **The hold.** A pull request that sets `CNPG_BACKUPS_SUSPENDED: "true"` in the
    `postBuild.substitute` of the `ks.yaml` of each application whose database is restored (step 7),
@@ -169,8 +172,9 @@ keys, then the volumes, then the databases.
    segment.
 
    Decide too whether OpenBao's store comes back from its snapshot (step 5), rather than starting
-   anew with every key written again. The old seal keys then have to be in the cluster before
-   OpenBao's first member starts, soon after `just cluster-flux`, so step 2 puts them in place.
+   anew with every key written again. Ascender's credentials depend on it: their key is a key of
+   the store, which only the snapshot brings back. The old seal keys then have to be in the cluster
+   before OpenBao's first member starts, soon after `just cluster-flux`, so step 2 puts them in place.
 
 2. **The build.** The build order in [cluster.md](../cluster.md#from-nothing-to-a-ready-cluster),
    from the start, up to and with `just cluster-flux`, leaving out the steps that make the age keys
@@ -214,8 +218,9 @@ keys, then the volumes, then the databases.
 
    Then either the old store's snapshot, restored as [openbao.md](openbao.md#restoring-a-snapshot)
    says, with the seal keys step 2 put in place and the snapshot the summary of
-   `cluster-last-copies` named; it brings back every key the store held, and the recovery keys of the
-   old custody file then open the restored store, as
+   `cluster-last-copies` named; it brings back every key the store held, Ascender's secret key at
+   `ascender/ascender` among them, which the credentials in Ascender's database are encrypted
+   under, and the recovery keys of the old custody file then open the restored store, as
    [Restoring access with the recovery keys](openbao.md#restoring-access-with-the-recovery-keys)
    uses them. Or, once Flux has applied OpenBao, the operator's steps of its
    [first initialisation](openbao.md#first-initialisation): `just bao-recovery <file>` with a new
@@ -226,7 +231,14 @@ keys, then the volumes, then the databases.
    ([volume-backups.md](volume-backups.md#the-stores-key-is-lost-and-the-file-is-kept)). The same
    goes for the PostgreSQL backups' customer key, `just bao-seed-postgres <file>` with the existing
    custody file: until it runs, no database archives, and a new key would make every archive
-   unreadable ([postgres-restore.md](postgres-restore.md#the-customer-key)).
+   unreadable ([postgres-restore.md](postgres-restore.md#the-customer-key)). A store started anew
+   holds no copy of Ascender's secret key: the owner writes a new one, as for a first install
+   ([kubernetes.md](../kubernetes.md#ascender)), and the restored database loses every credential
+   stored under the old one, which the owner enters again. Until the store holds the key, either
+   way, `ascender-operator` is not Ready, Ascender's application waits for it, and
+   `FluxApplierNotReady` fires for `ascender-operator` after 15 minutes; while `openbao-store`
+   itself is not Ready, the reason `ascender-operator` gives is that dependency, which the rule
+   leaves out, and the alert names the store's applications instead.
 
 6. **The volumes.** Each comes back by itself once the store holds the key `volsync`
    ([volume-backups.md](volume-backups.md#the-stores-key-is-lost-and-the-file-is-kept)): the
@@ -252,7 +264,7 @@ keys, then the volumes, then the databases.
    | Database | Application | How it comes back |
    | --- | --- | --- |
    | `ai-system/n8n-db` | n8n | Held, and restored by [the point-in-time restore](postgres-restore.md#restoring-one-database-to-a-point-in-time) into a new cluster beside the rebuilt, empty one, then switched over; from [a dump](postgres-restore.md#restoring-a-daily-dump) only when the archive cannot be read |
-   | `ascender/ascender-db` | Ascender | Held, and restored as n8n's is, by [the point-in-time restore](postgres-restore.md#restoring-one-database-to-a-point-in-time) or, when the archive cannot be read, [a dump](postgres-restore.md#restoring-a-daily-dump), with the differences [kubernetes.md](../kubernetes.md#ascender) gives under "Restoring the database" |
+   | `ascender/ascender-db` | Ascender | Held, and restored as n8n's is, by [the point-in-time restore](postgres-restore.md#restoring-one-database-to-a-point-in-time) or, when the archive cannot be read, [a dump](postgres-restore.md#restoring-a-daily-dump), with the differences [kubernetes.md](../kubernetes.md#ascender) gives under "Restoring the database", after the secret store (step 5), as its rows need the key `ascender/ascender` of the store |
    | `backstage/backstage-db` | Backstage | Not held and not restored: made again by a start, as its database holds only what Backstage derives from the tree ([kubernetes.md](../kubernetes.md#backstage)), once its old archive is deleted (step 1) |
 
    Here the point-in-time restore is run without a target, its manifest without `recoveryTarget`,
@@ -292,10 +304,9 @@ keys, then the volumes, then the databases.
    Ascender run against their empty databases, and what is written to them goes with the empty
    clusters: keep both unused until their switchover.
 
-8. **What no restore brings back.** Everything in etcd ([What does not](#what-does-not)): among it
-   Ascender's `ascender-secret-key`, which its operator generates and no backup holds, so the
-   restored rows keep every credential Ascender stored encrypted under the old key, which nothing
-   opens any more, and the owner enters each again ([kubernetes.md](../kubernetes.md#ascender)).
-   n8n's encryption key comes back with the store's snapshot or, when the store starts anew, is read
-   from the volume's backup into the store before n8n starts, as
-   [kubernetes.md](../kubernetes.md#n8n) says.
+8. **What no restore brings back.** Everything in etcd ([What does not](#what-does-not)), among it
+   the Secrets Ascender's operator makes again. Ascender's secret key comes back with the store's
+   snapshot, as n8n's encryption key does ([kubernetes.md](../kubernetes.md#ascender)); when the
+   store starts anew it is gone, with every credential stored under it (step 5). n8n's encryption
+   key, when the store starts anew, is read from the volume's backup into the store before n8n
+   starts, as [kubernetes.md](../kubernetes.md#n8n) says.

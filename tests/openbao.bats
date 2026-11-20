@@ -1068,10 +1068,11 @@ seal_ids() {
   [ -z "$unread" ]
 
   # The recipe rotates a generated key and no other: the demo's is the only one. n8n's encryption
-  # key, the volume backups' master and the PostgreSQL backups' customer key encrypt data; the
-  # others are made elsewhere.
+  # key, Ascender's secret key, the volume backups' master and the PostgreSQL backups' customer key
+  # encrypt data; the others are made elsewhere.
   [ "$(jq -r '.[] | select(.rotation == "generated") | .path + " " + (.key // "*")' <<<"$entries")" = "demo/hello greeting" ]
   [ "$resolved" = "$(printf '%s\n' 'ai-system/n8n encryption-key re-encryption' \
+    'ascender/ascender secret-key re-encryption' \
     'cert-manager/cloudflare api-token issued' 'demo/hello greeting generated' \
     'monitoring/alert-destinations heartbeat-url issued' 'monitoring/alert-destinations notify-url issued' \
     'postgres-backups SSE_C_KEY re-encryption' \
