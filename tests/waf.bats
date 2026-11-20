@@ -266,10 +266,10 @@ registry() {
   targets="$(jq -r 'select(.kind == "EnvoyExtensionPolicy" and (.spec.wasm // []) != []) | .metadata.namespace + "/" + (.spec.targetRefs // [])[].name' "$RENDERED" | sort -u | paste -sd' ' -)"
   echo "routes behind the firewall: ${targets:-none}"
   [ "$targets" = demo/hello ]
-  # The demo route takes the component, and hello-sso, a second hostname on the same backend, does
-  # not: it has no policy of its own, and nothing else targets it.
+  # The demo route takes the component, beside its rate limit's, and hello-sso, a second hostname on
+  # the same backend, does not: no EnvoyExtensionPolicy of its own, and no other, targets it.
   overlay
-  [ "$(yq -N -o json -I0 'select(.kind == "Kustomization" and .metadata.name == "hello-route") | .spec.components' "$OVERLAY")" = '["../../../../../components/waf"]' ]
+  [ "$(yq -N -o json -I0 'select(.kind == "Kustomization" and .metadata.name == "hello-route") | .spec.components' "$OVERLAY")" = '["../../../../../components/waf","../../../../../components/ratelimit"]' ]
   [ "$(taking)" = kubernetes/apps/base/demo/hello-route/ks.yaml ] || { echo "the ks.yaml that take the component: $(taking | paste -sd' ' -)"; return 1; }
   built hello-sso
   [ -z "$(yq -N 'select(.kind == "EnvoyExtensionPolicy") | .metadata.name' "$BUILT")" ]
@@ -343,7 +343,7 @@ registry() {
   overlay
   yq -N 'select(.kind == "Kustomization" and .metadata.name == "hello-route")' "$OVERLAY" >"$BATS_TEST_TMPDIR/ks.yaml"
   echo "hello-route: $(yq -o json -I0 '.spec' "$BATS_TEST_TMPDIR/ks.yaml")"
-  [ "$(yq -o json -I0 '.spec.postBuild.substitute' "$BATS_TEST_TMPDIR/ks.yaml" | jq -cS .)" = '{"WAF_MODE":"On","WAF_ROUTE":"hello"}' ]
+  [ "$(yq -o json -I0 '.spec.postBuild.substitute' "$BATS_TEST_TMPDIR/ks.yaml" | jq -cS .)" = '{"RATELIMIT_REQUESTS":"5","RATELIMIT_ROUTE":"hello","RATELIMIT_UNIT":"Second","WAF_MODE":"On","WAF_ROUTE":"hello"}' ]
   [ "$(yq '.spec.dependsOn | map(.name) | sort | join(" ")' "$BATS_TEST_TMPDIR/ks.yaml")" = "blackbox-exporter gateway-public hello" ]
   # Every application that takes the component, enabled or not, names its route and one of the two
   # modes, waits, and holds the policy's acceptance as its health: with failOpen the route keeps

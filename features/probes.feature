@@ -25,3 +25,8 @@ Feature: Public endpoint probes
     Given the render of the tree, the render of a copy of it in which two applications that do not name the exporter in dependsOn hold a Probe, one among its manifests and one that its release's chart renders, and a copy of the tree whose overlay lists the exporter, the Gateway, the route and the Gateway's issuer
     When the applications of each render that hold a Probe are matched with the dependsOn of their Kustomizations, and the overlay leaves out the exporter, and then only the Gateway
     Then every application of the tree that holds a Probe names the exporter, the two that do not are refused, each by its name, and the kubernetes check refuses both overlays, naming the Kustomizations that declare a Probe, the one they need and the overlay
+
+  Scenario: The probes of a rate-limited route stay well under its limit
+    Given the render of the tree, its BackendTrafficPolicies, routes and Probes, its Prometheus and the definition of the Prometheus kind, and copies of what the render holds whose demo route is limited to 4 a second, whose Prometheus runs two replicas, or whose demo Probe sets an interval of its own
+    When the requests the Probes of each rate-limited route make in one unit of its limit are counted at the scrape interval Prometheus gives them, at least one in each unit, for each replica of Prometheus
+    Then each is at most a fifth of the route's figure, one a second for hello's 5 and two a minute for the 300 of kromgo and hello-sso at the 30 seconds the definition defaults to and the one replica the cluster runs, and the copies fail, naming the route limited to 4 a second, the demo route whose Probe two replicas scrape twice a second and the Probe with an interval of its own

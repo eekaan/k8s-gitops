@@ -1,0 +1,24 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/gateway.envoyproxy.io/backendtrafficpolicy_v1alpha1.json
+# A request rate limit on one route, local to each proxy (docs/kubernetes.md, Rate limits): one
+# token bucket for each Envoy route of the HTTPRoute in each proxy process, shared by its workers,
+# holding the figure and filled to it again over each unit. A request that finds the bucket empty
+# is answered 429 by the proxy, with Retry-After and the x-ratelimit headers, and never reaches the
+# backend. The one rule has no client selector, so it is the route's default bucket and limits the
+# route for every client together, not each client.
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: BackendTrafficPolicy
+metadata:
+  name: ${RATELIMIT_ROUTE}
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: ${RATELIMIT_ROUTE}
+  rateLimit:
+    local:
+      rules:
+        # Unquoted, so the figure Flux substitutes is an integer, as the definition requires.
+        - limit:
+            requests: ${RATELIMIT_REQUESTS:=300}
+            unit: ${RATELIMIT_UNIT:=Minute}

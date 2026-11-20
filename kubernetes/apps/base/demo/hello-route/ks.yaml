@@ -8,17 +8,24 @@ metadata:
 spec:
   path: ./apps/base/demo/hello-route/app
   targetNamespace: demo
-  # The component puts the route behind the web application firewall, in blocking mode: nothing
-  # real is behind the demo, so a false positive costs nothing here.
+  # The components put the route behind the web application firewall, in blocking mode: nothing
+  # real is behind the demo, so a false positive costs nothing here; and limit it to 5 requests a
+  # second on each proxy, low enough for just gateway-check to see a 429 through each edge, and
+  # five times the most its Probe asks in a second, one.
   components:
     - ../../../../../components/waf
+    - ../../../../../components/ratelimit
   postBuild:
     substitute:
       WAF_ROUTE: hello
       WAF_MODE: "On"
-  # The route names the public Gateway and the hello Service; the firewall's policy is of a kind
-  # envoy-gateway-crds defines, which gateway-public waits for through envoy-gateway. A cluster
-  # without the Gateway cannot enable it. Its Probe is answered by the blackbox exporter.
+      RATELIMIT_ROUTE: hello
+      RATELIMIT_REQUESTS: "5"
+      RATELIMIT_UNIT: Second
+  # The route names the public Gateway and the hello Service; the firewall's and the rate limit's
+  # policies are of kinds envoy-gateway-crds defines, which gateway-public waits for through
+  # envoy-gateway. A cluster without the Gateway cannot enable it. Its Probe is answered by the
+  # blackbox exporter.
   dependsOn:
     - name: gateway-public
     - name: hello
@@ -27,10 +34,20 @@ spec:
   # Ready only once the controller has accepted the firewall's policy at its generation: the policy
   # fails open, so a module the leading controller replica could not fetch shows here, and not only
   # as a route served without its firewall; the other ways it fails open show only in the logs
-  # (components/waf).
+  # (components/waf). And the rate limit's, which the controller reports not accepted when it
+  # cannot translate it (components/ratelimit).
   healthCheckExprs:
     - apiVersion: gateway.envoyproxy.io/v1alpha1
       kind: EnvoyExtensionPolicy
+      current: >-
+        has(status.ancestors) && size(status.ancestors) > 0 && status.ancestors.all(a,
+        a.conditions.exists(c, c.type == 'Accepted' && c.status == 'True' && c.observedGeneration
+        == metadata.generation))
+      failed: >-
+        has(status.ancestors) && status.ancestors.exists(a, a.conditions.exists(c, c.type ==
+        'Accepted' && c.status == 'False' && c.observedGeneration == metadata.generation))
+    - apiVersion: gateway.envoyproxy.io/v1alpha1
+      kind: BackendTrafficPolicy
       current: >-
         has(status.ancestors) && size(status.ancestors) > 0 && status.ancestors.all(a,
         a.conditions.exists(c, c.type == 'Accepted' && c.status == 'True' && c.observedGeneration

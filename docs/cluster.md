@@ -484,7 +484,7 @@ BGP sessions to it, and ICMP at up to five packets a second.
 | `kube-scheduler` | TCP 10259 | control planes | `members`, `pods` | The scheduler's secure port, which Prometheus scrapes. |
 | `kubelet` | TCP 10250 | all | `members`, `pods` | The kubelet: the API server, for logs, exec and port forwarding, and metrics-server and Prometheus, for metrics. metrics-server serves the API's metrics, so a node it cannot reach makes that API unavailable, which breaks API discovery and the deletion of namespaces. |
 | `cilium-vxlan` | UDP 8472 | all | `members` | Cilium's overlay, which carries pod traffic between nodes in VXLAN on Linux's default port ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/Documentation/operations/system_requirements.rst#firewall-rules)). Cilium trusts the identity a VXLAN packet carries, so only the nodes may send it. |
-| `cilium-wireguard` | UDP 51871 | all | `members` | Cilium's WireGuard device, which each agent makes in the kernel and which the overlay's packets to another node pass through, encrypted, once Cilium's values turn WireGuard on: a peer's endpoint is the address its node is registered with, on this port ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/Documentation/operations/system_requirements.rst#firewall-rules), [kubernetes.md](kubernetes.md#encryption-between-nodes)). Only the agents send to it. |
+| `cilium-wireguard` | UDP 51871 | all | `members` | Cilium's WireGuard device, which each agent makes in the kernel and which the overlay's packets to another node pass through, encrypted, while Cilium's values turn WireGuard on: a peer's endpoint is the address its node is registered with, on this port ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/Documentation/operations/system_requirements.rst#firewall-rules), [kubernetes.md](kubernetes.md#encryption-between-nodes)). Only the agents send to it. |
 | `cilium-health` | TCP 4240 | all | `members` | Cilium's health checks between nodes; the ICMP echo they send as well is admitted by Talos itself. |
 | `hubble` | TCP 4244 | all | `members`, `pods` | The Hubble server in each node's Cilium agent, from which Hubble Relay reads the node's flows. |
 | `node-exporter` | TCP 9100 | all | `members`, `pods` | node-exporter, on the host network, which Prometheus scrapes. |
@@ -716,7 +716,7 @@ makes it do. Until each has been, watch:
    `linstor resource list` shows its resource Connected between the nodes that hold it, whose
    kernels connect to each other afresh on its port of 7000-7999
    ([kubernetes.md](kubernetes.md#storage)).
-7. Cilium's WireGuard, once Cilium's values turn it on and every agent has restarted into them
+7. Cilium's WireGuard, while Cilium's values turn it on and every agent has restarted into them
    ([kubernetes.md](kubernetes.md#encryption-between-nodes)):
    in each agent's `cilium-dbg debuginfo --output json`, every peer of `cilium_wg0` has a recent
    `last-handshake-time`, and `cilium-health status` reports every node reachable through the

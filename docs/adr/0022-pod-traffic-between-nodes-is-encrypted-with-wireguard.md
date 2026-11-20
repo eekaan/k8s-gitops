@@ -54,8 +54,8 @@ and the nodes' security group admits everything between the nodes.
   the Service's address at the pod's interface. Packets between pods on one node, traffic from and
   to the nodes' own addresses, a node's or a host-network pod's connection to a pod on another node
   and a pod's to another node among it, and the request between a client outside the cluster and
-  the worker it reaches are not among what the table gives as encrypted
-  ([Encryption between nodes](../kubernetes.md#encryption-between-nodes)).
+  the worker it reaches, which the Gateway's TLS covers for HTTPS, are not among what the table
+  gives as encrypted ([Encryption between nodes](../kubernetes.md#encryption-between-nodes)).
 - The change, and its revert, roll the agents two at a time, and while some agents encrypt and
   others do not, pod traffic between the two groups of nodes, and each node's own connections to
   pods in the other group, both ways, stop until the last agent has restarted, as a node's packets
@@ -69,8 +69,12 @@ and the nodes' security group admits everything between the nodes.
 - The private key lives in the agent's state directory on the node, which Talos keeps in memory:
   a reboot, an upgrade or a reset gives the node a new key, which the other agents take from its
   `CiliumNode`.
-- The firewall rule stays when WireGuard is turned off; nothing listens on the port then, and the
-  rule goes only by a change of its own.
+- The way back is a change that sets the values back, with the scenario, test and docs that follow
+  them, and leaves `talos/firewall.yaml` and `node-firewall-exceptions.yaml` as they are: the
+  firewall rule stays, nothing listens on its port, and the rule goes only by a change that takes it
+  out. A revert of the whole change takes the rule out of the tree too, while the nodes keep it
+  until `just infra-apply sto2/cluster` and `just cluster-talos` roll out a configuration without
+  it.
 
 ## Alternatives considered
 
