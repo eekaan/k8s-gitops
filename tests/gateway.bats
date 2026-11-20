@@ -380,7 +380,8 @@ RATELIMIT=kubernetes/components/ratelimit
   [ "$(sort <<<"$targeting")" = "$({ printf '%s\n' "ClientTrafficPolicy/$namespace/$(only "$BUILT" ClientTrafficPolicy)" SecurityPolicy/demo/hello-sso \
     SecurityPolicy/monitoring/logs EnvoyExtensionPolicy/demo/hello \
     SecurityPolicy/locust/locust \
-    BackendTrafficPolicy/demo/hello BackendTrafficPolicy/demo/hello-sso BackendTrafficPolicy/kromgo/kromgo; } | sort)" ]
+    BackendTrafficPolicy/demo/hello BackendTrafficPolicy/demo/hello-sso BackendTrafficPolicy/kromgo/kromgo \
+    SecurityPolicy/reportportal/reportportal; } | sort)" ]
   # Nor does anything patch around it: no EnvoyPatchPolicy anywhere, which rewrites the translated
   # configuration of a Gateway, or of every Gateway of its class, whatever the policies say.
   local patches forwarded
@@ -445,7 +446,7 @@ RATELIMIT=kubernetes/components/ratelimit
     echo "namespace $name: k8s-gitops/gateway=$labels"
     if [ "$labels" = "$label" ]; then attached+=("$name"); fi
   done < <(yq -N 'select(.kind == "Namespace") | .metadata.name + "\t" + (.metadata.labels["k8s-gitops/gateway"] // "none")' "$OVERLAY")
-  [ "${attached[*]}" = "ai-system ascender backstage demo kromgo locust monitoring sso-system" ]
+  [ "${attached[*]}" = "ai-system ascender backstage demo kromgo locust monitoring reportportal sso-system" ]
   # Every route that names the Gateway from another namespace is in one that attached.
   built hello-route
   [ "$(yq -N 'select(.kind == "HTTPRoute") | .spec.parentRefs[].name' "$BUILT")" = "$gateway" ]
@@ -473,6 +474,10 @@ RATELIMIT=kubernetes/components/ratelimit
   built locust-route
   [ "$(yq -N 'select(.kind == "HTTPRoute") | .spec.parentRefs[].name' "$BUILT" | sort -u)" = "$gateway" ]
   [ "$(yq -N 'select(.kind == "HTTPRoute") | .metadata.namespace' "$BUILT" | sort -u)" = locust ]
+  # ReportPortal's route and its sign-in route.
+  built reportportal-route
+  [ "$(yq -N 'select(.kind == "HTTPRoute") | .spec.parentRefs[].name' "$BUILT" | sort -u)" = "$gateway" ]
+  [ "$(yq -N 'select(.kind == "HTTPRoute") | .metadata.namespace' "$BUILT" | sort -u)" = reportportal ]
 }
 
 @test "The Gateway listens on exactly the ports the edge routers translate" {
@@ -555,9 +560,10 @@ RATELIMIT=kubernetes/components/ratelimit
   # Leaving the Gateway, the applications that have a route on it, the DNS records of their routes
   # and the dashboard of those records, and CrowdSec, whose agent reads the Gateway's proxies, out
   # builds: nothing else names them but Robot Framework's suite of Ascender's sign-in page,
-  # robot-ascender, which names ascender and goes with it.
+  # robot-ascender, which names ascender and goes with it. Locust's and ReportPortal's routes go, and
+  # Locust and ReportPortal stay.
   tree_without gateway-public hello-route n8n kromgo external-dns open-webui hello-sso dex oauth2-proxy backstage crowdsec crowdsec-gateway-logs victoria-logs-route external-dns-dashboard ascender robot-ascender \
-    locust-route
+    locust-route reportportal-route
   run "$REPO/scripts/kubernetes-check" "$TREE"
   echo "$output"
   [ "$status" -eq 0 ]

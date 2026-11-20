@@ -666,6 +666,7 @@ once it is not, and the agents' rendered configuration agrees.
 | `locust` | default deny | Locust's master takes its workers on 5557, and the proxies and the kubelet's probe on 8089, and sends nothing; the workers take nothing and reach the resolver, the master on 5557 and `hello`'s pods in `demo` on 8080. |
 | `robot` | default deny | Robot Framework's runner takes nothing and reaches the resolver, `hello`'s pods in `demo` on 8080 and Ascender's web pods in `ascender` on 8052; the report server takes the kubelet's probe on 8080 and sends nothing. |
 | `escape-canary` | default deny | the escape canary's pods take nothing and reach the resolver, and the rights check's pods the API server on 443 and 6443; everything else its network check attempts is what the default deny forbids. |
+| `reportportal` | default deny | ReportPortal's ui takes the proxies and the kubelet's probes on 8080 and sends nothing; its api takes the proxies and the kubelet's probes on 8585 and reaches the resolver, its database on 5432, RabbitMQ on 5672 and 15672, the jobs service on 8686 and the API server; the jobs service takes the api and the kubelet's probes on 8686 and reaches the resolver, the database, RabbitMQ and the API server; the migrations reach the resolver and the database; the pre-upgrade hook reaches the API server alone; RabbitMQ takes the api and the jobs service and sends nothing; the database's pods, a restore's recovery job and the dump job let through what Backstage's do; the backup movers resolve names and reach the object storage on 443. |
 | `ai-system` | listed | applications whose allows are not written, not a namespace that cannot have the posture. n8n takes the proxies on 5678 and reaches its database, the resolver and whatever its workflows call outside; the PostgreSQL instances take n8n, each other and the operator, and reach the API server, and their Barman Cloud sidecars reach the object storage on 443 and the API server; the dump job reaches the database, the hosts age's release is downloaded from and the object storage; Open WebUI takes the proxies on 8080 and reaches nothing until an administrator turns on a connection that calls out; the backup movers reach the object storage on 443. The proxies reach n8n's 5678 and Open WebUI's 8080 alone there and forward only to their Services, PostgreSQL authenticates every client, Pod Security, node firewall. |
 | `etcd-snapshots` | listed | an application whose allows are not written, not a namespace that cannot have the posture. The snapshot job takes nothing and reaches the Talos API through `talos.default`, the object storage, the hosts age's release is downloaded from (its URL redirects to a second host, which serves the file) and the resolver. Talos' own authorisation of its one role, Pod Security, node firewall. |
 | `external-dns` | listed | an application whose allows are not written, not a namespace that cannot have the posture. external-dns takes Prometheus' scrape and the kubelet's probes on 7979 and nothing else, and reaches the API server, the DNS provider's API on 443 and the resolver; the Jobs of `just cluster-dns-remove` reach only the provider's API and the resolver. Its token, scoped to zone read and DNS edit on the cluster's one zone, its name filter, a ClusterRole that only reads, Pod Security, node firewall ([DNS records](#dns-records)). |
@@ -697,7 +698,8 @@ once it is not, and the agents' rendered configuration agrees.
   other: `hello` in `demo` on 8080, kromgo in `kromgo` on 8080, n8n on 5678 and Open WebUI on 8080
   in `ai-system`, dex on 5556 and oauth2-proxy on 4180 in `sso-system`, Backstage in `backstage` on
   7007, Ascender's web pods in `ascender` on 8052, vmauth in `monitoring`
-  on 8427, and Locust's master in `locust` on 8089. oauth2-proxy's rule also carries the question
+  on 8427, Locust's master in `locust` on 8089, and ReportPortal's ui on 8080 and api on 8585 in
+  `reportportal`. oauth2-proxy's rule also carries the question
   the proxies ask it about each request of a route that opts in to sign-in ([Sign-in](#sign-in)),
   which is no route's backend but reaches the same pods and port. `tests/network-policy.bats` reads
   those ports from the render, from each route's backend through its Service's target port to the
@@ -706,7 +708,8 @@ once it is not, and the agents' rendered configuration agrees.
   it cannot compare, a backend in a namespace without the label and a Service without a selector.
   What a pod of such a namespace takes is its own namespace's to say: in `demo`, `hello` on 8080; in
   `kromgo`, kromgo on 8080; in `sso-system`, dex on 5556 and oauth2-proxy on 4180; in `backstage`,
-  Backstage on 7007; in `ascender`, the web pods on 8052; in `locust`, Locust's master on 8089. In
+  Backstage on 7007; in `ascender`, the web pods on 8052; in `locust`, Locust's master on 8089; in
+  `reportportal`, the ui on 8080 and the api on 8585. In
   `ai-system`, which is
   listed and so has no pod in default deny, every pod takes them on every port, so
   the proxies' rules are what keep them from n8n's other ports, from every port of
@@ -877,6 +880,20 @@ once it is not, and the agents' rendered configuration agrees.
   network check's pods, `hello` and the secret store are what the network check attempts, and their
   denial once the cluster enforces is its table's enforcement column; while it audits, each is a flow
   that a policy would drop, reported and passed ([The escape canary](#the-escape-canary)).
+- **`reportportal`.** ReportPortal's pods, by the chart's `component` label, which is the whole of
+  their selector: the ui (`reportportal-ui`) takes the proxies by their labels and the kubelet's
+  probes on 8080 and sends nothing; the api (`reportportal-api`) takes the proxies and the kubelet's
+  probes on 8585, and reaches the resolver, the database's instances on 5432, RabbitMQ's pods on
+  5672 and 15672, the jobs service on 8686 and the API server on 443 and 6443, the last for its init
+  container `k8s-wait-for`; the jobs service (`reportportal-jobs`) takes the api and the kubelet's
+  probes on 8686 and reaches the resolver, the instances, RabbitMQ and the API server; the
+  migrations Job reaches the resolver and the instances; the pre-upgrade hook the API server alone.
+  RabbitMQ's pod, by its chart's selector labels, takes the api and the jobs service on 5672 and
+  15672 and sends nothing. The database's pods, a restore's recovery job and the dump job are
+  Backstage's, for `reportportal-db`, its instances taking the api, the jobs service, the
+  migrations and the dump job on 5432, and the movers are `reportportal-volsync-movers`'. No pod of
+  ReportPortal reaches the world, and another namespace reaches the api only once a rule appended
+  to its policy names it ([ReportPortal](#reportportal)).
 - **The object storage's port.** cluster-config holds the object storage's endpoint as a URL, which
   a DNS name rule cannot take, so the movers' rule is the world on 443: the port https uses for an
   endpoint that names none, as cluster-config's example does and `tests/network-policy.bats` holds
@@ -990,8 +1007,8 @@ namespace and the policy, when
 
 The check reads only what the render holds. Besides the policies of `ascender`, `backstage`,
 `crowdsec`, `demo`, `envoy-gateway-system`, `escape-canary`, `kromgo`, `locust`,
-`open-feature-operator`, `security-system` and `sso-system`, that is one policy of a listed
-namespace: `flux-operator-web`, the `NetworkPolicy` the Flux Operator's chart renders in
+`open-feature-operator`, `reportportal`, `security-system` and `sso-system`, that is one policy of a
+listed namespace: `flux-operator-web`, the `NetworkPolicy` the Flux Operator's chart renders in
 `flux-system`, which lets every pod of every namespace (an empty `namespaceSelector`) reach the
 operator's web interface on 9080. It passes
 because `flux-system` is listed; the day `flux-system` takes the default deny, the check refuses it,
@@ -1331,18 +1348,19 @@ does not matter.
    and the agents evaluate both and drop nothing they deny; what a policy would drop is reported as
    `AUDIT`. As the allows land after the denies, `AUDIT` flows of `ascender`, `backstage`,
    `crowdsec`, `demo`, `envoy-gateway-system`, `escape-canary`, `kromgo`, `locust`,
-   `open-feature-operator`, `robot`, `security-system` and `sso-system` from before they landed are
-   expected, such as the proxies to `hello` on 8080 and to the controller on 18000, and the
-   controller to the API server, and an agent's recent flows can hold them for a while. The escape
-   canary's `AUDIT` lines are expected at any time while the cluster audits: they are its network
-   check's attempts at what the policies forbid, every hour
+   `open-feature-operator`, `reportportal`, `robot`, `security-system` and `sso-system` from before
+   they landed are expected, such as the proxies to `hello` on 8080 and to the controller on 18000,
+   and the controller to the API server, and an agent's recent flows can hold them for a while. The
+   escape canary's `AUDIT` lines are expected at any time while the cluster audits: they are its
+   network check's attempts at what the policies forbid, every hour
    ([The escape canary](#the-escape-canary)).
 3. **Watch a day of the record**, from the moment the Kustomizations that hold the allows, `hello`,
    `demo-volsync-movers`, `envoy-gateway`, `kromgo`, `dex`, `oauth2-proxy`, `backstage`, `falco`,
    `crowdsec`, `open-feature-operator`, `network-audit`, `ascender-operator`, `ascender`, `locust`,
-   `robot`, `robot-ascender` and `escape-canary`, are Ready at the revision the merge gives them
-   (`flux get kustomizations`, where each one's revision is the digest of its artifact, its
-   application's `app/`, which holds its allows, and the components). The flow recorder writes every
+   `robot`, `robot-ascender`, `escape-canary`, `reportportal` and `reportportal-volsync-movers`, are
+   Ready at the revision the merge gives them (`flux get kustomizations`, where each one's revision
+   is the digest of its artifact, its application's `app/`, which holds its allows, and the
+   components). The flow recorder writes every
    flow a policy would drop to the log store
    ([The record of what policy drops](#the-record-of-what-policy-drops)), so each path needs to be
    taken only once: `just gateway-check`; `just cluster-check`; the secret demo
@@ -1357,25 +1375,28 @@ does not matter.
    ([OpenFeature Operator](#openfeature-operator)); a job launched in Ascender and a project update
    there, which start a job pod and have the task pod fetch the project ([Ascender](#ascender)); a
    test started through Locust's interface at its route, which has the proxies reach the master,
-   and whose workers then resolve and reach the target ([Locust](#locust)); and a run started by
+   and whose workers then resolve and reach the target ([Locust](#locust)); a run started by
    `just robot-run`, whose runner resolves and reaches its
-   targets ([Robot Framework](#robot-framework)). The blackbox exporter's probes need nothing to
+   targets ([Robot Framework](#robot-framework)); and ReportPortal opened by its name and signed in
+   to with its own login, which has the proxies reach its ui and its api and the api read its
+   database ([ReportPortal](#reportportal)). The blackbox exporter's probes need nothing to
    start them: its pods reach the proxies on 10080 and 10443 at every scrape of a `Probe`
    ([Probes](#probes)). Then let a night pass, for the paths nobody takes by hand: the nightly dump
    of `backstage-db` from 02:00, which waits up to 20 minutes before it starts ([Dumps](#dumps)),
-   the base backup of `backstage-db` at 02:47 UTC, the same two of `ascender-db`, the nightly
-   backup of `volsync-demo` at 03:17, and its restore drill's restore at 04:17 and check at 05:17
-   ([The restore drill](#the-restore-drill)), and the nightly run of `robot-suites` at 05:45
-   ([Robot Framework](#robot-framework)). The escape canary's two checks need nothing to start them
-   either and run in any window: `escape-canary-network` at :23 every hour and
-   `escape-canary-rights` at :10 every hour ([The escape canary](#the-escape-canary)).
+   the base backup of `backstage-db` at 02:47 UTC, the same two of `ascender-db` and of
+   `reportportal-db`, the nightly backup of `volsync-demo` at 03:17, and its restore drill's
+   restore at 04:17 and check at 05:17 ([The restore drill](#the-restore-drill)), the nightly backup
+   of ReportPortal's files at 03:53 ([ReportPortal](#reportportal)), and the nightly run of
+   `robot-suites` at 05:45 ([Robot Framework](#robot-framework)). The escape canary's two checks
+   need nothing to start them either and run in any window: `escape-canary-network` at :23 every
+   hour and `escape-canary-rights` at :10 every hour ([The escape canary](#the-escape-canary)).
    Once the allows have been Ready for 24 hours, and within 24 hours of taking the paths above, so
    that the window holds them and one nightly backup, one dump, one base backup, one drill and one
    run of the suites, `just network-audit 24h` must exit 0 and print no `AUDIT` line whose
    `NAMESPACE` is a namespace that holds the default deny: `ascender`, `backstage`, `crowdsec`,
    `demo`, `envoy-gateway-system`, `escape-canary`, `kromgo`, `locust`, `open-feature-operator`,
-   `robot`, `security-system` or `sso-system`. The escape canary's `AUDIT` lines are the one
-   exception, and are expected: those whose `SOURCE` starts with `escape-canary/`, which is
+   `reportportal`, `robot`, `security-system` or `sso-system`. The escape canary's `AUDIT` lines are
+   the one exception, and are expected: those whose `SOURCE` starts with `escape-canary/`, which is
    `escape-canary/CronJob/escape-canary-network` on the node that reported the line,
    `escape-canary/<pod>` when another node did, and `escape-canary/Job/<name>` for a run made by
    hand, of `NAMESPACE` `escape-canary`, egress, for each of the network check's attempts but the
@@ -3082,7 +3103,7 @@ where Grafana lists it.
 | Cilium Metrics (`cilium-agent`) | The agents' processes, API, BPF, datapath, policy, endpoints, controllers and Kubernetes client | `cilium-monitoring` | `files/cilium-agent/dashboards/cilium-dashboard.json` of the Cilium chart at 1.20.4; Apache-2.0 | Cilium | Prometheus |
 | Cilium BGP sessions (`cilium-bgp`) | The sessions established against those configured for each node, each session's state, the routes advertised and the agents scraped | `cilium-monitoring` | Written for this tree; Apache-2.0 | Cilium | Prometheus |
 | Piraeus Datastore (`piraeus`) | LINSTOR's pools, nodes, resources and error reports, the volumes' read and write rates, and DRBD's connections, quorum and out-of-sync data | `linstor-monitoring` | `config/extras/monitoring/piraeus-dashboard.json` of the Piraeus operator's repository at v2.12.1, the release the pinned chart deploys; Apache-2.0 | Storage | Prometheus |
-| CloudNativePG (`cloudnative-pg`) | A PostgreSQL cluster's instances, their health, configuration, activity, storage, write-ahead log, replication and checkpoints, and the operator's reconciles | `cloudnative-pg`, and the clusters of `n8n`, `backstage` and `ascender` | `charts/cluster/grafana-dashboard.json` of the CloudNativePG chart, where it is the chart `cluster` at 0.0.5; Apache-2.0 | PostgreSQL | Prometheus |
+| CloudNativePG (`cloudnative-pg`) | A PostgreSQL cluster's instances, their health, configuration, activity, storage, write-ahead log, replication and checkpoints, and the operator's reconciles | `cloudnative-pg`, and the clusters of `n8n`, `backstage`, `ascender` and `reportportal` | `charts/cluster/grafana-dashboard.json` of the CloudNativePG chart, where it is the chart `cluster` at 0.0.5; Apache-2.0 | PostgreSQL | Prometheus |
 | Falco (`falco`) | The rules that matched, by rule, source and priority, Falco's memory and CPU, the events it reads and drops, and the versions and engines that run | `falco` | `dashboards/falco-dashboard.json` of the Falco chart at 9.2.2; Apache-2.0 | Falco | Prometheus |
 | external-dns (`external-dns`) | The age of the last successful sync and of the last attempt, the endpoints of the sources and of the registry, their errors and the verified records by type | `external-dns` | Written for this tree; Apache-2.0 | external-dns | Prometheus |
 | Silence operator (`silence-operator`) | Whether the operator is scraped, its reconciles and errors by controller, the reconcile time and the queue depth | `silence-operator` | Written for this tree; Apache-2.0 | Silences | Prometheus |
@@ -3481,9 +3502,11 @@ a `GET` its route admits, which answers 200 without a session once every plugin 
 having migrated its schema in the database, `ascender` one for `ascender.${CLUSTER_DOMAIN}`
 at its ping endpoint `/api/v2/ping/`, which answers 200 without a session once the
 web pod reads the database, `hello-sso` one for `hello-sso.${CLUSTER_DOMAIN}` at
-`/`, `victoria-logs-route` one for `logs.${CLUSTER_DOMAIN}` at the interface `/select/vmui/` and
-`locust-route` one for `locust.${CLUSTER_DOMAIN}` at Locust's interface `/`,
-each with the module that expects the sign-in redirect (**Behind sign-in**, below), and
+`/`, `victoria-logs-route` one for `logs.${CLUSTER_DOMAIN}` at the interface `/select/vmui/`,
+`locust-route` one for `locust.${CLUSTER_DOMAIN}` at Locust's interface `/` and
+`reportportal-route` one for `reportportal.${CLUSTER_DOMAIN}` at `/`, which ReportPortal's ui
+answers 200 to anyone, each with the module that expects the sign-in redirect (**Behind sign-in**,
+below), and
 `gateway-public` one for the redirect, which is probed for the apex of the domain, as the redirect
 takes any host. Backstage's endpoint does not ask the database again once Backstage has started, so
 its probe proves the database at Backstage's start, not since. kromgo's
@@ -3537,14 +3560,16 @@ proxies ask oauth2-proxy, which answers with the 302 to dex that starts a sign-i
 `oauthproxy.go` of the pinned v7.15.6), and the proxies send that answer back. A passing probe
 proves the proxies, the certificate, the route, the policy in its path and oauth2-proxy answering;
 not the backend behind it, which `hello-route`'s probe of the same backend covers, and for Locust's
-master the stock alerts on its pods ([Locust](#locust)), nor dex, which dex's own probe covers. The
-day the policy is lost and the backend answers anyone, the answer is a 200 and
-`PublicEndpointWrongStatus` fires. So the probe asks for a path the backend answers 200: `/` of
-`hello-sso`, the interface of `logs`, not its root, which the route itself redirects with a 302 that
-would pass the probe with the policy lost, and `/` of `locust`, Locust's page, which it answers to
-anyone. The sign-in paths on the same host, the routes `hello-sso-oauth2`, `logs-oauth2` and
-`locust-oauth2` that `components/sso` adds and no policy covers, are covered by the host's one
-`Probe`: the probes are of hostnames, and the probe meets the route the policy covers.
+master and ReportPortal's pods the stock alerts on their pods ([Locust](#locust),
+[ReportPortal](#reportportal)), nor dex, which dex's own probe covers. The day the policy is lost
+and the backend answers anyone, the answer is a 200 and `PublicEndpointWrongStatus` fires. So the
+probe asks for a path the backend answers 200: `/` of `hello-sso`, the interface of `logs`, not its
+root, which the route itself redirects with a 302 that would pass the probe with the policy lost,
+`/` of `locust`, Locust's page, which it answers to anyone, and `/` of `reportportal`, which
+ReportPortal's ui answers to anyone. The sign-in paths on the same host, the routes
+`hello-sso-oauth2`, `logs-oauth2`, `locust-oauth2` and `reportportal-oauth2` that `components/sso`
+adds and no policy covers, are covered by the host's one `Probe`: the probes are of hostnames, and
+the probe meets the route the policy covers.
 
 **While an application is not running**, the probe of its route fails, and it is
 `PublicEndpointWrongStatus` that fires, not `PublicEndpointDown`: the proxies answer the probe
@@ -3555,8 +3580,8 @@ So on a new cluster the alert fires for an application whose pods wait for a sec
 to the store, from 5 minutes after it is applied until the secret is there: n8n, for its encryption
 key ([n8n](#n8n)); dex, for the GitHub client; and after dex oauth2-proxy, for the list of
 identities, as its route and its `Probe` are applied only once dex is Ready. `hello-sso`,
-`victoria-logs-route` and `locust-route` wait for oauth2-proxy in the same way, so their probes meet
-the redirect from their first run
+`victoria-logs-route`, `locust-route` and `reportportal-route` wait for oauth2-proxy in the same
+way, so their probes meet the redirect from their first run
 ([What the owner does, in order](#what-the-owner-does-in-order)). A route whose application takes
 longer than the alert's 5 minutes to start, as Backstage on its database's first start, raises it
 until it answers.
@@ -5194,7 +5219,7 @@ backup's snapshot holds what is on disk at its moment, as after a crash, and the
 file's data to disk later than its name, so a snapshot can hold a file renamed before it was synced
 as an empty one; synced first, the heartbeat in a snapshot is the last one or the new one, whole.
 Only an application that writes the canary takes the drill: without one, every check fails on the
-missing heartbeat. n8n and Open WebUI write none, and their volumes have no drill.
+missing heartbeat. n8n, Open WebUI and ReportPortal write none, and their volumes have no drill.
 
 **The check.** It reads `DRILL_DIR`, the claim's mount, and `DRILL_MAX_AGE_SECONDS`, the largest
 age, and writes one line to the job's log that names the case. It passes, printing the heartbeat's
@@ -6058,19 +6083,21 @@ login in front of it, and no application brings its own. Two applications in the
   public name, so it needs neither a route out and back through the edge nor trust in the Gateway's
   certificate. Its one callback is `https://auth.${CLUSTER_DOMAIN}/oauth2/callback`, whichever host a
   person starts from, so dex has one redirect URI and an opting application adds none.
-- Three routes opt in: `demo/hello-sso`, `hello-sso.${CLUSTER_DOMAIN}`, a second hostname on the
+- Four routes opt in: `demo/hello-sso`, `hello-sso.${CLUSTER_DOMAIN}`, a second hostname on the
   `hello` backend, `monitoring/victoria-logs-route`, `logs.${CLUSTER_DOMAIN}`, the log store's
-  interface ([The log store's interface](#the-log-stores-interface)), and `locust/locust-route`,
-  `locust.${CLUSTER_DOMAIN}`, Locust's interface ([Locust](#locust)). No other application is
-  behind it.
+  interface ([The log store's interface](#the-log-stores-interface)), `locust/locust-route`,
+  `locust.${CLUSTER_DOMAIN}`, Locust's interface ([Locust](#locust)), and
+  `reportportal/reportportal-route`, `reportportal.${CLUSTER_DOMAIN}`, ReportPortal
+  ([ReportPortal](#reportportal)). No other application is behind it.
 
 Each is its own Kustomization, with `wait`, that nothing but the routes that opt in names in
-`dependsOn` (oauth2-proxy names dex): `hello-sso`, `victoria-logs-route` and `locust-route` wait on
-oauth2-proxy, and nothing waits on any of those routes. A cluster that lists neither application
-builds none of it, and a cluster whose overlay lists a route that opts in without them is refused.
-The namespace enforces the restricted Pod Security level, and `just pod-security-check` evaluates
-their pods. It denies traffic by default, and each application's `ciliumnetworkpolicy.yaml` lets
-its flows through ([What the namespaces let through](#what-the-namespaces-let-through)).
+`dependsOn` (oauth2-proxy names dex): `hello-sso`, `victoria-logs-route`, `locust-route` and
+`reportportal-route` wait on oauth2-proxy, and nothing waits on any of those routes. A cluster that
+lists neither application builds none of it, and a cluster whose overlay lists a route that opts in
+without them is refused. The namespace enforces the restricted Pod Security level, and
+`just pod-security-check` evaluates their pods. It denies traffic by default, and each
+application's `ciliumnetworkpolicy.yaml` lets its flows through
+([What the namespaces let through](#what-the-namespaces-let-through)).
 
 ### Who is admitted
 
@@ -6154,14 +6181,15 @@ Until the first two exist the ExternalSecret `dex-github` reports the missing ke
 in `CreateContainerConfigError`, and the Kustomization `dex` is not Ready, with the pods' state as its
 reason. Until the third exists the Secret `oauth2-proxy-allowed-emails` does not exist, the pods
 of oauth2-proxy stay in `ContainerCreating`, and the Kustomization `oauth2-proxy` is not Ready, and
-neither are `hello-sso`, `victoria-logs-route` and `locust-route`, which wait for it and are not
-applied until it is. Nothing else of the cluster waits on any of them, and the generated secrets are
-made as soon as External Secrets runs. Until the first two exist the probe of `dex` under the domain
-fails, and `PublicEndpointWrongStatus` fires for it; then, until the third exists, the probe of
-`auth` does. The routes and `Probe`s of oauth2-proxy, of `hello-sso`, of `victoria-logs-route` and
-of `locust-route` are applied with their applications, each once the one it waits for is Ready, so
-the probe of `auth` is not there while dex waits, and the probes of `hello-sso`, of `logs` and of
-`locust` meet the redirect from their first run ([Probes](#probes)).
+neither are `hello-sso`, `victoria-logs-route`, `locust-route` and `reportportal-route`, which wait
+for it and are not applied until it is. Nothing else of the cluster waits on any of them, and the
+generated secrets are made as soon as External Secrets runs. Until the first two exist the probe of
+`dex` under the domain fails, and `PublicEndpointWrongStatus` fires for it; then, until the third
+exists, the probe of `auth` does. The routes and `Probe`s of oauth2-proxy, of `hello-sso`, of
+`victoria-logs-route`, of `locust-route` and of `reportportal-route` are applied with their
+applications, each once the one it waits for is Ready, so the probe of `auth` is not there while dex
+waits, and the probes of `hello-sso`, of `logs`, of `locust` and of `reportportal` meet the redirect
+from their first run ([Probes](#probes)).
 
 The wait is not open-ended. Each release's install times out after 10 minutes and is retried three
 times (the root's release defaults, [What the root sets](#what-the-root-sets)); after that
@@ -9979,6 +10007,285 @@ the pinned sources, and the list is what to look at when the applications first 
   and its script's requests to the API, made over plain http from inside the cluster, carry no
   session, as the suite signs in nowhere.
 
+### ReportPortal
+
+ReportPortal keeps test runs as launches, with their test items, logs and attachments and the
+history of each test across launches, and shows them in the browser. It runs in the namespace
+`reportportal` (`apps/base/reportportal/`), from its publisher's chart `reportportal` 26.11.18, the
+26.1 release, on the classic Helm repository `https://k8s.reportportal.io`, with its database from
+the PostgreSQL component and its files on a volume of the volsync component, at its own hostname
+behind the cluster's sign-in and then its own login. A cluster selects it with four entries of its
+overlay: the namespace directory, `reportportal/ks.yaml`, `reportportal-route/ks.yaml` and
+`reportportal-volsync-movers/ks.yaml`; with the namespace directory alone it builds the namespace,
+its defaults and its default deny, and nothing else of ReportPortal. `tests/reportportal.bats` holds
+what follows on the built applications and the chart rendered with the release's values and
+post-renderer (`features/reportportal.feature`). What this section says of the services is read
+from their sources at the tags of the images, `6.0.0` of `github.com/reportportal/service-api`,
+`service-ui`, `service-jobs` and `migrations` and of the chart's repository
+`github.com/reportportal/kubernetes` at `reportportal-26.11.18`. What it says of the images' users,
+the paths they write, how each stops without its peers, the ui's answers and RabbitMQ's lookups was
+also seen in local runs of the pinned images offline (Pod Security and Network, below).
+
+- **The three applications.** `reportportal` installs the chart, from the `HelmRepository`
+  `reportportal` and the `HelmRelease` `reportportal`, whose values are `app/values.yaml` in a
+  generated ConfigMap with Flux's substitution off, and holds the database's component, the files'
+  component, the two generated Secrets and the policies; it takes the long timeout and waits. The
+  chart names no namespace on its own Deployments, Services and Jobs, which Helm installs into the
+  release's; the post-renderer writes `reportportal` on them, after its other patches, so that the
+  tree's renders hold them where the cluster does.
+  `reportportal-route` holds the route, the sign-in component's policy and route, and the `Probe`,
+  and is applied once `reportportal` is Ready. `reportportal-volsync-movers` holds the policies of
+  the namespace's backup movers, as `demo-volsync-movers` does for `demo`.
+- **What runs.** One replica of each:
+  - the ui, the Deployment `reportportal-ui`: nginx serving the interface's files from the image
+    `reportportal/service-ui`, on 8080. It serves `/`, `/ui/`, `/health`, `/ui/health` and
+    `/ui/info` itself and proxies nothing; its entrypoint writes `config.json` among the files and
+    nginx's configuration in `/tmp` before nginx starts.
+  - the api, the Deployment `reportportal-api`: `reportportal/service-api` on 8585 under `/api`,
+    which serves the interface's every call, the reporting API agents send launches to and the login
+    itself (`/api/sso/oauth/token`); 26.1 has no separate authorization or index service. Its init
+    container `migrations-waiting-init`, of `reportportal/k8s-wait-for`, waits for the migrations Job
+    to complete through the API server.
+  - the jobs service, the Deployment `reportportal-jobs`: `reportportal/service-jobs` on 8686 under
+    `/jobs`, which cleans launches, logs, attachments, the files they leave and activity events on
+    its schedules, daily, and sums each project's files every five minutes; its init container waits
+    as the api's does. Its daily usage statistics to Google are off by its environment (What it
+    calls outside the cluster, below).
+  - RabbitMQ, the StatefulSet `reportportal-rabbitmq` of the chart's subchart, `rabbitmq`
+    4.4.0-management: the api's reporting queues and the analyzers' exchanges.
+  - the migrations, the Job `reportportal-migrations` of the release, not a hook: it waits for the
+    database's primary and runs `migrate up` of `reportportal/migrations` on the schema, over TLS.
+  - the pre-upgrade hook, the Job `reportportal-pre-upgrade-cleanup`, which deletes the migrations
+    Job with `kubectl` before an upgrade, as a Job's template cannot change and the upgrade's Job
+    must be made anew.
+- **What does not run, and what it costs.** The auto-analyzer, whose StatefulSet and Service the
+  chart renders whatever its values and the release's post-renderer deletes: auto-analysis, the
+  suggestions of a defect's type learnt from earlier ones, and the grouping of unique errors are
+  lost; pattern analysis, which the api runs on the database, stays. OpenSearch, which the analyzer
+  and the paid Test Executions alone read (`ES_HOSTS` in the analyzer's StatefulSet): nothing else
+  of 26.1 needs it. SeaweedFS and MinIO, the bundled object stores: the files are on the component's
+  volume (Files, below). The bundled PostgreSQL: the database is the component's. The MCP server,
+  which would serve ReportPortal's API to AI assistants. The paid tier, Test Executions and the
+  SCIM Bridge, whose images ReportPortal gives its subscribers alone (`premium` in the chart's
+  values). The chart's Ingress, HTTPRoute, disruption budgets and test hook are off by values; the
+  root's `test.enable` therefore runs no test of this release.
+- **Licences.** The chart and the services are Apache-2.0; RabbitMQ is MPL-2.0; the database is
+  PostgreSQL's, under the PostgreSQL licence.
+- **The images**, each pinned by tag and digest, `IfNotPresent`, its tag under a `# renovate:`
+  comment in `values.yaml`: `docker.io/reportportal/service-ui`, `service-api`, `service-jobs` and
+  `migrations` at 6.0.0, the version the chart's own values name, `docker.io/reportportal/k8s-wait-for`
+  at 2.1.7, the tag the chart's `latest` named when it was pinned, `docker.io/rancher/kubectl` at
+  v1.35.6, the chart's, and `docker.io/rabbitmq` at 4.4.0-management: the chart names RabbitMQ by
+  tag alone, dropping the digest its subchart carries, so the release pins the tag's digest. The
+  values give each tag alone, and the chart puts `global.imageRegistry`, `docker.io`, before its own
+  repository, so Renovate's helm-values manager, which reads a map with a `repository`, reads none of
+  them and the custom manager reads each once; the ui's init container names the ui's image as an
+  `image:` line, which the helm-values manager alone reads. The busybox of RabbitMQ's init container
+  is pinned by its subchart. The registries tag release candidates and per-architecture builds as
+  variants, such as `5.2.0-RC` and `5.8.0-arm64`, and no pre-release as a plain version.
+- **Pod Security.** The namespace enforces `restricted`, and every pod of the release passes it, the
+  hook included. The chart writes a pod's security context and nothing at the container's level, so
+  the values set each pod's and the release's post-renderer gives each container of ReportPortal's
+  pods, init containers included, no privilege escalation, no capability and a read-only root
+  filesystem. The api and the jobs service run as user and group 1000, as their images run as root
+  by default; the ui as 101, nginx's user of its image, which otherwise runs as root; the
+  migrations as 65532, the image's `nonroot`; the hook as 1000, its image's `kubectl` user, by
+  number, which the post-renderer gives its pod; RabbitMQ as 999 with its chart's own hardened
+  context. Each image was run so, with that user, a read-only root, no capability, no new
+  privileges and no network: the ui answers 200 on `/`, `/ui/` and `/health` on 8080; the api stops
+  only on the missing database and the jobs service only on the missing RabbitMQ; the migrations
+  wait for the database; `k8s-wait-for` and `kubectl` stop on the missing API server as 1000. What
+  they write is an emptyDir each: the api `/tmp`, for Tomcat's files and the plugins, and
+  `/var/log/reportportal`, where logback opens `audit.log` at start, empty while `AUDIT_LOGGER` is
+  unset, and stops the api when it cannot; the jobs service `/tmp`; the ui `/tmp`, for its
+  `nginx.conf` and pid, `/var/cache/nginx`, nginx's temporary files, and `/usr/share/nginx/html`,
+  which the image owns as root and where its entrypoint writes `config.json`. That directory is
+  filled before nginx starts by the init container `copy-html`, of the ui's own image as the ui's
+  user, with `cp -R`. The jobs container's `/tmp` is mounted by the post-renderer, as the chart's
+  `extraVolumeMounts` of the jobs Deployment are written at another indentation than the files'
+  mount and its output does not parse. The ui and the migrations mount no service account token;
+  the api, the jobs service and the hook keep theirs for `k8s-wait-for` and `kubectl`, which the
+  chart's role lets list pods, services and jobs and delete jobs in the namespace. Requests and
+  limits are the chart's for each of its containers: they are the publisher's and are not measured
+  here. The init container `copy-html`, which the values add, requests and is limited to 50m and
+  100Mi, not measured either. RabbitMQ, for which the chart sets none, requests 100m and 256Mi with
+  a 512Mi limit, not measured either, and keeps its data on a 1Gi claim of the default class, not
+  backed up.
+- **The database** is a PostgreSQL cluster named `reportportal-db` from `components/cnpg-cluster`,
+  three instances of 5Gi each, PostgreSQL 18, which the migrations' SQL takes as it is. The api, the
+  jobs service and the migrations read its password from the operator's Secret
+  `reportportal-db-app` and its address, `reportportal-db-rw.reportportal.svc.cluster.local`, its
+  user `app` and its database `app` from the values. The migrations create the extensions `ltree`,
+  `pgcrypto`, `pg_trgm` and `unaccent`, each a trusted extension that the database's owner may
+  create, so `app` runs every migration. They connect with `sslmode=require`, which encrypts but
+  verifies nothing; the api's and the jobs service's JDBC URL names no `sslmode`, and their driver,
+  pgjdbc 42.7, then prefers TLS, which the instances serve, without verifying the server either.
+  Their pools hold at most 27 and 12 connections, and the migrations open theirs while they run,
+  under PostgreSQL's default of 100. The migrations' entrypoint passes the password to `migrate` in
+  its command line, so it is in the container's process list while the Job runs. The dump job's
+  pods carry the labels its policies select, by a patch of `app/kustomization.yaml`. Backups,
+  dumps and restores are the component's ([PostgreSQL](#postgresql)).
+- **Files.** `storage.type: filesystem` keeps the files under `/data/storage` on the claim
+  `reportportal-shared-volume-claim` of `components/volsync`, 5Gi, `ReadWriteOnce`, on the default
+  class, `linstor-replicated`; the release's post-renderer deletes the chart's claim of that name.
+  The volume holds the attachments of launches and their thumbnails, users' avatars, the files of
+  uploaded plugins, and `keystore/secret-integration-salt`, the salt that encrypts the credentials
+  of integrations the database keeps (`EncryptConfiguration` in service-api). The api and the jobs
+  service mount it on one node: as Robot Framework's report server and runner do
+  ([Robot Framework](#robot-framework)), the jobs pod requires the api's node (`podAffinity` on
+  `component` by `kubernetes.io/hostname`) and the api prefers the jobs pod's node, weight 100,
+  both with `strategy: Recreate`, so that a new api pod, after an update or a drain, goes where
+  the jobs pod holds the volume when that node has room for it. The api's affinity is a preference,
+  not a requirement: a new api pod alone, as after a change to the api's values only, that the
+  jobs pod's node has no room for goes to another node and waits there for the volume, which the
+  jobs pod holds, until the jobs pod is restarted and its new pod follows the api. The volume is
+  backed up daily at 03:53 UTC, 7 daily, 4 weekly and 3 monthly kept
+  ([Volume backups](#volume-backups)). A restore takes the volume and the database from matching
+  days: a database without its files shows attachments that are not there, and one restored beside
+  another day's salt cannot decrypt its integrations' credentials.
+- **Secrets.** Nothing secret is in the tree, the tree builds no Secret and the store holds no key
+  of ReportPortal's, so `secret-rotation.yaml` names none. Two `Password` generators and two
+  `CreatedOnce` ExternalSecrets, in hex, make `reportportal-superadmin`, the superadmin's first
+  password of 32 characters, as the login form takes at most 36 (`PASSWORD_MAX_ALLOWED_LENGTH` in
+  service-ui), and `reportportal-rabbitmq`, RabbitMQ's password under `password` and
+  `rabbitmq-password` and its Erlang cookie under `erlang-cookie`. They live in those Secrets, in etcd
+  and in its snapshots; RabbitMQ keeps its user's password in its own data from its first start, so a
+  regenerated `reportportal-rabbitmq` no longer matches it, and the api and the jobs service cannot
+  connect until the claim `data-reportportal-rabbitmq-0`, which holds only reports in flight, is
+  deleted with its pod and made anew. The signing key of ReportPortal's sessions, the server setting
+  `secret.key`, which the api generates when `rp.jwt.signing-key` is unset
+  (`AuthorizationServerConfig`), and the users' API keys are in the database, and so in its backups
+  and dumps.
+- **The first sign-in.** At `https://reportportal.${CLUSTER_DOMAIN}/`, through the cluster's
+  sign-in, as `admin@reportportal.internal`, with the password this prints, with `KUBECONFIG` set to
+  the file `just cluster-kubeconfig` prints:
+
+  ```sh
+  kubectl --namespace reportportal get secret reportportal-superadmin --output jsonpath='{.data.password}' | base64 -d; echo
+  ```
+
+  The api sets that password on `admin@reportportal.internal` at each start until the account first
+  signs in, and stops if it has none then; after the first sign-in it never reads it again
+  (`AdminPasswordInitializer`), so a password changed in the interface leaves the Secret stale. The
+  migrations also make a second account, `default@reportportal.internal`, a user whose password
+  they set to the same value on every install (`3_default_data`, `11_password_encoding` and
+  `212_update_default_users` of the migrations): it exists at 6.0.0, and deleting it is the
+  owner's first step after the rollout. The second is turning Analytics off under the server
+  settings (What it calls outside the cluster, below). A new instance has one organization,
+  `My organization`, which a project such as `robot` is made in.
+- **What it keeps, and for how long.** A project made at 6.0.0 keeps launches and logs 90 days and
+  attachments 14 days (`ProjectAttributeEnum` in service-api), which its settings change; the jobs
+  service removes what is older once a day, and activity events after 365 days
+  (`cleanEventsRetention`).
+- **Who can read it.** Through the public Gateway, only an identity the cluster's sign-in admits
+  reaches it, and then only ReportPortal's own accounts read it, each the projects it is a member
+  of. Inside the cluster, the ui's and the api's policies take the proxies and the kubelet alone
+  once the cluster enforces network policy, and nothing while the cluster audits it
+  ([Network policy](#network-policy)): until then a pod of any namespace reaches the namespace's
+  Services directly, the ui's, the api's, the jobs service's and RabbitMQ's among them, and
+  ReportPortal's own login is what stands in front of the api, and RabbitMQ's generated password in
+  front of RabbitMQ. There are two sign-ins: the cluster's, then ReportPortal's own login;
+  ReportPortal's GitHub login plugin, SAML and LDAP are not set up. The interface calls the api on
+  the same host, so once the cluster's session ends, its next request gets the redirect to sign-in
+  instead of an answer, and the page needs a reload.
+- **The hostname** is `reportportal.${CLUSTER_DOMAIN}`, the `HTTPRoute` `reportportal` of
+  `reportportal-route` on the public Gateway's `https` listener, with the chart's own route's rules at
+  26.11.18 (`templates/ingress/gateway-http-route.yaml`), which the values leave off: `/api` to the
+  Service `reportportal-api` on 8585, everything else to `reportportal-ui` on 8080, no filter. Every
+  call the interface makes is under `../api` on its own origin (`app/src/common/urls.js` of
+  service-ui), so one host serves it. `components/sso` puts it behind the cluster's sign-in
+  ([Sign-in](#sign-in)), and oauth2-proxy's grant names `reportportal`; no firewall is in front. The
+  route's comment records the chart's version as `reportportal-paths`, which the test holds to the
+  version the release pins. Its `Probe` is hello-sso's, at `/` with `public_https_signin`: the ui
+  answers `/` with 200 to anyone, which the probe would see the day the policy is lost.
+- **How the API is reached from inside the cluster.** A client that reports launches, such as Robot
+  Framework's runs, calls `http://reportportal-api.reportportal.svc.cluster.local:8585` under
+  `/api`, with an API key of a ReportPortal user, never the public name, which the cluster's
+  sign-in answers with a redirect. The api's policy takes it by one rule appended to its ingress,
+  naming the client's namespace and its pods' labels on 8585: the policy is the last document of
+  `app/ciliumnetworkpolicy.yaml` and its ingress its last key. The client's namespace adds the
+  egress rule to the api's pods.
+- **Network.** The namespace denies traffic both ways by default, and each flow is a rule of the
+  policy of the pod that needs it, by the chart's `component` label:
+
+  | Pod | Takes | Reaches |
+  | --- | --- | --- |
+  | ui | the proxies and the kubelet's probes on 8080 | nothing |
+  | api | the proxies and the kubelet's probes on 8585 | the resolver, the database's instances on 5432, RabbitMQ on 5672 and 15672, the jobs service on 8686, the API server on 443 and 6443 |
+  | jobs service | the api and the kubelet's probes on 8686 | the resolver, the database's instances on 5432, RabbitMQ on 5672 and 15672, the API server on 443 and 6443 |
+  | migrations | nothing | the resolver and the database's instances on 5432 |
+  | pre-upgrade hook | nothing | the API server on 443 and 6443 |
+  | RabbitMQ | the api and the jobs service on 5672 and 15672 | nothing |
+
+  The API server is for `k8s-wait-for` and `kubectl`. RabbitMQ's probes run inside its container,
+  and its node's own name is in its pod's hosts file: a local run of its image with a query logger
+  on its resolver's address received no query through its start and readiness check, and caught
+  the lookup made on purpose after them. The database's pods, a restore's recovery job and the dump
+  job let through what Backstage's do, for `reportportal-db`, its instances taking the api, the jobs
+  service, the migrations and the dump job on 5432. The movers are `reportportal-volsync-movers`'.
+  The proxies reach the ui on 8080 and the api on 8585 and nothing else of the namespace.
+- **What it calls outside the cluster**, read from the sources of service-api and service-jobs. No
+  pod of the namespace but the database's and the movers has a rule to the world, and while the
+  cluster audits network policy a call to the world passes and is reported, so each of these is off
+  by the services' own settings:
+
+  | What | Setting | State |
+  | --- | --- | --- |
+  | The JUnit import plugin's index and newest jar, from the `develop` branch of its GitHub repository, loaded into the api at each start (`PluginStartUpService`) | `rp.plugins.default.load` | off: `RP_PLUGINS_DEFAULT_LOAD=false` in the api's environment |
+  | The day's counts of defect types set by users and by the analyzer, which the api records in the table `analytics_data` while `server.analytics.all` is true, posted once a day by the jobs service's `defectUpdateStatisticsJob` to Google Analytics' Measurement Protocol (`DefectUpdateStatisticsJob` in service-jobs) | `rp.environment.variable.ga.mId` and `rp.environment.variable.ga.id`, both set in the image's own configuration | off: `RP_ENVIRONMENT_VARIABLE_GA_MID` and `RP_ENVIRONMENT_VARIABLE_GA_ID` empty in the jobs service's environment, so the job returns before it reads or deletes a row; the api records its rows until the superadmin turns Analytics off, below, and they stay in the database |
+  | The JSON schemas of the reporting API at `https://schema.reportportal.io/` | `rp.schema.source` | never fetched: the prefix is mapped to the schemas in the api's jar (`JsonSchemaValidatorConfig`) |
+  | The analyzer, for `/api/info` | `RP_ANALYZER_BASEURL`, the chart's Service name | no such Service, so the name resolves to nothing and the api answers without it |
+  | Google Analytics and Tag Manager, loaded by the browser | the server setting `server.analytics.all`, true at install (`3_default_data`) | on until the superadmin turns it off under the server settings' Analytics; the browser calls them, so no policy of the cluster stops it. `rp.analytics.enableByDefault` of the api's properties is read by no code at 6.0.0, so no variable is set for it |
+  | Mail, issue trackers, chat and other integrations, and GitHub, SAML or LDAP sign-in | set up in the interface | none set up; once one is, the api has no rule to it, and while the cluster audits the flow passes and is reported ([Service addresses](#service-addresses)) |
+- **Monitoring.** No monitor scrapes ReportPortal: the api's `/api/prometheus` needs a user's token
+  (`SecurityConfiguration` lets `/health` and `/info` alone through without one), and RabbitMQ's
+  metrics are off. The stock workload alerts, the route's `Probe`, which feeds `PublicEndpointDown`
+  and `PublicEndpointWrongStatus`, and the component's database alerts cover it; the component's
+  PodMonitor of the database is the application's one monitor. The api is Ready once `/api/health`
+  answers UP, which holds RabbitMQ's health and, when the jobs service answers, the jobs service's;
+  a jobs service that cannot be reached is reported as unknown and leaves the api UP
+  (`JobsHealthIndicator`), so the release is Ready only once the jobs Deployment is as well. The
+  api's startup probe allows 30 seconds and then twenty of 10.
+- **Updates.** Renovate proposes the chart and the four ReportPortal images in one pull request, the
+  group `ReportPortal`, and merges nothing of the application by itself. Each new release runs its
+  migrations on the database: the pre-upgrade hook deletes the old migrations Job, the upgrade makes
+  it anew, and the api and the jobs service wait for it to complete. Helm deletes the hook's own Job
+  before making it again, which the release's post-renderer adds to the chart's deletion once it
+  succeeds, so a hook that failed blocks no later upgrade. An upgrade has the install's ten minutes
+  (the release's `timeout`), where helm-controller would give it five. One that fails or runs over
+  them is rolled back, and the release defaults then try the upgrade again, three times, rolling
+  back after each that fails ([What the root sets](#what-the-root-sets)). A rollback takes nothing
+  of the database back: Helm deletes the upgrade's migrations Job, with a migration it was running
+  cut short, and makes the previous release's again, whose `migrate up` refuses a schema at a
+  version its migrations do not hold, so the previous api and jobs pods wait in their init
+  containers. Each retry's pre-upgrade hook deletes that Job and the upgrade makes its own anew:
+  where the upgrade's migrations had all completed, its `migrate up` has nothing to do, and the
+  retry goes through once what failed the first attempt has passed, such as a slow image pull. Two
+  cases leave ReportPortal down. A migration cut short leaves the schema dirty, which `migrate up`
+  of every release refuses (`ErrDirty` in `migrate.go` of golang-migrate v4.19.0, which the
+  migrations image runs), so it is down until the database and the volume are restored from before
+  the upgrade ([Backups and restores](#backups-and-restores), [Restoring](#restoring)). And when
+  every retry fails on a schema that is not dirty, it is down until a release that fixes the cause
+  is merged, or that restore is made. A restore is what takes a release back. A release can change
+  how the files are kept, as 26.1 changed 26.0's object layout and renamed the superadmin's login
+  (the chart's README, Upgrading from 26.0): read the release's migration guide before merging.
+  The calls outside the cluster that the services' environment turns off are read again at the new
+  tags, `PluginStartUpService` of service-api and `DefectUpdateStatisticsJob` of service-jobs, as a
+  release that renames the properties they read turns the call back on (What it calls outside the
+  cluster, above). k8s-wait-for, kubectl and RabbitMQ move in pull requests of their own.
+- **Removal.** Taking the four entries out of the overlay, with the grant's, the proxies' and the
+  catalogue's lines, prunes the release, and with it its Deployments, StatefulSet, Services, Jobs
+  and role; the Cluster and its volumes, and the operator's Secret; the files' claim and its VolSync
+  objects; the generators and the ExternalSecrets, whose Secrets go with them as their owner; the
+  policies; and the route, its policy and its `Probe`. What stays: the namespace, whose prune is
+  disabled; RabbitMQ's claim `data-reportportal-rabbitmq-0`, as a StatefulSet's claims outlive it;
+  and the backups in the object storage, the database's archive and dumps and the volume's
+  repository. Bringing ReportPortal back needs that claim deleted first, as the new
+  `reportportal-rabbitmq` no longer matches the password RabbitMQ keeps in it (Secrets, above), and
+  the database's old archive dealt with as a rebuild deals with one, restored from or deleted, as a
+  database made anew does not archive into a path that holds WAL
+  ([rebuild.md](runbooks/rebuild.md#building-it-again), step 1).
+
 ### Porting an application from the reference catalogue
 
 The steps n8n took, in order; the next port does the same and says where it differs.
@@ -10429,7 +10736,7 @@ of the node's ([Runtime classes](#runtime-classes)).
 Local rules have one place, the `customRules` key of
 `apps/base/security-system/falco/app/values.yaml`: a map of rule file names to their contents,
 which the chart makes the ConfigMap `falco-rules` of and mounts at `/etc/falco/rules.d`, which
-Falco reads after the image's rules. It holds one file, `exceptions.yaml`, of fourteen items, each
+Falco reads after the image's rules. It holds one file, `exceptions.yaml`, of sixteen items, each
 with its reason in a comment above it, and no rule of the tree's own. Each item overrides the
 condition of a placeholder macro the image leaves for known cases, `(never_true)`, which a rule
 negates last: the first item for a placeholder replaces its condition, and each further one appends
@@ -10454,7 +10761,7 @@ reason ([overriding](https://falco.org/docs/concepts/rules/overriding/)):
   override:
     condition: append
 - macro: user_known_stand_streams_redirect_activities
-  condition: or (k8s.ns.name in ("ai-system", "ascender", "backstage") and container.name = "postgres" and container.image.repository = "ghcr.io/cloudnative-pg/postgresql" and proc.name = "manager")
+  condition: or (k8s.ns.name in ("ai-system", "ascender", "backstage", "reportportal") and container.name = "postgres" and container.image.repository = "ghcr.io/cloudnative-pg/postgresql" and proc.name = "manager")
   override:
     condition: append
 - macro: user_known_contact_k8s_api_server_activities
@@ -10478,21 +10785,29 @@ reason ([overriding](https://falco.org/docs/concepts/rules/overriding/)):
   override:
     condition: append
 - macro: user_known_contact_k8s_api_server_activities
-  condition: or (k8s.ns.name in ("ai-system", "ascender", "backstage") and container.name in ("initdb", "join", "postgres") and container.image.repository = "ghcr.io/cloudnative-pg/postgresql" and proc.name = "manager")
+  condition: or (k8s.ns.name in ("ai-system", "ascender", "backstage", "reportportal") and container.name in ("initdb", "join", "postgres") and container.image.repository = "ghcr.io/cloudnative-pg/postgresql" and proc.name = "manager")
   override:
     condition: append
 - macro: user_known_contact_k8s_api_server_activities
-  condition: or (k8s.ns.name in ("ai-system", "ascender", "backstage") and container.name = "plugin-barman-cloud" and container.image.repository = "ghcr.io/cloudnative-pg/plugin-barman-cloud-sidecar" and proc.name = "manager")
+  condition: or (k8s.ns.name in ("ai-system", "ascender", "backstage", "reportportal") and container.name = "plugin-barman-cloud" and container.image.repository = "ghcr.io/cloudnative-pg/plugin-barman-cloud-sidecar" and proc.name = "manager")
   override:
     condition: append
 - macro: user_shell_container_exclusions
-  condition: (k8s.ns.name in ("ai-system", "ascender", "backstage") and container.name = "postgres" and container.image.repository = "ghcr.io/cloudnative-pg/postgresql" and proc.pname = "postgres" and proc.cmdline startswith "sh -c -- /controller/manager wal-archive --log-destination /controller/log/postgres.json pg_wal/")
+  condition: (k8s.ns.name in ("ai-system", "ascender", "backstage", "reportportal") and container.name = "postgres" and container.image.repository = "ghcr.io/cloudnative-pg/postgresql" and proc.pname = "postgres" and proc.cmdline startswith "sh -c -- /controller/manager wal-archive --log-destination /controller/log/postgres.json pg_wal/")
   override:
     condition: replace
 - macro: allowed_clear_log_files
   condition: (not container and fd.name startswith "/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/")
   override:
     condition: replace
+- macro: user_known_contact_k8s_api_server_activities
+  condition: or (k8s.ns.name = "reportportal" and container.name = "migrations-waiting-init" and container.image.repository = "docker.io/reportportal/k8s-wait-for" and proc.name = "kubectl")
+  override:
+    condition: append
+- macro: user_known_contact_k8s_api_server_activities
+  condition: or (k8s.ns.name = "reportportal" and container.name = "delete-job" and container.image.repository = "docker.io/rancher/kubectl" and proc.name = "kubectl")
+  override:
+    condition: append
 ```
 
 The first quiets the image's rule `Redirect STDOUT/STDIN to Network Connection in Container`, of
@@ -10555,7 +10870,7 @@ container and binary of Cilium's agent included. Falco compiles the rule to the 
 with one negation, of that conjunction:
 `(evt.type in (execve, execveat) and container.id != host and proc.is_exe_upper_layer = true and not container.image.repository in () and not (k8s.ns.name = kube-system and container.name = apply-sysctl-overwrites and container.image.repository = quay.io/cilium/cilium and proc.exepath = /opt/cni/bin/cilium-sysctlfix))`.
 
-**The exceptions for the tree's own applications.** The other twelve items quiet four of the image's
+**The exceptions for the tree's own applications.** The other fourteen items quiet four of the image's
 rules for what the tree's own applications do as they run. Each names the namespace, the container's
 name, the image's repository and the process, read from what runs, but the last, which names a path;
 each leaves every other process of its container, every other container and every other namespace to
@@ -10573,8 +10888,8 @@ the rule:
     `postgres`, `ghcr.io/cloudnative-pg/postgresql`, `manager`): the same, the cause not established
     either; PostgreSQL itself in that container still matches.
 - `Contact K8S API Server From Container`, Notice, whose placeholder
-  `user_known_contact_k8s_api_server_activities` the sixth item replaces and six append to: the
-  controllers that call the API server by design.
+  `user_known_contact_k8s_api_server_activities` the sixth item replaces and eight append to, the
+  last two after the log-clearing item: the controllers that call the API server by design.
   - Ascender's dispatcher (`ascender`, `ascender-task`, `ghcr.io/ctrliq/ascender`, `awx-manage`),
     which supervisord runs as `awx-manage run_dispatcher` and which lists the pods of the container
     group Ascender registers in a Kubernetes install every minute, to remove those of finished jobs
@@ -10603,6 +10918,13 @@ the rule:
     plugin's archive, where the plugin puts it as well (`reconcileJob` in
     `internal/cnpgi/operator/lifecycle.go`); it is excepted in both, and any other process in it,
     and the restore Job's own container, still match.
+  - ReportPortal's wait for its migrations (`reportportal`, `migrations-waiting-init`,
+    `docker.io/reportportal/k8s-wait-for`, `kubectl`), which asks for the migrations Job until it
+    has completed, in the api's and the jobs service's pods; the script's shell, the api and the jobs
+    service still match.
+  - ReportPortal's pre-upgrade hook (`reportportal`, `delete-job`, `docker.io/rancher/kubectl`,
+    `kubectl`), which deletes the migrations Job before an upgrade; any other process in that
+    container still matches.
 - `Run shell untrusted`, Notice, `user_shell_container_exclusions` replaced: PostgreSQL's archiver
   in every database of the component (the databases' namespaces, `postgres`, the component's image,
   the parent `postgres` and a command line that starts with the archive command up to `pg_wal/`);
@@ -10707,17 +11029,17 @@ and one made to look like a database's, from the redirect, API server and shell 
 
 Falco compiles each of the five rules to the image's condition with the placeholder, which is never
 true, replaced by one negation of its items. The redirect rule:
-`(evt.type in (dup, dup2, dup3) and container.id != host and evt.rawres in (0, 1, 2) and fd.type in (ipv4, ipv6) and not ((k8s.ns.name = demo and container.name = httpd and container.image.repository = docker.io/library/busybox and proc.name = httpd) or (k8s.ns.name = robot and container.name = httpd and container.image.repository = docker.io/library/busybox and proc.name = httpd) or (k8s.ns.name = piraeus-datastore and container.name = ha-controller and container.image.repository = quay.io/piraeusdatastore/piraeus-ha-controller and proc.name = agent) or (k8s.ns.name in (ai-system, ascender, backstage) and container.name = postgres and container.image.repository = ghcr.io/cloudnative-pg/postgresql and proc.name = manager)))`.
+`(evt.type in (dup, dup2, dup3) and container.id != host and evt.rawres in (0, 1, 2) and fd.type in (ipv4, ipv6) and not ((k8s.ns.name = demo and container.name = httpd and container.image.repository = docker.io/library/busybox and proc.name = httpd) or (k8s.ns.name = robot and container.name = httpd and container.image.repository = docker.io/library/busybox and proc.name = httpd) or (k8s.ns.name = piraeus-datastore and container.name = ha-controller and container.image.repository = quay.io/piraeusdatastore/piraeus-ha-controller and proc.name = agent) or (k8s.ns.name in (ai-system, ascender, backstage, reportportal) and container.name = postgres and container.image.repository = ghcr.io/cloudnative-pg/postgresql and proc.name = manager)))`.
 The shell rule ends
-`... and not (k8s.ns.name in (ai-system, ascender, backstage) and container.name = postgres and container.image.repository = ghcr.io/cloudnative-pg/postgresql and proc.pname = postgres and proc.cmdline startswith "sh -c -- /controller/manager wal-archive --log-destination /controller/log/postgres.json pg_wal/"))`,
+`... and not (k8s.ns.name in (ai-system, ascender, backstage, reportportal) and container.name = postgres and container.image.repository = ghcr.io/cloudnative-pg/postgresql and proc.pname = postgres and proc.cmdline startswith "sh -c -- /controller/manager wal-archive --log-destination /controller/log/postgres.json pg_wal/"))`,
 the log-clearing rule
 `... and not (not container.id != host and fd.name startswith /var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/))`,
 and the API server rule
-`... and not ((k8s.ns.name = ascender and container.name = ascender-task and container.image.repository = ghcr.io/ctrliq/ascender and proc.name = awx-manage) or (k8s.ns.name = ascender and container.name = awx-manager and container.image.repository = ghcr.io/ctrliq/ascender-operator and proc.name = ansible-operato) or (k8s.ns.name = monitoring and container.name = vector and container.image.repository = docker.io/timberio/vector and proc.name = vector) or (k8s.ns.name = kyverno and container.name = kyverno and container.image.repository = reg.kyverno.io/kyverno/kyverno and proc.name = kyverno) or (k8s.ns.name = kyverno and container.name = controller and container.image.repository = reg.kyverno.io/kyverno/reports-controller and proc.name = reports-control) or (k8s.ns.name in (ai-system, ascender, backstage) and container.name in (initdb, join, postgres) and container.image.repository = ghcr.io/cloudnative-pg/postgresql and proc.name = manager) or (k8s.ns.name in (ai-system, ascender, backstage) and container.name = plugin-barman-cloud and container.image.repository = ghcr.io/cloudnative-pg/plugin-barman-cloud-sidecar and proc.name = manager)))`.
+`... and not ((k8s.ns.name = ascender and container.name = ascender-task and container.image.repository = ghcr.io/ctrliq/ascender and proc.name = awx-manage) or (k8s.ns.name = ascender and container.name = awx-manager and container.image.repository = ghcr.io/ctrliq/ascender-operator and proc.name = ansible-operato) or (k8s.ns.name = monitoring and container.name = vector and container.image.repository = docker.io/timberio/vector and proc.name = vector) or (k8s.ns.name = kyverno and container.name = kyverno and container.image.repository = reg.kyverno.io/kyverno/kyverno and proc.name = kyverno) or (k8s.ns.name = kyverno and container.name = controller and container.image.repository = reg.kyverno.io/kyverno/reports-controller and proc.name = reports-control) or (k8s.ns.name in (ai-system, ascender, backstage, reportportal) and container.name in (initdb, join, postgres) and container.image.repository = ghcr.io/cloudnative-pg/postgresql and proc.name = manager) or (k8s.ns.name in (ai-system, ascender, backstage, reportportal) and container.name = plugin-barman-cloud and container.image.repository = ghcr.io/cloudnative-pg/plugin-barman-cloud-sidecar and proc.name = manager) or (k8s.ns.name = reportportal and container.name = migrations-waiting-init and container.image.repository = docker.io/reportportal/k8s-wait-for and proc.name = kubectl) or (k8s.ns.name = reportportal and container.name = delete-job and container.image.repository = docker.io/rancher/kubectl and proc.name = kubectl)))`.
 
 `tests/falco.bats` holds the exceptions to that:
 
-- The place holds that one file of those fourteen items, in that order, each an override of one
+- The place holds that one file of those sixteen items, in that order, each an override of one
   placeholder's condition, the first for a placeholder replacing it and each further one appending
   to it, with its reason in a comment above it, whose words the proof checks item by item, and the
   chart's ConfigMap and the pod's mount carry it. There is no second place: under `/etc/falco` the
@@ -10746,20 +11068,22 @@ and the API server rule
   moves, or whose post-renderer renames the container, fails the proof, saying what Cilium is now,
   and one with `sysctlfix.enabled: false` fails it saying to remove the exception, which then names
   nothing that runs.
-- The other twelve conditions are, to the letter, the conjunctions of values read from what runs,
+- The other fourteen conditions are, to the letter, the conjunctions of values read from what runs,
   each item's from its workload: the namespace its application's Kustomization targets, or, for
   CloudNativePG's, the set of the target namespaces of every Kustomization that takes the component;
   the container's name from the build or the render (Robot's Deployment `robot-reports`, Vector's
   DaemonSet, Kyverno's two Deployments, the operator's Deployment's default container, the `AWX`'s
-  name with `-task`), or, for the containers the operators make at run time, the name their sources
+  name with `-task`, ReportPortal's containers of those names in its render), or, for the containers
+  the operators make at run time, the name their sources
   give, which the proof states with them; the image's repository as the runtime reports it, from the
   build or the render, the component's `imageName`, the `SIDECAR_IMAGE` the Barman Cloud plugin's
   chart renders, and the Piraeus operator's rendered image configuration with the `LinstorCluster`'s
   `repository`, refusing one not written registry first; and the process from Robot's command or the
   table of executables, cut to 15 characters. The archive command's prefix and the snapshot path are
   stated with their sources. A report server renamed or on another image, a log collector, Kyverno
-  or operator on another image, an `AWX` renamed, a component on another image or of another Debian
-  release, a fourth application that takes the component, an HA controller whose image moves by the
+  or operator on another image, an `AWX` renamed, ReportPortal's wait or hook on another image, a
+  component on another image or of another Debian release, a fifth application that takes the
+  component, an HA controller whose image moves by the
   image configuration or the `LinstorCluster`, or one turned off, fails the proof, saying what the
   workload is now. No item names the job pods' container or their image.
 - No item names a field of a pod, an ancestor (`proc.aname`), `proc.exe` or `proc.args`, or any
@@ -11476,6 +11800,7 @@ merge alone, or is unsigned. Who signs each:
 | `https://charts.fairwinds.com/stable` | — | unsigned | a Helm repository: Flux verifies none of its charts |
 | `https://crowdsecurity.github.io/helm-charts` | — | unsigned | a Helm repository: Flux verifies none of its charts |
 | `https://ctrliq.github.io/ascender-operator` | — | unsigned | a Helm repository: Flux verifies none of its charts |
+| `https://k8s.reportportal.io` | — | unsigned | a Helm repository: Flux verifies none of its charts |
 | `https://open-policy-agent.github.io/gatekeeper/charts` | — | unsigned | a Helm repository: Flux verifies none of its charts |
 | `oci://docker.io/envoyproxy/gateway-helm` | — | unsigned | Envoy Gateway signs its image, not its chart |
 | `oci://ghcr.io/bjw-s-labs/helm/app-template` | bjw-s-labs/helm-charts, `chart-release-steps.yaml` on `main` | before merge and by the cluster | the publisher signs keyless; four applications read it |

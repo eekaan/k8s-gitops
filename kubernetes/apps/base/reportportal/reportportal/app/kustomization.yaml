@@ -1,0 +1,36 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/kustomization
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# The database comes from components/cnpg-cluster and the files' volume from components/volsync,
+# which ks.yaml adds.
+resources:
+  - ciliumnetworkpolicy.yaml
+  - helmrelease.yaml
+  - helmrepository.yaml
+  - secrets.yaml
+
+# The component's dump job gets labels for its pods, which its policies in ciliumnetworkpolicy.yaml
+# select it by. The patch targets the CronJob by kind, as Flux substitutes its name after the build
+# (docs/kubernetes.md, PostgreSQL).
+patches:
+  - target:
+      kind: CronJob
+    patch: |-
+      - op: add
+        path: /spec/jobTemplate/spec/template/metadata
+        value:
+          labels:
+            app.kubernetes.io/name: pgdump
+            app.kubernetes.io/instance: reportportal-db
+
+configMapGenerator:
+  - name: reportportal-values
+    files:
+      - values.yaml
+generatorOptions:
+  annotations:
+    kustomize.toolkit.fluxcd.io/substitute: disabled
+
+configurations:
+  - kustomizeconfig.yaml

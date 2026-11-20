@@ -709,9 +709,9 @@ unknown_fields() {
   echo "volsync: ${enabled:-not applied}; namespace: ${namespace:-none}; applications with the component: ${opted:-none}"
   [ "$enabled" = ./apps/base/volsync-system/volsync/app ]
   [ "$namespace" = volsync-system ]
-  # The test application, n8n and Open WebUI, which keep their data on a volume of the component's,
-  # are the applications that take it.
-  [ "$(paste -sd' ' - <<<"$opted")" = "n8n open-webui $DEMO" ]
+  # The test application, n8n, Open WebUI and ReportPortal, which keep their data on a volume of the
+  # component's, are the applications that take it.
+  [ "$(paste -sd' ' - <<<"$opted")" = "n8n open-webui reportportal $DEMO" ]
   # The restore drill is the test application's alone, as it writes the canary the drill checks, and
   # an application takes it only beside components/volsync, whose repository it restores.
   drills="$(yq -N 'select(.kind == "Kustomization" and (.spec.components // [] | any_c(test("components/volsync-drill$"))))
@@ -721,8 +721,8 @@ unknown_fields() {
   for name in $drills; do
     grep -qxF -- "$name" <<<"$opted" || { echo "$name takes the restore drill without components/volsync"; return 1; }
   done
-  # n8n and Open WebUI build nothing of the drill.
-  for name in n8n open-webui; do
+  # n8n, Open WebUI and ReportPortal build nothing of the drill.
+  for name in n8n open-webui reportportal; do
     built "$name"
     found="$(yq -N 'select(.metadata.name | test("-drill(-check|-scripts)?$")) | .kind + "/" + .metadata.name' "$BUILT")"
     echo "$name builds of the drill: ${found:-nothing}"

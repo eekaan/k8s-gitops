@@ -378,3 +378,23 @@ spec:
         - ports:
             - port: "8089"
               protocol: TCP
+    # ReportPortal's ui on 8080 and its api on 8585 in reportportal, by the chart's component label,
+    # for the route reportportal's two rules: /api to the api and the rest to the ui.
+    - toEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": reportportal
+            "k8s:io.cilium.k8s.namespace.labels.k8s-gitops/gateway": public
+            component: reportportal-ui
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
+    - toEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": reportportal
+            "k8s:io.cilium.k8s.namespace.labels.k8s-gitops/gateway": public
+            component: reportportal-api
+      toPorts:
+        - ports:
+            - port: "8585"
+              protocol: TCP

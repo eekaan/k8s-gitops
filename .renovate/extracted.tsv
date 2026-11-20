@@ -152,6 +152,15 @@ kubernetes/apps/base/openbao/openbao/app/values.yaml	helm-values	ghcr.io/fluxcd/
 kubernetes/apps/base/openbao/openbao/app/values.yaml	regex	ghcr.io/fluxcd/flux-cli	image
 kubernetes/apps/base/piraeus-datastore/piraeus-operator/app/ocirepository.yaml	flux	ghcr.io/piraeusdatastore/piraeus-operator/piraeus	tag
 kubernetes/apps/base/piraeus-datastore/piraeus-operator/app/ocirepository.yaml	regex	ghcr.io/piraeusdatastore/piraeus-operator/piraeus	tag
+kubernetes/apps/base/reportportal/reportportal/app/helmrelease.yaml	flux	reportportal	-
+kubernetes/apps/base/reportportal/reportportal/app/values.yaml	helm-values	docker.io/reportportal/service-ui	-
+kubernetes/apps/base/reportportal/reportportal/app/values.yaml	regex	docker.io/rabbitmq	tag
+kubernetes/apps/base/reportportal/reportportal/app/values.yaml	regex	docker.io/rancher/kubectl	tag
+kubernetes/apps/base/reportportal/reportportal/app/values.yaml	regex	docker.io/reportportal/k8s-wait-for	tag
+kubernetes/apps/base/reportportal/reportportal/app/values.yaml	regex	docker.io/reportportal/migrations	tag
+kubernetes/apps/base/reportportal/reportportal/app/values.yaml	regex	docker.io/reportportal/service-api	tag
+kubernetes/apps/base/reportportal/reportportal/app/values.yaml	regex	docker.io/reportportal/service-jobs	tag
+kubernetes/apps/base/reportportal/reportportal/app/values.yaml	regex	docker.io/reportportal/service-ui	tag
 kubernetes/apps/base/robot/robot/app/cronjob.yaml	kubernetes	docker.io/marketsquare/robotframework-browser	-
 kubernetes/apps/base/robot/robot/app/deployment-reports.yaml	kubernetes	docker.io/library/busybox	-
 kubernetes/apps/base/security-system/falco/app/ocirepository.yaml	flux	ghcr.io/falcosecurity/charts/falco	tag

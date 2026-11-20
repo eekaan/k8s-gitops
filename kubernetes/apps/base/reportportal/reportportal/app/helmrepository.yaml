@@ -1,0 +1,12 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/helmrepository-source-v1.json
+# ReportPortal publishes its chart to a classic Helm repository, whose index lists each release as an
+# asset of the GitHub release of github.com/reportportal/kubernetes of that version, so Flux reads
+# the repository's index.
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: reportportal
+spec:
+  interval: 12h
+  url: https://k8s.reportportal.io

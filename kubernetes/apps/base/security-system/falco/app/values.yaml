@@ -106,7 +106,7 @@ serviceMonitor:
       targetLabel: node
 
 # Local rule files by name, which the chart makes the ConfigMap falco-rules of and mounts in the
-# directory Falco reads after the image's rules. One file of fourteen items, each an exception, and
+# directory Falco reads after the image's rules. One file of sixteen items, each an exception, and
 # no rule of the tree's own. docs/kubernetes.md, Tuning, says why each is this narrow, what proves it
 # and how another goes in.
 customRules:
@@ -170,7 +170,7 @@ customRules:
     # container's name and image, running manager, is excepted as that container is
     # (docs/kubernetes.md, Tuning).
     - macro: user_known_stand_streams_redirect_activities
-      condition: or (k8s.ns.name in ("ai-system", "ascender", "backstage") and container.name = "postgres" and container.image.repository = "ghcr.io/cloudnative-pg/postgresql" and proc.name = "manager")
+      condition: or (k8s.ns.name in ("ai-system", "ascender", "backstage", "reportportal") and container.name = "postgres" and container.image.repository = "ghcr.io/cloudnative-pg/postgresql" and proc.name = "manager")
       override:
         condition: append
     # Reason: Ascender's dispatcher, awx-manage run_dispatcher, which supervisord runs in the task
@@ -242,7 +242,7 @@ customRules:
     # pod started through a container group's override with the name of one of the three and that
     # image, running manager, is excepted as the three are (docs/kubernetes.md, Tuning).
     - macro: user_known_contact_k8s_api_server_activities
-      condition: or (k8s.ns.name in ("ai-system", "ascender", "backstage") and container.name in ("initdb", "join", "postgres") and container.image.repository = "ghcr.io/cloudnative-pg/postgresql" and proc.name = "manager")
+      condition: or (k8s.ns.name in ("ai-system", "ascender", "backstage", "reportportal") and container.name in ("initdb", "join", "postgres") and container.image.repository = "ghcr.io/cloudnative-pg/postgresql" and proc.name = "manager")
       override:
         condition: append
     # Reason: the Barman Cloud plugin injects the container plugin-barman-cloud, on the sidecar
@@ -257,7 +257,8 @@ customRules:
     # ascender, a pod started through a container group's override with that container's name and
     # image, running manager, is excepted as the sidecar is (docs/kubernetes.md, Tuning).
     - macro: user_known_contact_k8s_api_server_activities
-      condition: or (k8s.ns.name in ("ai-system", "ascender", "backstage") and container.name = "plugin-barman-cloud" and container.image.repository = "ghcr.io/cloudnative-pg/plugin-barman-cloud-sidecar" and proc.name = "manager")
+      condition: or (k8s.ns.name in ("ai-system", "ascender", "backstage", "reportportal") and container.name = "plugin-barman-cloud"
+        and container.image.repository = "ghcr.io/cloudnative-pg/plugin-barman-cloud-sidecar" and proc.name = "manager")
       override:
         condition: append
     # Reason: PostgreSQL archives each finished WAL segment by running archive_command through
@@ -276,7 +277,7 @@ customRules:
     # with that container's name and image, in which a process named postgres starts such a shell,
     # is excepted as the archiver is (docs/kubernetes.md, Tuning).
     - macro: user_shell_container_exclusions
-      condition: (k8s.ns.name in ("ai-system", "ascender", "backstage") and container.name = "postgres" and container.image.repository = "ghcr.io/cloudnative-pg/postgresql" and proc.pname = "postgres"
+      condition: (k8s.ns.name in ("ai-system", "ascender", "backstage", "reportportal") and container.name = "postgres" and container.image.repository = "ghcr.io/cloudnative-pg/postgresql" and proc.pname = "postgres"
         and proc.cmdline startswith "sh -c -- /controller/manager wal-archive --log-destination /controller/log/postgres.json pg_wal/")
       override:
         condition: replace
@@ -294,6 +295,28 @@ customRules:
       condition: (not container and fd.name startswith "/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/")
       override:
         condition: replace
+    # Reason: ReportPortal's chart starts the api's and the jobs service's pods with the init container
+    # migrations-waiting-init, which runs the image's wait_for.sh, and the script asks the API server
+    # for the migrations Job through kubectl, /usr/local/bin/kubectl of the image, until the Job has
+    # completed (job-wr in the chart's service-api/api-deployment.yaml and
+    # service-jobs/jobs-deployment.yaml). That is what the image's rule Contact K8S API Server From
+    # Container matches, appended to the same placeholder as the controllers above. It excepts only
+    # the process kubectl in that container of that image in the namespace reportportal: the script's
+    # shell, the api, the jobs service and every other workload still match.
+    - macro: user_known_contact_k8s_api_server_activities
+      condition: or (k8s.ns.name = "reportportal" and container.name = "migrations-waiting-init" and container.image.repository = "docker.io/reportportal/k8s-wait-for" and proc.name = "kubectl")
+      override:
+        condition: append
+    # Reason: the chart's pre-upgrade hook, the Job reportportal-pre-upgrade-cleanup, deletes the
+    # migrations Job through the API server before each upgrade, with kubectl, the image's
+    # entrypoint /bin/kubectl, in its container delete-job (hooks/upgrade/pre-upgrade-cleanup.yaml of
+    # the chart). It excepts only the process kubectl in that container of that image in the
+    # namespace reportportal: any other process in that container and every other workload still
+    # match.
+    - macro: user_known_contact_k8s_api_server_activities
+      condition: or (k8s.ns.name = "reportportal" and container.name = "delete-job" and container.image.repository = "docker.io/rancher/kubectl" and proc.name = "kubectl")
+      override:
+        condition: append
 
 falco:
   # One JSON line for each event on standard output, which the log collector ships with the rest of

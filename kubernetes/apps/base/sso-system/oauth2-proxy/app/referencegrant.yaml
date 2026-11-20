@@ -30,6 +30,12 @@ spec:
     - group: gateway.networking.k8s.io
       kind: HTTPRoute
       namespace: monitoring
+    - group: gateway.envoyproxy.io
+      kind: SecurityPolicy
+      namespace: reportportal
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      namespace: reportportal
   to:
     - group: ""
       kind: Service
