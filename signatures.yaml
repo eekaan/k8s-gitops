@@ -136,6 +136,11 @@ sources:
     issuer: '^https://token\.actions\.githubusercontent\.com$'
     subject: '^https://github\.com/home-operations/charts-mirror/\.github/workflows/app-builder\.yaml@refs/heads/main$'
     from: the certificate of the signature of 0.17.0
+  - source: oci://ghcr.io/kguardian-dev/charts/kguardian
+    signed: keyless
+    issuer: '^https://token\.actions\.githubusercontent\.com$'
+    subject: '^https://github\.com/kguardian-dev/kguardian/\.github/workflows/charts-release\.yaml@refs/tags/chart/v[0-9]+\.[0-9]+\.[0-9]+$'
+    from: the certificate of the signature of 1.29.2
   - source: oci://ghcr.io/kyverno/charts/kyverno
     signed: unsigned
     reason: no signature at the chart; Kyverno signs it keyless into another repository,

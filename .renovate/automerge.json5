@@ -128,6 +128,19 @@
       automerge: false,
     },
     {
+      // Each chart release can change what the release renders and what the broker migrates in its
+      // database, which the chart's UPGRADING.md says, and a person reads (docs/kubernetes.md,
+      // kguardian).
+      description: "kguardian: its chart and images",
+      matchPackageNames: [
+        "ghcr.io/kguardian-dev/charts/kguardian",
+        "ghcr.io/kguardian-dev/kguardian/controller",
+        "ghcr.io/kguardian-dev/kguardian/broker",
+        "ghcr.io/kguardian-dev/kguardian/frontend",
+      ],
+      automerge: false,
+    },
+    {
       description: "Anything pinned in mise.toml or versions.yaml",
       matchFileNames: ["mise.toml", "versions.yaml"],
       automerge: false,

@@ -127,6 +127,10 @@ robot cluster='lab-sto2':
 robot-run cluster='lab-sto2':
     scripts/robot-run {{ quote(cluster) }}
 
+# Forward a local port, KGUARDIAN_PORT or 5173, on 127.0.0.1 only, to kguardian's interface on a cluster through its kubeconfig until Ctrl-C; prints the local URL and that the interface has no sign-in, so whoever reaches the local port reads the record
+kguardian cluster='lab-sto2':
+    scripts/kguardian {{ quote(cluster) }}
+
 # Print the logs a LogsQL query matches, one line per record, the oldest first, through vmauth to VictoriaLogs as the user operator: just logs 'kubernetes.pod_namespace:monitoring error' [--since 15m] [--limit 200] [cluster]; --since is a number with s, m, h, d or w; reads the credential from the Secret vmauth-operator in monitoring and asks through a port-forward to the Service vmauth, stopped on every exit, so the kubeconfig must be able to read that Secret and forward a port in monitoring; the credential is never printed or an argument; fails with the reason when the API or vmauth does not answer, the Secret cannot be read, vmauth refuses the credential or the store refuses the query
 [positional-arguments]
 logs *args:

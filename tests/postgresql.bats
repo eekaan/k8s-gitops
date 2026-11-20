@@ -460,7 +460,7 @@ assert_values_keys() {
 # The applications of the lab-sto2 overlay that take a cluster from the component, each as its
 # namespace directory and its name, which is also where its ks.yaml is: the tests that read the
 # overlay's own databases read these, and one of them holds the list to the overlay.
-DATABASE_APPS=(ai-system/n8n backstage/backstage ascender/ascender)
+DATABASE_APPS=(ai-system/n8n backstage/backstage ascender/ascender kguardian/kguardian)
 
 # archive_path FILE: where the Cluster in the built objects FILE archives to: the destinationPath of
 # the ObjectStore its archiver plugin entry names, and under it the server name that entry gives,
@@ -787,7 +787,8 @@ bytes() {
   # the customer key, is written in a manifest of the component or of an application.
   [ -z "$(find "$REPO/kubernetes" \( -name '*.enc.*' -o -name '*.sops.*' -o -name '*.age*' \))" ]
   literal="$(grep -rnE '(^|[^A-Za-z0-9+/])[A-Za-z0-9+/]{43}=([^A-Za-z0-9+/=]|$)' "$REPO/kubernetes/components/cnpg-cluster" "$REPO/kubernetes/apps/base/cnpg-system" \
-    "$REPO/kubernetes/apps/base/ai-system" "$REPO/kubernetes/apps/base/backstage" "$REPO/kubernetes/apps/base/ascender" || true)"
+    "$REPO/kubernetes/apps/base/ai-system" "$REPO/kubernetes/apps/base/backstage" "$REPO/kubernetes/apps/base/ascender" \
+    "$REPO/kubernetes/apps/base/kguardian" || true)"
   echo "a base64 key in a manifest: ${literal:-none}"
   [ -z "$literal" ]
 }

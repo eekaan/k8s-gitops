@@ -18,6 +18,7 @@ resources:
   - ../../base/external-secrets
   - ../../base/gatekeeper-system
   - ../../base/keda
+  - ../../base/kguardian
   - ../../base/kromgo
   - ../../base/kube-system
   - ../../base/kyverno
@@ -56,6 +57,7 @@ resources:
   - ../../base/gatekeeper-system/gatekeeper-templates/ks.yaml
   - ../../base/gatekeeper-system/gatekeeper/ks.yaml
   - ../../base/keda/keda/ks.yaml
+  - ../../base/kguardian/kguardian/ks.yaml
   - ../../base/kromgo/kromgo/ks.yaml
   - ../../base/kube-system/cilium/ks.yaml
   - ../../base/kube-system/cilium-bgp/ks.yaml

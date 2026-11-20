@@ -1,0 +1,256 @@
+---
+# Values for the kguardian chart, read by the HelmRelease through a ConfigMap generated without
+# substitution. kguardian records what each pod connects to and which system calls it makes, and
+# shows that as a proposed network policy or seccomp profile (docs/kubernetes.md, kguardian). Three
+# workloads run: the observer, a DaemonSet the chart calls the controller; the broker, which keeps
+# the record in PostgreSQL; and the interface, which the chart calls the frontend. Keys not set here
+# keep the chart's defaults.
+#
+# The chart puts a v before an image tag that starts with three numbers and passes any other
+# through, and the registry tags its releases v1.2.3, so each tag is written with the v and its
+# digest: the chart then renders <repository>:<tag>@sha256:<digest>. Its sha keys would drop the
+# tag. Renovate moves the chart and the three images in one pull request, and tests/kguardian.bats
+# holds each image to the version the pinned chart's values default to.
+
+# The broker's daily check-in with the publisher's version service, which also reports the install:
+# off, so the broker starts no such task and makes no request.
+telemetry:
+  enabled: false
+
+controller:
+  image:
+    # renovate: datasource=docker depName=ghcr.io/kguardian-dev/kguardian/controller
+    tag: v1.17.2@sha256:fd46983aa7854868d53efd73ff974f2b139f5174cd885ad44df08071f34a5b76
+  # The init container that waits for the broker's health endpoint.
+  initContainer:
+    image:
+      repository: docker.io/library/busybox
+      # renovate: datasource=docker depName=docker.io/library/busybox
+      tag: 1.38.0@sha256:a46257e06c82ad85242d0d38077d0a52d9896389ca60a1a59d3463db586e5fa4
+
+  # The container's whole security context; the chart renders it as given, and its own default is a
+  # privileged container. Root stays: the image sets no user, and the tracing files, the runtime's
+  # socket and the namespaces of the containers' root processes it reads belong to root. Every
+  # capability is dropped but four (docs/kubernetes.md, kguardian):
+  # - BPF: the bpf system call's map create, BTF load and program load, which the kernel refuses a
+  #   process without it, as kernel.unprivileged_bpf_disabled is 1 on a Talos node;
+  # - PERFMON: loading the tracing program types (fentry, kprobe, tracepoint) and their reads of
+  #   kernel memory, and perf_event_open for the kprobe, the kretprobe and the system call
+  #   tracepoint, which kernel.perf_event_paranoid 3 refuses without it;
+  # - SYS_PTRACE: the stat of /proc/<pid>/ns/net that names each container's network namespace,
+  #   which the kernel allows only after ptrace_may_access, refused for a process of another user
+  #   or with capabilities this container lacks. With it that check passes for every process on
+  #   the node, under Talos' kernel.yama.ptrace_scope 2 too, so through the host's /proc it can
+  #   also read any process's memory and environment and reach its root filesystem, where it reads
+  #   any file and writes one only where the file's mode lets root write it and its mount is
+  #   writable, as it has no DAC_OVERRIDE; the runtime's socket below already gives root on the node;
+  # - DAC_READ_SEARCH: opening /proc/<pid>/ns to list it first (procfs' namespaces()), a directory
+  #   of mode 0511 owned by the process's user, which root may not read for a process of another
+  #   user without it. With it the runtime's seccomp profile also admits open_by_handle_at, which
+  #   opens any file of a node file system the container has a mount of, the node's /var through
+  #   the files the kubelet mounts into it; the runtime's socket below already gives root on the
+  #   node.
+  # SYS_RESOURCE, which upstream's troubleshooting page names, is not added: the observer raises no
+  # limit, and libbpf raises the memory lock limit only on a kernel that does not count BPF memory
+  # against the memory cgroup, which is one older than 5.11, and goes on if refused.
+  securityContext:
+    privileged: false
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop:
+        - ALL
+      add:
+        - BPF
+        - PERFMON
+        - SYS_PTRACE
+        - DAC_READ_SEARCH
+
+  # Every node, control planes included: a toleration without a key tolerates every taint. At the
+  # priority Kubernetes gives node agents, the scheduler makes room for it on a full node.
+  tolerations:
+    - operator: Exists
+  priorityClassName: system-node-critical
+
+  # Every namespace but kguardian's own. The chart's default also leaves out kube-system, which is
+  # one of the namespaces whose flows are not yet enumerated and the record is for.
+  excludedNamespaces:
+    - kguardian
+  # DaemonSets on the pod network are recorded like any other pod. Set, the observer would leave
+  # every flow to or from their addresses out of the record, their peers' included, and the
+  # namespaces the record is for hold such DaemonSets.
+  ignoreDaemonSet: false
+
+  # Which binaries and libraries each container runs: off. It would load a program on every process
+  # exec, in its full mode one on every executable mapping too, and with capabilities one on every
+  # capability check. The purpose here is flows and system calls.
+  runtimeInventory:
+    mode: "off"
+    capabilities: false
+
+# Every system call, the only level a complete seccomp profile comes from.
+syscalls:
+  captureLevel: full
+
+seccomp:
+  # Writing SeccompProfile objects to the nodes as seccomp files: off. It would mount the kubelet's
+  # seccomp directory read-write in the observer and let it read every SeccompProfile, write their
+  # status and list the nodes. Acting on a proposal is not what this application does.
+  distribute: false
+  # The SeccompProfile definition the chart renders as a template of the release: not installed, as
+  # nothing here makes or reads such an object.
+  installCRDs: false
+  # Capturing the kernel's own seccomp verdicts: off. It would load a kprobe on audit_seccomp and
+  # mount the node's cgroup tree in the observer.
+  denials:
+    enabled: false
+
+# CPU and memory gauges per container, and the scheduler probe beneath them: off. The gauges would
+# mount the node's cgroup tree in the observer, and the probe would load four programs on the
+# scheduler's tracepoints.
+compute:
+  enabled: false
+  contention:
+    enabled: false
+  # The broker prunes its history tables whether or not anything fills them; written as the chart
+  # has it.
+  history:
+    retentionDays: 7
+
+# Listing the packages of each running container's root filesystem: off. It would add a second
+# container to the observer's pod, as root with the capabilities DAC_READ_SEARCH, SETUID and SETGID,
+# and a third token for the broker.
+nodeCatalog:
+  enabled: false
+
+broker:
+  image:
+    # renovate: datasource=docker depName=ghcr.io/kguardian-dev/kguardian/broker
+    tag: v1.20.1@sha256:abc3d2a6c9de26909f42eae5b2de7c2ecb3e7795d76867eb0c0d030779b400a3
+  # The init container that waits for the database's port.
+  initContainer:
+    image:
+      repository: docker.io/library/busybox
+      # renovate: datasource=docker depName=docker.io/library/busybox
+      tag: 1.38.0@sha256:a46257e06c82ad85242d0d38077d0a52d9896389ca60a1a59d3463db586e5fa4
+
+  # One replica needs no leader: with election off the broker runs every background job itself, the
+  # retention jobs among them, calls no API, and the chart makes it no Role and mounts no service
+  # account token in its pod.
+  leaderElection:
+    enabled: false
+
+  # Every route but /health and /metrics needs a token: ingest for the observer, which also reads,
+  # and read for the interface. External Secrets makes both in the cluster (broker-auth.yaml).
+  auth:
+    enabled: true
+    mode: scoped
+    existingSecret: kguardian-broker-auth
+
+  # The chart's Helm test pod asks the broker's /health, as the broker's readiness probe does, from
+  # an image whose tag is written in the chart's template, which nothing here could pin.
+  helmTest:
+    enabled: false
+
+  metrics:
+    serviceMonitor:
+      enabled: true
+
+  # How long the broker keeps what it holds, in days, each written as the broker runs with it.
+  # Flows: each is recorded once, when first seen, so a running pod's flows are kept while it runs;
+  # once its pod is gone, a flow first seen more than 14 days ago is pruned. The system calls of
+  # each pod and workload have no window: no job prunes them. The versions of a workload's profile
+  # the broker stores when it changes are pruned after 90 days, the broker's own default, which no
+  # value of the chart sets.
+  traffic:
+    retention:
+      days: 14
+  # A pod that is gone leaves the record of pods after 30 days. The chart leaves this window to the
+  # audit window below, which is 30; written out, the broker's environment carries it.
+  podInventory:
+    retention:
+      deadPodDays: 30
+  # The verdicts of the evaluator, which does not run: the table stays empty.
+  audit:
+    retention:
+      days: 30
+  # Images and containers no running pod has reported for 30 days.
+  imageInventory:
+    retention:
+      days: 30
+  # The tables of what is off, which stay empty: seccomp verdicts, the runtime inventory, and the
+  # supply-chain data with its signature results.
+  seccomp:
+    denials:
+      retention:
+        days: 30
+  runtimeInventory:
+    retentionDays: 30
+  supplychain:
+    retention:
+      days: 30
+      attestationDays: 7
+
+# The record is in a PostgreSQL cluster of the tree's component, kguardian-db (ks.yaml), not in the
+# chart's own PostgreSQL, which is off with its Secret, its claim and its dump hook. The broker
+# connects as the user app, which owns the database app, to the Service of the cluster's primary,
+# over TLS, with the password of the Secret the operator makes for that user. The chart writes the
+# password into the connection address as it is: the operator generates it from letters and digits
+# alone, which an address carries unescaped.
+database:
+  enabled: false
+  user: app
+  databaseName: app
+  existingSecret: kguardian-db-app
+  passwordSecretKey: password
+  external:
+    host: kguardian-db-rw
+    port: 5432
+    sslMode: require
+
+frontend:
+  image:
+    # renovate: datasource=docker depName=ghcr.io/kguardian-dev/kguardian/frontend
+    tag: v1.21.1@sha256:9b1b93399627485b62939bc06b351b4177f1e6d4d02ea25f0699f50b6fd210ef
+  # The host names the interface answers, besides localhost and addresses, which it always answers:
+  # with a list, the chart adds the Service's own names to it. Without one the server answers any
+  # host name, and a web page could then reach the forwarded port, and through the interface's proxy
+  # the record, by rebinding its own name to the loopback (docs/kubernetes.md, kguardian).
+  allowedHosts:
+    - kguardian-frontend
+
+# The assistant, a workload the chart calls llm-bridge, which calls a language-model provider's API
+# with what it reads of the record: off, with each provider, the address of a gateway to call
+# instead of a provider's, and the endpoint that serves the record to MCP clients.
+ai:
+  enabled: false
+  baseUrl: ""
+  mcp:
+    enabled: false
+llmBridge:
+  enabled: false
+  secrets:
+    openai:
+      enabled: false
+    anthropic:
+      enabled: false
+    gemini:
+      enabled: false
+    copilot:
+      enabled: false
+
+# The evaluator, which reads AuditNetworkPolicy objects and reports what each would deny: off, with
+# the two sets of definitions the chart renders for it as templates. The two definitions of the
+# chart's crds directory are installed whatever the values say; nothing here makes an object of
+# them.
+evaluator:
+  enabled: false
+  imageTrust:
+    installCRDs: false
+  applicationSecurityProfiles:
+    installCRD: false
+
+# The supply-chain component, whose parts can ask the registries of the cluster's images for their
+# manifests, attached SBOMs and signatures, and fetch a vulnerability database: off, whole.
+supplychain:
+  enabled: false

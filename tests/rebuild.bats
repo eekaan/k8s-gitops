@@ -185,8 +185,8 @@ real_render() {
   real_render
   echo "the render's databases: $(databases "$REAL" | paste -sd' ' -)"
   echo "the table's rows: $(rows | cut -f1 | paste -sd' ' -)"
-  # The three the overlay builds now are among them, so a render that finds none cannot pass.
-  [ "$(databases "$REAL" | grep -cxE 'ai-system/n8n-db|backstage/backstage-db|ascender/ascender-db')" -eq 3 ]
+  # The four the overlay builds now are among them, so a render that finds none cannot pass.
+  [ "$(databases "$REAL" | grep -cxE 'ai-system/n8n-db|backstage/backstage-db|ascender/ascender-db|kguardian/kguardian-db')" -eq 4 ]
   run covered "$REAL"
   echo "$output"
   [ "$status" -eq 0 ]

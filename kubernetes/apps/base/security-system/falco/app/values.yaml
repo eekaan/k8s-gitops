@@ -170,7 +170,7 @@ customRules:
     # container's name and image, running manager, is excepted as that container is
     # (docs/kubernetes.md, Tuning).
     - macro: user_known_stand_streams_redirect_activities
-      condition: or (k8s.ns.name in ("ai-system", "ascender", "backstage") and container.name = "postgres" and container.image.repository = "ghcr.io/cloudnative-pg/postgresql" and proc.name = "manager")
+      condition: or (k8s.ns.name in ("ai-system", "ascender", "backstage", "kguardian") and container.name = "postgres" and container.image.repository = "ghcr.io/cloudnative-pg/postgresql" and proc.name = "manager")
       override:
         condition: append
     # Reason: Ascender's dispatcher, awx-manage run_dispatcher, which supervisord runs in the task
@@ -242,7 +242,7 @@ customRules:
     # pod started through a container group's override with the name of one of the three and that
     # image, running manager, is excepted as the three are (docs/kubernetes.md, Tuning).
     - macro: user_known_contact_k8s_api_server_activities
-      condition: or (k8s.ns.name in ("ai-system", "ascender", "backstage") and container.name in ("initdb", "join", "postgres") and container.image.repository = "ghcr.io/cloudnative-pg/postgresql" and proc.name = "manager")
+      condition: or (k8s.ns.name in ("ai-system", "ascender", "backstage", "kguardian") and container.name in ("initdb", "join", "postgres") and container.image.repository = "ghcr.io/cloudnative-pg/postgresql" and proc.name = "manager")
       override:
         condition: append
     # Reason: the Barman Cloud plugin injects the container plugin-barman-cloud, on the sidecar
@@ -257,7 +257,8 @@ customRules:
     # ascender, a pod started through a container group's override with that container's name and
     # image, running manager, is excepted as the sidecar is (docs/kubernetes.md, Tuning).
     - macro: user_known_contact_k8s_api_server_activities
-      condition: or (k8s.ns.name in ("ai-system", "ascender", "backstage") and container.name = "plugin-barman-cloud" and container.image.repository = "ghcr.io/cloudnative-pg/plugin-barman-cloud-sidecar" and proc.name = "manager")
+      condition: or (k8s.ns.name in ("ai-system", "ascender", "backstage", "kguardian") and container.name = "plugin-barman-cloud" and container.image.repository = "ghcr.io/cloudnative-pg/plugin-barman-cloud-sidecar"
+        and proc.name = "manager")
       override:
         condition: append
     # Reason: PostgreSQL archives each finished WAL segment by running archive_command through
@@ -276,7 +277,7 @@ customRules:
     # with that container's name and image, in which a process named postgres starts such a shell,
     # is excepted as the archiver is (docs/kubernetes.md, Tuning).
     - macro: user_shell_container_exclusions
-      condition: (k8s.ns.name in ("ai-system", "ascender", "backstage") and container.name = "postgres" and container.image.repository = "ghcr.io/cloudnative-pg/postgresql" and proc.pname = "postgres"
+      condition: (k8s.ns.name in ("ai-system", "ascender", "backstage", "kguardian") and container.name = "postgres" and container.image.repository = "ghcr.io/cloudnative-pg/postgresql" and proc.pname = "postgres"
         and proc.cmdline startswith "sh -c -- /controller/manager wal-archive --log-destination /controller/log/postgres.json pg_wal/")
       override:
         condition: replace

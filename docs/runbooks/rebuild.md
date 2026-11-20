@@ -162,9 +162,10 @@ keys, then the volumes, then the databases.
    empty database archives nothing there.
 
    The same refusal keeps a database that is made again by a start, and not restored, from archiving
-   at all, as Backstage's is (step 7). So delete its old archive now, before `just cluster-flux`:
-   the objects under `base/` and `wals/` of its path in the postgres bucket, with the cluster's S3
-   key, as step 6 of [the point-in-time restore](postgres-restore.md#restoring-one-database-to-a-point-in-time)
+   at all, as Backstage's and kguardian's are (step 7). So delete each one's old archive now, before
+   `just cluster-flux`: the objects under `base/` and `wals/` of its path in the postgres bucket,
+   with the cluster's S3 key, as step 6 of
+   [the point-in-time restore](postgres-restore.md#restoring-one-database-to-a-point-in-time)
    deletes an old archive. The rebuilt database then archives into an empty path from its first
    segment.
 
@@ -254,6 +255,7 @@ keys, then the volumes, then the databases.
    | `ai-system/n8n-db` | n8n | Held, and restored by [the point-in-time restore](postgres-restore.md#restoring-one-database-to-a-point-in-time) into a new cluster beside the rebuilt, empty one, then switched over; from [a dump](postgres-restore.md#restoring-a-daily-dump) only when the archive cannot be read |
    | `ascender/ascender-db` | Ascender | Held, and restored as n8n's is, by [the point-in-time restore](postgres-restore.md#restoring-one-database-to-a-point-in-time) or, when the archive cannot be read, [a dump](postgres-restore.md#restoring-a-daily-dump), with the differences [kubernetes.md](../kubernetes.md#ascender) gives under "Restoring the database" |
    | `backstage/backstage-db` | Backstage | Not held and not restored: made again by a start, as its database holds only what Backstage derives from the tree ([kubernetes.md](../kubernetes.md#backstage)), once its old archive is deleted (step 1) |
+   | `kguardian/kguardian-db` | kguardian | Not held and not restored: made again by a start, as its record names the pods and addresses of the cluster that was, and the observers record the rebuilt one from their start ([kubernetes.md](../kubernetes.md#kguardian)), once its old archive is deleted (step 1) |
 
    Here the point-in-time restore is run without a target, its manifest without `recoveryTarget`,
    so the recovery replays the old archive to its end. The held, empty database archives nothing to

@@ -79,6 +79,7 @@ configMapGenerator:
       - catalogue/hello-sso.yaml
       - catalogue/hello.yaml
       - catalogue/keda.yaml
+      - catalogue/kguardian.yaml
       - catalogue/kromgo.yaml
       - catalogue/kube-prometheus-stack.yaml
       - catalogue/kubelet-csr-approver.yaml

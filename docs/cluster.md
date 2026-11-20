@@ -1197,6 +1197,15 @@ take one now, `kubectl --namespace etcd-snapshots create job --from=cronjob/etcd
   or SIGHUP stop the following with status 130, 143 or 129 and leave the job running, saying how to
   follow it again; it deletes nothing. It reads no Secret, changes nothing on the cluster but the
   job it creates, and needs the cluster's kubeconfig.
+- `just kguardian [cluster]` forwards a local port to kguardian's interface through the cluster's
+  kubeconfig until Ctrl-C ([kubernetes.md](kubernetes.md#kguardian)): `kubectl port-forward`,
+  listening on 127.0.0.1 only, from `KGUARDIAN_PORT` to port 5173 of the Service
+  `kguardian-frontend` in `kguardian`. Once kubectl reports the forward it prints the local URL,
+  that the interface has no sign-in, so whoever reaches the local port reads the record, and to read
+  it with no other site open in the browser and end the forward once done, and reads no Secret. It
+  ends the forward on every way out: Ctrl-C, SIGTERM or SIGHUP, kubectl not reporting the forward
+  within `KGUARDIAN_WAIT` seconds, kubectl stopping, or a failure, each but an interruption naming
+  its cause. It changes nothing on the cluster and needs the cluster's kubeconfig.
 - `just logs '<query>' [--since <duration>] [--limit <n>] [cluster]` prints the records a LogsQL
   query matches, one line each, the oldest first, from the last 15 minutes and at most 200 unless
   told otherwise ([kubernetes.md](kubernetes.md#logs)): through vmauth as its user `operator`
@@ -1505,9 +1514,9 @@ naming the place. With `CI` set nothing of rclone's words is shown: they go to
 `clusterconfig/<recipe>.errors.log` in the cluster's directory, which git ignores, started afresh by
 each run, and only that file's path is printed, as for talman's output. kubectl's and helm's output
 passes through, naming the objects they apply, except in `cluster-check`, `gateway-check`,
-`cluster-reboot`, `cluster-destroy`, `grafana`, `locust`, `robot`, `robot-run` and `logs`: they
-print node and object names only, `logs` the records and `robot-run` the job's log, Robot's
-console, and none of what kubectl prints, as the objects it reads and its
+`cluster-reboot`, `cluster-destroy`, `grafana`, `kguardian`, `locust`, `robot`, `robot-run` and
+`logs`: they print node and object names only, `logs` the records and `robot-run` the job's log,
+Robot's console, and none of what kubectl prints, as the objects it reads and its
 errors hold the API server's, the nodes' and the pods' addresses, but for the message of an error
 the API server or the store answered with, which `logs` shows without an address; only
 `kubectl drain`'s passes through in `cluster-reboot`, as in `cluster-upgrade`, naming the pods it
@@ -1596,6 +1605,8 @@ to hand it to kubectl and age-keygen on standard input.
   many seconds it waits for kubectl to report the forward, 20 when unset.
 - `ROBOT_RUN_WAIT`: how many seconds `robot-run` waits for its job's pod to leave `Pending`, and
   again for the job's result once its log ends, a whole number from 1 to 9999, 900 when unset.
+- `KGUARDIAN_PORT` and `KGUARDIAN_WAIT`: the local port `kguardian` forwards from, 5173 when unset,
+  and how many seconds it waits for kubectl to report the forward, 20 when unset.
 - `CI`: when set, talman's output goes to a file instead of the output; see
   [What the recipes print](#what-the-recipes-print).
 

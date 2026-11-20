@@ -1,0 +1,24 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/ocirepository-source-v1.json
+# The kguardian chart from its publisher's public OCI registry.
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: kguardian
+spec:
+  # The tag is pinned: a new chart arrives by a change to this file, which Flux applies at once.
+  interval: 12h
+  # The chart's packaged layer, which helm-controller reads as it is.
+  layerSelector:
+    mediaType: application/vnd.cncf.helm.chart.content.v1.tar+gzip
+    operation: copy
+  url: oci://ghcr.io/kguardian-dev/charts/kguardian
+  ref:
+    # renovate: datasource=docker depName=ghcr.io/kguardian-dev/charts/kguardian
+    tag: 1.29.2
+  # Go regular expressions, kept to syntax POSIX extended expressions read the same way (no \d).
+  verify:
+    provider: cosign
+    matchOIDCIdentity:
+      - issuer: '^https://token\.actions\.githubusercontent\.com$'
+        subject: '^https://github\.com/kguardian-dev/kguardian/\.github/workflows/charts-release\.yaml@refs/tags/chart/v[0-9]+\.[0-9]+\.[0-9]+$'

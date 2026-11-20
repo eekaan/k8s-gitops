@@ -48,6 +48,7 @@ tests/infra-forget-image.bats	15
 tests/infra-recipes.bats	22
 tests/infra-talman.bats	3
 tests/install-cilium.bats	102
+tests/kguardian.bats	200
 tests/kromgo.bats	232
 tests/kubernetes-check.bats	196
 tests/kubernetes-validate.bats	469

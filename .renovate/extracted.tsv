@@ -92,6 +92,13 @@ kubernetes/apps/base/external-secrets/external-secrets/app/ocirepository.yaml	re
 kubernetes/apps/base/gatekeeper-system/gatekeeper/app/helmrelease.yaml	flux	gatekeeper	-
 kubernetes/apps/base/keda/keda/app/ocirepository.yaml	flux	ghcr.io/home-operations/charts-mirror/keda	tag
 kubernetes/apps/base/keda/keda/app/ocirepository.yaml	regex	ghcr.io/home-operations/charts-mirror/keda	tag
+kubernetes/apps/base/kguardian/kguardian/app/ocirepository.yaml	flux	ghcr.io/kguardian-dev/charts/kguardian	tag
+kubernetes/apps/base/kguardian/kguardian/app/ocirepository.yaml	regex	ghcr.io/kguardian-dev/charts/kguardian	tag
+kubernetes/apps/base/kguardian/kguardian/app/values.yaml	helm-values	docker.io/library/busybox	-
+kubernetes/apps/base/kguardian/kguardian/app/values.yaml	regex	docker.io/library/busybox	tag
+kubernetes/apps/base/kguardian/kguardian/app/values.yaml	regex	ghcr.io/kguardian-dev/kguardian/broker	tag
+kubernetes/apps/base/kguardian/kguardian/app/values.yaml	regex	ghcr.io/kguardian-dev/kguardian/controller	tag
+kubernetes/apps/base/kguardian/kguardian/app/values.yaml	regex	ghcr.io/kguardian-dev/kguardian/frontend	tag
 kubernetes/apps/base/kromgo/kromgo/app/ocirepository.yaml	flux	ghcr.io/bjw-s-labs/helm/app-template	tag
 kubernetes/apps/base/kromgo/kromgo/app/ocirepository.yaml	regex	ghcr.io/bjw-s-labs/helm/app-template	tag
 kubernetes/apps/base/kromgo/kromgo/app/values.yaml	helm-values	ghcr.io/home-operations/kromgo	-

@@ -20,12 +20,13 @@ what to check before the next.
 
 Either restore adds its new cluster as one file named for it beside the component's `Cluster`, in
 the application's own `app/`, and makes it the component's once the application runs on it. In a
-namespace that denies traffic by default, as `backstage` and `ascender` do, the database's allows,
-its own and its application's, select its pods by the label `cnpg.io/cluster` existing, not by its
-value ([kubernetes.md](../kubernetes.md#what-the-namespaces-let-through)): the operator gives every
-pod it makes for a cluster, its instances and the jobs that create, join and recover them, that
-label with the pod's own cluster's name, so a new cluster's pods reach and are reached by what the
-old cluster's do from their start, and the pull request that adds the new cluster adds no allow.
+namespace that denies traffic by default, as `backstage`, `ascender` and `kguardian` do, the
+database's allows, its own and its application's, select its pods by the label `cnpg.io/cluster`
+existing, not by its value ([kubernetes.md](../kubernetes.md#what-the-namespaces-let-through)):
+the operator gives every pod it makes for a cluster, its instances and the jobs that create, join
+and recover them, that label with the pod's own cluster's name, so a new cluster's pods reach and
+are reached by what the old cluster's do from their start, and the pull request that adds the new
+cluster adds no allow.
 The recovery job of a restore from the archive carries `cnpg.io/jobRole: full-recovery` and holds
 the plugin's sidecar, which reads the archive from the object storage; a standing policy of the
 namespace lets such a pod reach it on 443, as the instances do. The cost is that every cluster of

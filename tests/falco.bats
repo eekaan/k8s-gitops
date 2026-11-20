@@ -1610,7 +1610,7 @@ of_security_system() {
   done <<<"$AT_JOB_REPOSITORIES"
   # The log collector, Kyverno or the operator on another image, and an AWX of another name, whose
   # task container the operator names after it, are no longer what the items name; nor is a set of
-  # databases that a fourth application joins, whose namespace the items then leave out. Each fails,
+  # databases that a fifth application joins, whose namespace the items then leave out. Each fails,
   # saying what the workload is now.
   tree_without
   yq -i '.image.repository = "registry.example.com/timberio/vector"' "$TREE/$vector"
@@ -1645,11 +1645,11 @@ of_security_system() {
   run excepts_item 10 "CloudNativePG's instance manager" instance_manager_exception "$TREE"
   echo "$output"
   [ "$status" -ne 0 ]
-  [[ $output == *"and CloudNativePG's instance manager is or "*'k8s.ns.name in ("ai-system", "ascender", "backstage", "robot")'* ]]
+  [[ $output == *"and CloudNativePG's instance manager is or "*'k8s.ns.name in ("ai-system", "ascender", "backstage", "kguardian", "robot")'* ]]
   run excepts_item 11 "the Barman Cloud plugin's sidecar" sidecar_exception "$TREE"
   echo "$output"
   [ "$status" -ne 0 ]
-  [[ $output == *"and the Barman Cloud plugin's sidecar is or "*'k8s.ns.name in ("ai-system", "ascender", "backstage", "robot")'* ]]
+  [[ $output == *"and the Barman Cloud plugin's sidecar is or "*'k8s.ns.name in ("ai-system", "ascender", "backstage", "kguardian", "robot")'* ]]
   # Tuning lists each with why it calls the API server and what still matches, each line held whole:
   # the restore's Jobs among it, whose own containers still match and into two of which the Barman
   # Cloud plugin puts its sidecar as well.
@@ -1700,7 +1700,7 @@ of_security_system() {
   [[ $DOCS == *"- \`Run shell untrusted\`, Notice, \`user_shell_container_exclusions\` replaced: PostgreSQL's archiver in every database of the component (the databases' namespaces, \`postgres\`, the component's image, the parent \`postgres\` and a command line that starts with the archive command up to \`pg_wal/\`); any other command PostgreSQL runs through a shell still matches. "* ]]
   [[ $DOCS == *"so \`ascender-db\` is expected to archive a segment about every five minutes, and a database nothing writes to, none; that is reasoning, which only the cluster shows (What no proof shows, below)."* ]]
   # A component on another image, or on an image of another Debian release, whose glibc is to be
-  # read again, and a set of databases that a fourth application joins, fail, saying what the
+  # read again, and a set of databases that a fifth application joins, fail, saying what the
   # databases are now.
   tree_without
   yq -i '.spec.imageName = "registry.example.com/cloudnative-pg/postgresql:18.6-standard-trixie"' "$TREE/$cluster"
@@ -1719,11 +1719,11 @@ of_security_system() {
   run excepts_item 12 "PostgreSQL's archiver" archiver_exception "$TREE"
   echo "$output"
   [ "$status" -ne 0 ]
-  [[ $output == *"and PostgreSQL's archiver is ("*'k8s.ns.name in ("ai-system", "ascender", "backstage", "robot")'* ]]
+  [[ $output == *"and PostgreSQL's archiver is ("*'k8s.ns.name in ("ai-system", "ascender", "backstage", "kguardian", "robot")'* ]]
   run excepts_item 4 "CloudNativePG's instance manager" instance_manager_redirect_exception "$TREE"
   echo "$output"
   [ "$status" -ne 0 ]
-  [[ $output == *"and CloudNativePG's instance manager is or "*'k8s.ns.name in ("ai-system", "ascender", "backstage", "robot")'* ]]
+  [[ $output == *"and CloudNativePG's instance manager is or "*'k8s.ns.name in ("ai-system", "ascender", "backstage", "kguardian", "robot")'* ]]
 }
 
 @test "The log-clearing rule excepts the truncation of log files inside containerd's image snapshots on the node, and nothing in a container" {

@@ -96,6 +96,21 @@
       separateMajorMinor: false,
     },
     {
+      // tests/kguardian.bats fails unless each of the three images is at the version the chart's
+      // values default to.
+      description: "kguardian: its chart and the three images the chart runs",
+      matchPackageNames: [
+        "ghcr.io/kguardian-dev/charts/kguardian",
+        "ghcr.io/kguardian-dev/kguardian/controller",
+        "ghcr.io/kguardian-dev/kguardian/broker",
+        "ghcr.io/kguardian-dev/kguardian/frontend",
+      ],
+      groupName: "kguardian",
+      // The chart and each image number their releases apart, so all four move in one pull request
+      // whatever the step of each.
+      separateMajorMinor: false,
+    },
+    {
       description: "The Flux Operator: its image and its operator and instance charts",
       matchPackageNames: ["controlplaneio-fluxcd/**", "ghcr.io/controlplaneio-fluxcd/**"],
       groupName: "Flux Operator",

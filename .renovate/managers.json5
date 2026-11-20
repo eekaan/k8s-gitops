@@ -152,5 +152,23 @@
       matchPackageNames: ["ghcr.io/nvidia/openshell/**"],
       allowedVersions: "/^[0-9]+\\.[0-9]+\\.[0-9]+$/",
     },
+    {
+      // kguardian's chart registry lists a build of each pull request as <version>-pr<number>, a
+      // 2.0.0-pr… among them, beside the releases.
+      description: "kguardian's chart: releases, not the builds of pull requests",
+      matchPackageNames: ["ghcr.io/kguardian-dev/charts/kguardian"],
+      allowedVersions: "/^[0-9]+\\.[0-9]+\\.[0-9]+$/",
+    },
+    {
+      // The images' registries list pr-<number> builds, per architecture for the broker and the
+      // interface, and latest beside the v1.2.3 releases.
+      description: "kguardian's images: releases",
+      matchPackageNames: [
+        "ghcr.io/kguardian-dev/kguardian/controller",
+        "ghcr.io/kguardian-dev/kguardian/broker",
+        "ghcr.io/kguardian-dev/kguardian/frontend",
+      ],
+      allowedVersions: "/^v[0-9]+\\.[0-9]+\\.[0-9]+$/",
+    },
   ],
 }

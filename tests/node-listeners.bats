@@ -1097,7 +1097,9 @@ Probe/hello has no namespace and no HelmRelease to take one from' ]
   [ "$(evaluate "$VIEW" "$INVENTORY" "$EXCEPTIONS")" = "$(evaluate "$RENDER" "$INVENTORY" "$EXCEPTIONS")" ]
   run jq -r '.read | "\(.onHostNetwork) pod templates on the host network, \(.monitors > 0)"' <(evaluate "$RENDER" "$INVENTORY" "$EXCEPTIONS")
   echo "$output"
-  [ "$output" = "4 pod templates on the host network, true" ]
+  # Cilium's agent, its Envoy and its operator, the node exporter, and kguardian's observer, which
+  # declares no port.
+  [ "$output" = "5 pod templates on the host network, true" ]
 }
 
 @test "an exceptions file that is not there, or an entry of it with a missing or unknown key or an empty reason, fails every check that reads it" {

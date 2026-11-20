@@ -107,9 +107,9 @@ Feature: PostgreSQL
     Then each field is defined there, and each value has the type the schema gives and, where it lists them, one of the values it allows
 
   Scenario: A cluster that does not select the backup plugin builds no database that needs it, and one that selects a database without it is refused
-    Given the cluster's overlay, with the applications that take the component, n8n and Backstage, and with the plugin's application left out
+    Given the cluster's overlay, with the applications that take the component, n8n, Backstage, Ascender and kguardian, and with the plugin's application left out
     When it is built as Flux applies it and checked with scripts/kubernetes-check
-    Then each of the two names the plugin's application in dependsOn, either one that takes the component without naming it is refused, and an overlay that lists them without the plugin's application is refused, naming each and the dependency, while one that lists none of the three builds none of them
+    Then each of the four names the plugin's application in dependsOn, any one that takes the component without naming it is refused, and an overlay that lists them without the plugin's application is refused, naming each and the dependency, while one that lists none of the five builds none of them
 
   Scenario: The restore runbook's manifest is one the pinned operator defines and reads the archive of the cluster it replaces
     Given the point-in-time restore's Cluster manifest in docs/runbooks/postgres-restore.md, the one of its Cluster manifests that bootstraps by recovery, and the Cluster definition of the pinned chart

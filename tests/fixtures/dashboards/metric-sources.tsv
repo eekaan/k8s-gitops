@@ -46,7 +46,7 @@ piraeus	linstor_.+	ServiceMonitor/linstor-controller
 piraeus	drbd_.+|drbdreactor_up	PodMonitor/linstor-satellite
 piraeus	scrape_duration_seconds	any-monitor
 cloudnative-pg	__name__	unread:4	the four expressions of the Checkpoints row select cnpg_pg_stat_bgwriter_* or cnpg_pg_stat_checkpointer_*, whichever the PostgreSQL version has, by a regular expression on the name
-cloudnative-pg	cnpg_.+	PodMonitor/backstage-db,PodMonitor/n8n-db
+cloudnative-pg	cnpg_.+	PodMonitor/backstage-db,PodMonitor/kguardian-db,PodMonitor/n8n-db
 cloudnative-pg	controller_runtime_.+	PodMonitor/cloudnative-pg
 cloudnative-pg	kube_.+	ServiceMonitor/kube-prometheus-stack-kube-state-metrics
 cloudnative-pg	kubelet_volume_stats_.+|container_memory_working_set_bytes	ServiceMonitor/kube-prometheus-stack-kubelet

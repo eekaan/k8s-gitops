@@ -1121,7 +1121,7 @@ EOF
 }
 
 @test "The table of who signs in the docs is the rows of signatures.yaml" {
-  local table rows line source signed verified why row repository subject identity workflow ref expected
+  local table rows line source signed verified why row repository subject identity workflow ref expected version
   table=$(docs_table)
   [ -n "$table" ]
   # The same sources, in the same order, one line each.
@@ -1143,8 +1143,16 @@ EOF
         if [[ $identity =~ ^https://github\.com/([^/]+/[^/]+)/\.github/workflows/([^@/]+)@refs/(heads|tags)/(.+)$ ]]; then
           repository=${BASH_REMATCH[1]} workflow=${BASH_REMATCH[2]} ref=${BASH_REMATCH[4]}
           if [[ ${BASH_REMATCH[3]} == tags ]]; then
-            [[ $subject == *'@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$' ]] || { echo "$source: a tag the table cannot name: $subject"; return 1; }
-            expected="$repository, \`$workflow\` at a version tag"
+            # A version tag, or one under a fixed directory of tags, such as chart/v1.2.3.
+            version='v[0-9]+\.[0-9]+\.[0-9]+$'
+            if [[ $subject == *"@refs/tags/$version" ]]; then
+              expected="$repository, \`$workflow\` at a version tag"
+            elif [[ ${subject#*@refs/tags/} =~ ^([a-z0-9-]+)/(.+)$ && ${BASH_REMATCH[2]} == "$version" ]]; then
+              expected="$repository, \`$workflow\` at a version tag under \`${BASH_REMATCH[1]}/\`"
+            else
+              echo "$source: a tag the table cannot name: $subject"
+              return 1
+            fi
           else
             expected="$repository, \`$workflow\` on \`$ref\`"
           fi
