@@ -2,9 +2,9 @@ Feature: Cluster lifecycle
   One recipe says whether the cluster is healthy, one reboots a node while watching that the Kubernetes API keeps answering through its load balancer, and one takes the cluster down without leaving behind what it made in the cloud.
 
   Scenario: A healthy cluster passes every check
-    Given six Ready nodes, as many as talman.yaml lists, no kube-proxy pod, an API that answers /readyz, every pod in kube-system and flux-system Running or Succeeded, no certificate signing request Pending and a pod whose logs can be fetched
+    Given six Ready nodes, as many as talman.yaml lists, no kube-proxy pod, an API that answers /readyz, every pod in kube-system and flux-system Running or Succeeded, no certificate signing request Pending, a pod whose logs can be fetched, and a cilium-config that turns WireGuard on with every node's Cilium agent encrypting with WireGuard and a peer for every other node
     When cluster-check runs
-    Then it prints pass for every check and exits zero
+    Then it prints pass for every check and exits zero, having asked each agent once, and prints no public key or address
 
   Scenario: Each unhealthy condition fails its own check and is named
     Given, one at a time, an API that answers but not /readyz, a node that is not Ready, a node of talman.yaml missing from the cluster, a kube-proxy pod, a failing pod in kube-system or in flux-system, a certificate signing request Pending, and pod logs that cannot be fetched
@@ -14,7 +14,7 @@ Feature: Cluster lifecycle
   Scenario: The health check changes nothing in the cluster
     Given a healthy cluster and an unhealthy one
     When cluster-check runs
-    Then every kubectl call it makes is a get or a logs, it runs nothing else that reaches the cluster or the cloud, and no file of the repository changes
+    Then every kubectl call it makes is a get, a logs, or an exec of cilium-dbg encrypt status --output json in the cilium-agent container of a node's Cilium agent pod, it runs nothing else that reaches the cluster or the cloud, and no file of the repository changes
 
   Scenario: Before Flux is installed the Flux checks are skipped, and said to be
     Given a cluster without the namespace flux-system
@@ -30,6 +30,16 @@ Feature: Cluster lifecycle
     Given a cluster without Prometheus's Service, one whose Prometheus does not answer through the service proxy, one whose Prometheus answers with an error, and ones whose answer holds no target of a component's job
     When cluster-check runs for each
     Then the scrape check prints skip with the reason, never pass, the last line names it among the skipped checks, no address is printed and the run exits zero
+
+  Scenario: cluster-check fails, naming the node, while an agent does not encrypt with every other node
+    Given, one at a time, a cilium-config that turns WireGuard on and an agent that reports encryption Disabled, one that reports IPsec, one that reports wireguard in lower case, one with a peer fewer than the other nodes, one with a peer more, one with none, one whose device is not cilium_wg0, one with a second device beside it, one whose agent and kernel disagree, one that does not answer within the bound, one that answers with nothing, one with something other than JSON, one that answers healthy and exits non-zero and one that answers healthy twice, a node with no agent running, and one whose agent's name does not have the shape of a pod's
+    When cluster-check runs for each
+    Then it exits non-zero, the encryption check prints FAIL naming that node and why, every other check passes, the run ends naming the step it failed in, no public key, message or address is printed, and the agent that does not answer is given up on after 20 seconds, leaving nothing running
+
+  Scenario: cluster-check skips the encryption check, saying why, while Cilium's configuration does not turn WireGuard on
+    Given a cilium-config without enable-wireguard "true", and then one that cannot be read
+    When cluster-check runs for each
+    Then the first prints skip for the encryption check with that reason, asks no agent anything, and exits zero with the skip named in its last line; the second fails the check, saying the ConfigMap could not be read, asks no agent anything and prints no address
 
   Scenario: A reboot that the API rides out passes
     Given a node of talman.yaml and an API that answers throughout

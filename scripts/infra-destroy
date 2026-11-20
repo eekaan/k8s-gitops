@@ -21,7 +21,22 @@
 # stack reads the state of every other stack of its region that the run does not destroy first, and
 # refuses while one holds a resource, naming the recipe that destroys that stack. Neither a
 # resource's address nor any value of the state is printed.
-# Usage: scripts/infra-destroy [stack] [--yes] [--unreachable]
+# The edge stack's floating addresses are what the A records external-dns makes for the routes'
+# names point at, and its destroy gives them back to the cloud. So before it plans that destroy, it
+# reads those addresses from the stack's outputs, lists the names the tree's routes publish under
+# CLUSTER_DOMAIN, offline (dns_published_names in lib/dns.sh), looks each up at the public resolver
+# (dns_resolve_a), and refuses while one resolves to an address of the stack's, or cannot be told
+# apart from one that does, naming each by its label under the domain and saying what takes the
+# records out: just cluster-dns-remove while the cluster that made them runs, or, once it is gone,
+# deleting them and their TXT entries at the DNS provider. It refuses too while the addresses are not
+# known: the outputs cannot be read as JSON, name other than two edges, or name none while the
+# state holds a floating IP or cannot be read; outputs that name no address, of a state that holds
+# no floating IP, leave nothing to look up. It refuses as well without CLUSTER_DOMAIN, or when the
+# names cannot be listed or are none. --ignore-dns, given with sto2/edge only, destroys the stack
+# past all of that, naming on standard error each name it found at the edges or could not look up.
+# --check, for any stack or none, makes every refusal a destroy would make and stops before each
+# plan: nothing is planned, applied or asked, and no generated file or host key is removed.
+# Usage: scripts/infra-destroy [stack] [--yes] [--unreachable] [--check] [--ignore-dns]
 set -euo pipefail
 
 here=$(dirname "$0")
@@ -31,20 +46,24 @@ here=$(dirname "$0")
 . "$here/lib/cluster.sh"
 # shellcheck source=scripts/lib/edge.sh
 . "$here/lib/edge.sh"
+# shellcheck source=scripts/lib/dns.sh
+. "$here/lib/dns.sh"
 
 stacks=(sto2/cluster sto2/plumbing)
 named=("${stacks[@]}" sto2/ci sto2/edge)
 
 usage() {
-  infra_error "usage: infra-destroy [stack] [--yes] [--unreachable]; the stack is one of ${named[*]}"
+  infra_error "usage: infra-destroy [stack] [--yes] [--unreachable] [--check] [--ignore-dns]; the stack is one of ${named[*]}, and --ignore-dns goes with sto2/edge alone"
   exit 2
 }
 
-confirmed=0 unreachable=0 only=''
+confirmed=0 unreachable=0 check=0 ignore_dns=0 only=''
 for arg; do
   case $arg in
     --yes) confirmed=1 ;;
     --unreachable) unreachable=1 ;;
+    --check) check=1 ;;
+    --ignore-dns) ignore_dns=1 ;;
     -*) usage ;;
     *)
       [[ -z $only && " ${named[*]} " == *" $arg "* ]] || usage
@@ -52,6 +71,9 @@ for arg; do
       ;;
   esac
 done
+if ((ignore_dns)) && [[ $only != */edge ]]; then
+  usage
+fi
 if [[ -n $only ]]; then
   stacks=("$only")
 fi
@@ -90,6 +112,125 @@ require_nothing_on_plumbing() {
   ((!refused))
 }
 
+# edge_outputs_known: reads the addresses the edge stack's destroy gives back from its outputs
+# (edge_load), before the destroy takes the outputs with it, and returns 0 once it has. Returns 1 when
+# the outputs, read as JSON, name no address and the state holds no floating IP, as before the stack
+# is applied or once it is destroyed: no name can resolve to an address of it. Returns 2, having said
+# why, when the outputs cannot be read as JSON or name other than two edges, or when they name none
+# while the state holds a floating IP or cannot be read: the outputs name the addresses of the
+# floating IPs' associations (infra/openstack/stacks/sto2/edge/outputs.tf), so a state that holds a
+# floating IP without one is not taken for a state that holds no address. No address is printed.
+edge_outputs_known() {
+  local outputs state floating
+  if ! outputs=$(stack_tofu output -json) || ! jq -e 'type == "object"' <<< "$outputs" > /dev/null 2>&1; then
+    infra_error "the outputs of $stack cannot be read as JSON"
+    return 2
+  fi
+  if jq -e '(.addresses.value // []) == []' <<< "$outputs" > /dev/null 2>&1; then
+    if ! state=$(stack_tofu show -json) ||
+      ! floating=$(jq -r 'if type != "object" then error("not a state") else
+        [.values.root_module? // empty | .. | objects | select(.mode? == "managed" and .type? == "openstack_networking_floatingip_v2")]
+        | length end' <<< "$state" 2> /dev/null) || [[ ! $floating =~ ^[0-9]+$ ]]; then
+      infra_error "the outputs of $stack name no edge, and its state cannot be read to tell whether it holds a floating IP"
+      return 2
+    fi
+    if ((floating > 0)); then
+      infra_error "the outputs of $stack name no edge while its state holds a floating IP"
+      return 2
+    fi
+    return 1
+  fi
+  if ! jq -e '(.addresses.value | type) == "array" and (.addresses.value | length) == 2' <<< "$outputs" > /dev/null 2>&1; then
+    infra_error "the outputs of $stack do not name two edges"
+    return 2
+  fi
+  edge_load || return 2
+}
+
+# require_names_off_edges: for the edge stack whose outputs edge_load has read, fails unless no name
+# the tree's routes publish under CLUSTER_DOMAIN resolves, at the public resolver, to one of
+# edge_addresses; a name whose lookup gives no answer that tells, as when the resolver cannot be
+# asked or answers with a CNAME, counts as one that does, and NXDOMAIN as one that does not. Names
+# each, by its label under the domain and never in full, and what takes the records out. With
+# --ignore-dns it names the same, on standard error, and succeeds. Fails as well, or with
+# --ignore-dns says so in one line and succeeds, while CLUSTER_DOMAIN is unset or the placeholder,
+# or the names cannot be listed or are none. The resolver's answers stay in a directory of the run's
+# own that only this user can enter, removed when the function ends, however it ends. No address is
+# printed.
+require_names_off_edges() (
+  local names name label status answers answer why answers_dir at_edge
+  local -a found=()
+  if [[ -z ${CLUSTER_DOMAIN:-} ]] || is_placeholder "$CLUSTER_DOMAIN"; then
+    if ((ignore_dns)); then
+      infra_error "CLUSTER_DOMAIN is not set, or holds the placeholder, so no name the routes publish was looked up; --ignore-dns destroys $stack all the same"
+      return 0
+    fi
+    require_env CLUSTER_DOMAIN || true
+    infra_error "$stack is not planned or destroyed without CLUSTER_DOMAIN, under which the names the routes publish are looked up; --ignore-dns destroys it all the same"
+    return 1
+  fi
+  if ! names=$(dns_published_names "$CLUSTER_DOMAIN"); then
+    if ((ignore_dns)); then
+      infra_error "the names the routes publish could not be listed, as said above, so none was looked up; --ignore-dns destroys $stack all the same"
+      return 0
+    fi
+    infra_error "the names the routes publish could not be listed, as said above, so $stack is not planned or destroyed; --ignore-dns destroys it all the same"
+    return 1
+  fi
+  # A listing with no name is not taken for a tree that publishes none.
+  if [[ -z $names ]]; then
+    if ((ignore_dns)); then
+      infra_error "no route the tree builds publishes a name under CLUSTER_DOMAIN, so none was looked up; --ignore-dns destroys $stack all the same"
+      return 0
+    fi
+    infra_error "no route the tree builds publishes a name under CLUSTER_DOMAIN, so none was looked up and $stack is not planned or destroyed; --ignore-dns destroys it all the same"
+    return 1
+  fi
+  # Without curl each lookup fails, and each name is refused as one that cannot be told apart.
+  require_commands curl || true
+  answers_dir=$(umask 077 && mktemp -d) || return 1
+  trap 'rm -rf -- "$answers_dir"' EXIT
+  while IFS= read -r name; do
+    [[ -n $name ]] || continue
+    label=${name%."$CLUSTER_DOMAIN"}
+    [[ $name != "$CLUSTER_DOMAIN" ]] || label="the domain itself"
+    status=0
+    answers=$(dns_resolve_a "$name" "$answers_dir/answer") || status=$?
+    case $status in
+      0)
+        at_edge=0
+        while IFS= read -r answer; do
+          if [[ -n $answer && " ${edge_addresses[*]} " == *" $answer "* ]]; then
+            at_edge=1
+          fi
+        done <<< "$answers"
+        if ((at_edge)); then
+          infra_error "$label resolves to an address of the edge routers at the public resolver"
+          found+=("$label")
+        fi
+        ;;
+      3) ;;
+      *)
+        case $status in
+          1) why="it could not be asked" ;;
+          2) why="its answer could not be read" ;;
+          4) why="it answered with status $answers, not NOERROR" ;;
+          *) why="its answer holds a record of another type or name, such as a CNAME" ;;
+        esac
+        infra_error "$label could not be looked up at the public resolver: $why, so it cannot be told apart from a name at the edge routers"
+        found+=("$label")
+        ;;
+    esac
+  done <<< "$names"
+  ((${#found[@]} > 0)) || return 0
+  if ((ignore_dns)); then
+    infra_error "--ignore-dns destroys $stack all the same, though ${#found[@]} of the names the routes publish may resolve to its addresses"
+    return 0
+  fi
+  infra_error "$stack is not planned or destroyed while a name the routes publish may resolve to its addresses: take the records out first with just cluster-dns-remove while the cluster that made them runs; once it is gone, delete those A records and their extdns- TXT entries at the DNS provider; or destroy it all the same with --ignore-dns"
+  return 1
+)
+
 require_nothing_on_plumbing
 
 for stack in "${stacks[@]}"; do
@@ -121,11 +262,30 @@ for stack in "${stacks[@]}"; do
       require_cluster_owns_nothing "$cluster" "$stack" "$unreachable"
     fi
     # The edges' addresses, read before the destroy takes the outputs with it: an edge built again
-    # at the same floating address has host keys of its own, which the old ones would refuse.
+    # at the same floating address has host keys of its own, which the old ones would refuse, and
+    # the routes' names are looked up against them before the stack's addresses are released.
     forget_edges=0
-    if [[ $stack == */edge ]] && edge_applied; then
-      edge_load
-      forget_edges=1
+    if [[ $stack == */edge ]]; then
+      outputs_known=0
+      edge_outputs_known || outputs_known=$?
+      case $outputs_known in
+        0)
+          forget_edges=1
+          require_names_off_edges
+          ;;
+        1) ;;
+        *)
+          if ((!ignore_dns)); then
+            infra_error "$stack is not planned or destroyed while the addresses it gives back are not known, as the names the routes publish cannot be looked up against them; --ignore-dns destroys it all the same"
+            exit 1
+          fi
+          infra_error "no name the routes publish was looked up, as the addresses $stack gives back are not known; --ignore-dns destroys it all the same"
+          ;;
+      esac
+    fi
+    if ((check)); then
+      echo "$stack: nothing refuses its destroy; --check planned and destroyed nothing"
+      exit 0
     fi
     echo "$stack:"
     plan_destroy

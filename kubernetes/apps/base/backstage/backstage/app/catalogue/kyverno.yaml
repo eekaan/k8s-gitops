@@ -4,7 +4,7 @@ apiVersion: backstage.io/v1alpha1
 kind: Component
 metadata:
   name: kyverno
-  description: Kyverno, an admission policy engine that reports in audit, and never refuses, what is applied against the three rules of kyverno-policies.
+  description: Kyverno, an admission policy engine that reports in audit what is applied against the three shared rules of kyverno-policies, and refuses a pod without its namespace's sandbox tier.
   links:
     - url: https://github.com/eekaan/k8s-gitops/blob/main/docs/kubernetes.md#admission-policy
       title: Documentation

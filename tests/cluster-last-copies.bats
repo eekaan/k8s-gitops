@@ -28,7 +28,7 @@ setup() {
   CUSTODY="$BATS_TEST_TMPDIR/custody"
   mkdir -p "$BIN" "$RECORD" "$STATE/cluster" "$STORE" "$BATS_TEST_TMPDIR/store-fails" "$WORK" "$RUN" "$CUSTODY" \
     "$BATS_TEST_TMPDIR/keys" "$BATS_TEST_TMPDIR/repo/infra/openstack" "$BATS_TEST_TMPDIR/repo/talos/lab-sto2/clusterconfig" \
-    "$BATS_TEST_TMPDIR/repo/kubernetes/components/cnpg-cluster"
+    "$BATS_TEST_TMPDIR/repo/kubernetes/components/cnpg-cluster" "$BATS_TEST_TMPDIR/repo/kubernetes/apps/base/openbao/openbao/app"
   : >"$RECORD/argv"
   : >"$RECORD/events"
   REPO=$(cd "$BATS_TEST_TMPDIR/repo" && pwd)
@@ -36,6 +36,9 @@ setup() {
   cp "$ROOT/talos/.sops.yaml" "$REPO/talos/.sops.yaml"
   cp "$ROOT/.sops.yaml" "$REPO/.sops.yaml"
   cp "$ROOT/kubernetes/components/cnpg-cluster/cronjob.yaml" "$REPO/kubernetes/components/cnpg-cluster/cronjob.yaml"
+  # The values whose seal stanza names the seal keys' ids, which the recipes read from their checkout.
+  VALUES="$REPO/kubernetes/apps/base/openbao/openbao/app/values.yaml"
+  cp "$ROOT/kubernetes/apps/base/openbao/openbao/app/values.yaml" "$VALUES"
   # The kubeconfig the recipes point kubectl at; the fake reads none.
   : >"$REPO/talos/lab-sto2/clusterconfig/kubeconfig"
   # The backend file, the endpoint's only source, with a marker for the endpoint.
@@ -193,6 +196,36 @@ openbao_custody() {
     age --encrypt --recipient "${2:-$RECIPIENT}" --output "$OPENBAO_FILE"
 }
 
+# rotated_openbao_custody CURRENT PREVIOUS: the OpenBao custody file as bao-seal-keep writes it after
+# the rotation rotated makes: marker shares, the current key CURRENT of openbao-seal-2 as its seal and
+# the previous key PREVIOUS of openbao-seal-1 as its previous_seal, encrypted to the Talos age key.
+# shellcheck disable=SC2016 # $current and $previous are jq variables.
+rotated_openbao_custody() {
+  rm -f "$OPENBAO_FILE"
+  jq -n --arg current "$1" --arg previous "$2" '{cluster: "lab-sto2", created: "2026-11-19T00:00:00Z",
+    recovery: {shares: 5, threshold: 3, keys_base64: [range(5) | "marker-recovery-share-\(. + 1)" | @base64]},
+    seal: {secret: "openbao-seal-2", key_id: "openbao-seal-2", key: $current},
+    previous_seal: {secret: "openbao-seal-1", key_id: "openbao-seal-1", key: $previous}}' |
+    age --encrypt --recipient "$RECIPIENT" --output "$OPENBAO_FILE"
+}
+
+# running_config: the ConfigMap openbao/openbao-config of the cluster, holding the server configuration
+# of the copy's values.yaml as it is now, as the chart renders it there for the servers to run.
+running_config() {
+  yq -o json '{"kind": "ConfigMap", "metadata": {"namespace": "openbao", "name": "openbao-config"},
+    "data": {"extraconfig-from-values.hcl": .server.ha.raft.config}}' "$VALUES" >"$STATE/cluster/configmap.openbao.openbao-config.json"
+}
+
+# rotated: the copy's tree, and the cluster's servers, after the seal-key rotation
+# docs/runbooks/openbao.md describes: extraVolumes mounts openbao-seal-2 beside openbao-seal-1, and the
+# seal stanza's current key is openbao-seal-2 and its previous key openbao-seal-1.
+rotated() {
+  yq -i '.server.ha.raft.config |= sub("seal \"static\" \\{[^}]*\\}"; "seal \"static\" {\n  current_key_id = \"openbao-seal-2\"\n  current_key = \"file:///openbao/userconfig/openbao-seal-2/key\"\n  previous_key_id = \"openbao-seal-1\"\n  previous_key = \"file:///openbao/userconfig/openbao-seal-1/key\"\n}")
+    | .server.extraVolumes = [{"type": "secret", "name": "openbao-seal-2"}] + .server.extraVolumes' "$VALUES"
+  grep -qx '  previous_key_id = "openbao-seal-1"' <(yq '.server.ha.raft.config' "$VALUES")
+  running_config
+}
+
 # volsync_custody MASTER [RECIPIENT]: the volume backups' custody file as bao-seed-volsync writes it.
 # shellcheck disable=SC2016 # $master is a jq variable.
 volsync_custody() {
@@ -221,8 +254,8 @@ secret() {
     '{kind: "Secret", metadata: {namespace: $ns, name: $name}, data: {($key): ($value | @base64)}}' >"$STATE/cluster/secret.$1.$2.json"
 }
 
-# a_cluster: the cluster the recipe reads: the secret store with its seal Secret and its snapshot
-# CronJob; three databases from the component, n8n's, Ascender's and Backstage's, each with its
+# a_cluster: the cluster the recipe reads: the secret store with its seal Secret, the server
+# ConfigMap whose seal stanza names it, and its snapshot CronJob; three databases from the component, n8n's, Ascender's and Backstage's, each with its
 # primary, its dump CronJob, its ObjectStore with a recovery window, and its backup Secret with the
 # customer key; two volumes backed up by VolSync, n8n's and Open WebUI's, each owned by its
 # application's Kustomization, which is not suspended, and with its Secret's password; and in the
@@ -231,6 +264,7 @@ secret() {
 a_cluster() {
   local db ns name app
   secret openbao openbao-seal-1 key "$SEAL"
+  running_config
   DATABASES=(ai-system/n8n-db ascender/ascender-db backstage/backstage-db)
   PRIMARIES=(n8n-db-1 ascender-db-3 backstage-db-2)
   VOLUMES=(ai-system/n8n ai-system/open-webui)
@@ -428,7 +462,7 @@ resumed flux-system/open-webui"
 }
 
 @test "A custody file that is missing, does not open or does not hold what the cluster holds stops the last copies before any is taken, and is named" {
-  local role file kept
+  local role file kept reason above own
   local -A roles=([openbao]="the OpenBao custody file" [volsync]="the volume backups' custody file" [postgres]="the PostgreSQL backups' custody file")
   local -A holds=([openbao]="the seal key the Secret openbao/openbao-seal-1 holds"
     [volsync]="the master the Secret ai-system/n8n-volsync's password is derived from"
@@ -500,6 +534,30 @@ resumed flux-system/open-webui"
   last_copies
   refused "the volume backups' custody file, $VOLSYNC_FILE, does not exist" "the PostgreSQL backups' custody file, $POSTGRES_FILE, does not exist" \
     "the Flux age key is missing: FLUX_AGE_KEY_FILE names no file"
+  reset_environment
+  volsync_custody "$MASTER"
+  postgres_custody "$SSE"
+  # After a seal-key rotation the OpenBao custody file written before it holds the old key alone: it
+  # is refused with bao-seal-restore's reason on the lines above the recipe's own, which names each
+  # seal Secret by its id. The file bao-seal-keep wrote passes.
+  rotated
+  secret openbao openbao-seal-2 key "${SEAL%0001}0003"
+  openbao_custody "$SEAL"
+  last_copies
+  refused "the OpenBao custody file, $OPENBAO_FILE, does not hold the seal keys the Secrets openbao/openbao-seal-2 and openbao/openbao-seal-1 hold"
+  reason="bao-seal-restore: $OPENBAO_FILE holds the seal key openbao-seal-1, and the store's current seal key is openbao-seal-2: give the custody file just bao-seal-keep wrote after the rotation, or write it with just bao-seal-keep $OPENBAO_FILE <new file>"
+  above=$(grep -nxF -- "$reason" <<<"$output" | cut -d: -f1)
+  own=$(grep -nxF -- "cluster-last-copies: the OpenBao custody file, $OPENBAO_FILE, does not hold the seal keys the Secrets openbao/openbao-seal-2 and openbao/openbao-seal-1 hold" <<<"$output" | cut -d: -f1)
+  echo "bao-seal-restore's reason on line ${above:-none}, the recipe's own on line $own"
+  [ -n "$above" ] && ((above < own))
+  rotated_openbao_custody "${SEAL%0001}0003" "$SEAL"
+  last_copies --check
+  echo "$output"
+  [ "$status" -eq 0 ]
+  grep -qxF "bao-seal-restore: the Secret openbao-seal-2 holds the key in $OPENBAO_FILE" <<<"$output"
+  grep -qxF "bao-seal-restore: the Secret openbao-seal-1 holds the key in $OPENBAO_FILE" <<<"$output"
+  nothing_changed
+  nothing_left
 }
 
 @test "A last copy that fails, or is not newer than the run, fails the recipe naming it, and what it suspended is resumed" {

@@ -1,0 +1,308 @@
+---
+# Each pod has the context the restricted level requires, so what tells them apart is the isolation
+# of the tier alone: hostUsers and runtimeClassName.
+apiVersion: v1
+kind: Pod
+metadata: {name: pass-userns, namespace: sandbox-userns}
+spec:
+  hostUsers: false
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: app
+      image: registry.example/app:1.0
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [ALL]}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: pass-gvisor, namespace: sandbox-gvisor}
+spec:
+  runtimeClassName: gvisor
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: app
+      image: registry.example/app:1.0
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [ALL]}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: pass-kata, namespace: sandbox-kata}
+spec:
+  runtimeClassName: kata
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: app
+      image: registry.example/app:1.0
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [ALL]}
+---
+# The field the tier asks for, absent.
+apiVersion: v1
+kind: Pod
+metadata: {name: fail-userns-unset, namespace: sandbox-userns}
+spec:
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: app
+      image: registry.example/app:1.0
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [ALL]}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: fail-gvisor-unset, namespace: sandbox-gvisor}
+spec:
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: app
+      image: registry.example/app:1.0
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [ALL]}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: fail-kata-unset, namespace: sandbox-kata}
+spec:
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: app
+      image: registry.example/app:1.0
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [ALL]}
+---
+# hostUsers set, to the host's user namespace.
+apiVersion: v1
+kind: Pod
+metadata: {name: fail-userns-true, namespace: sandbox-userns}
+spec:
+  hostUsers: true
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: app
+      image: registry.example/app:1.0
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [ALL]}
+---
+# The other sandbox runtime: a tier names one class, not a class at least as isolated.
+apiVersion: v1
+kind: Pod
+metadata: {name: fail-gvisor-kata, namespace: sandbox-gvisor}
+spec:
+  runtimeClassName: kata
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: app
+      image: registry.example/app:1.0
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [ALL]}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: fail-kata-gvisor, namespace: sandbox-kata}
+spec:
+  runtimeClassName: gvisor
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: app
+      image: registry.example/app:1.0
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [ALL]}
+---
+# A class whose name starts with the tier's: a tier names its class exactly.
+apiVersion: v1
+kind: Pod
+metadata: {name: fail-gvisor-debug, namespace: sandbox-gvisor}
+spec:
+  runtimeClassName: gvisor-debug
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: app
+      image: registry.example/app:1.0
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [ALL]}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: fail-kata-qemu, namespace: sandbox-kata}
+spec:
+  runtimeClassName: kata-qemu
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: app
+      image: registry.example/app:1.0
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [ALL]}
+---
+# Another tier's isolation instead of this one's: a user namespace in a gvisor namespace, and the
+# gvisor class in a userns one.
+apiVersion: v1
+kind: Pod
+metadata: {name: fail-gvisor-userns, namespace: sandbox-gvisor}
+spec:
+  hostUsers: false
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: app
+      image: registry.example/app:1.0
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [ALL]}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: fail-userns-gvisor, namespace: sandbox-userns}
+spec:
+  runtimeClassName: gvisor
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: app
+      image: registry.example/app:1.0
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [ALL]}
+---
+# A namespace without the label is not the rule's to judge: each of these pods would fail its tier
+# (tests/admission-policy.bats moves them into the tier's namespace to show it).
+apiVersion: v1
+kind: Pod
+metadata: {name: skip-userns-unlabelled, namespace: unlabelled}
+spec:
+  hostUsers: true
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: app
+      image: registry.example/app:1.0
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [ALL]}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: skip-gvisor-unlabelled, namespace: unlabelled}
+spec:
+  runtimeClassName: kata
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: app
+      image: registry.example/app:1.0
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [ALL]}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: skip-kata-unlabelled, namespace: unlabelled}
+spec:
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: app
+      image: registry.example/app:1.0
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [ALL]}
+---
+# The label is k8s-gitops/sandbox; a namespace labelled sandbox: gvisor names no tier.
+apiVersion: v1
+kind: Pod
+metadata: {name: skip-unprefixed, namespace: unprefixed}
+spec:
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: app
+      image: registry.example/app:1.0
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [ALL]}
+---
+# A value that is no tier refuses every pod, one that meets gvisor among them: an unknown value, the
+# right one in another case, and an empty one.
+apiVersion: v1
+kind: Pod
+metadata: {name: fail-unknown-value, namespace: unknown-value}
+spec:
+  runtimeClassName: gvisor
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: app
+      image: registry.example/app:1.0
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [ALL]}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: fail-unknown-case, namespace: unknown-case}
+spec:
+  runtimeClassName: gvisor
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: app
+      image: registry.example/app:1.0
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [ALL]}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: fail-unknown-empty, namespace: unknown-empty}
+spec:
+  runtimeClassName: gvisor
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: app
+      image: registry.example/app:1.0
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [ALL]}

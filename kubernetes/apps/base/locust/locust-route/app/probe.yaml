@@ -1,0 +1,31 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/monitoring.coreos.com/probe_v1.json
+# Locust's interface behind the cluster's sign-in, probed from inside the cluster by the blackbox
+# exporter as hello-sso's route is (docs/kubernetes.md, Probes): the public Gateway's proxies' Service
+# by its cluster name, over https, with the hostname as the parameter that sets the Host header and
+# the name the TLS handshake verifies. The probe has no session, so the SecurityPolicy has
+# oauth2-proxy answer it with the redirect to dex that starts a sign-in, and the module takes that
+# 302 only, not followed. It asks for the interface's page, /, the path of the master's readiness
+# probe, which Locust answers 200 to anyone, with no sign-in of its own: the day the policy is lost,
+# the probe meets that 200. The one Probe of the host covers its sign-in paths as well, the route of
+# the same host that components/sso adds.
+apiVersion: monitoring.coreos.com/v1
+kind: Probe
+metadata:
+  name: ${SSO_ROUTE}
+spec:
+  jobName: public-endpoints
+  module: public_https_signin
+  prober:
+    url: blackbox-exporter.monitoring.svc.cluster.local:9115
+  targets:
+    staticConfig:
+      static:
+        - https://envoy-envoy-gateway-system-public-5ea56ca9.envoy-gateway-system.svc.cluster.local/
+      labels:
+        hostname: ${SSO_HOSTNAME}.${CLUSTER_DOMAIN}
+      relabelingConfigs:
+        - action: replace
+          sourceLabels:
+            - hostname
+          targetLabel: __param_hostname

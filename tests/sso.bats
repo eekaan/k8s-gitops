@@ -550,7 +550,7 @@ secret_targets() {
   [ "$(yq -N 'select(.kind == "Kustomization" and (.spec.targetNamespace == "sso-system")) | .metadata.name' "$OVERLAY" | sort | paste -sd' ' -)" = "dex oauth2-proxy" ]
   [ "$(yq -N 'select(.kind == "Kustomization" and .spec.targetNamespace == "sso-system") | .spec.wait' "$OVERLAY" | sort -u)" = true ]
   # The namespace directory alone, and then neither entry.
-  tree_without dex oauth2-proxy hello-sso victoria-logs-route
+  tree_without dex oauth2-proxy hello-sso victoria-logs-route locust-route
   overlay "$TREE/kubernetes/apps/overlays/lab-sto2"
   [ "$(yq -N 'select(.metadata.namespace == "sso-system" or .metadata.name == "sso-system") | .kind + "/" + .metadata.name' "$OVERLAY" | sort | paste -sd' ' -)" \
     = "ConfigMap/app-template-defaults Namespace/sso-system NetworkPolicy/default-deny" ]
@@ -583,12 +583,13 @@ secret_targets() {
   [ "$status" -ne 0 ]
   [[ $output == *"Kustomization hello-sso names oauth2-proxy"* ]]
   rm -rf "$TREE"
-  # Nothing else waits on them: only oauth2-proxy names dex, only the routes that opt in, the demo's
-  # and the log store's, name oauth2-proxy, and nothing names either route.
+  # Nothing else waits on them: only oauth2-proxy names dex, only the routes that opt in, the demo's,
+  # the log store's and Locust's, name oauth2-proxy, and nothing names any of those routes.
   overlay
   [ "$(yq -N 'select(.kind == "Kustomization") | select(.spec.dependsOn // [] | map(.name) | contains(["dex"])) | .metadata.name' "$OVERLAY")" = oauth2-proxy ]
   [ "$(yq -N 'select(.kind == "Kustomization") | select(.spec.dependsOn // [] | map(.name) | contains(["oauth2-proxy"])) | .metadata.name' "$OVERLAY" | sort | paste -sd' ' -)" \
-    = "hello-sso victoria-logs-route" ]
+    = "hello-sso locust-route victoria-logs-route" ]
   [ -z "$(yq -N 'select(.kind == "Kustomization") | select(.spec.dependsOn // [] | map(.name) | contains(["hello-sso"])) | .metadata.name' "$OVERLAY")" ]
   [ -z "$(yq -N 'select(.kind == "Kustomization") | select(.spec.dependsOn // [] | map(.name) | contains(["victoria-logs-route"])) | .metadata.name' "$OVERLAY")" ]
+  [ -z "$(yq -N 'select(.kind == "Kustomization") | select(.spec.dependsOn // [] | map(.name) | contains(["locust-route"])) | .metadata.name' "$OVERLAY")" ]
 }

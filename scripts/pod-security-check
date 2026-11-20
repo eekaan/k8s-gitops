@@ -23,11 +23,19 @@
 #     level the exceptions list for it;
 #   - a namespace that enforces less than restricted audits and warns at restricted, at the
 #     Kubernetes minor of VERSIONS (versions.yaml);
-#   - that minor is not newer than the one mise.toml records the pinned evaluator as covering.
+#   - that minor is not newer than the one mise.toml records the pinned evaluator as covering;
+#   - a namespace whose manifest carries the label k8s-gitops/sandbox names a sandbox tier with it,
+#     userns, gvisor or kata, and nothing else, with or without workloads;
+#   - every workload in a namespace of a sandbox tier, a CronJob through its job template, sets what
+#     the tier asks of its pod: hostUsers false for userns, runtimeClassName gvisor or kata for those;
+#   - a namespace of a sandbox tier holds no object of the API groups volsync.backube or
+#     postgresql.cnpg.io (components/volsync, components/cnpg-cluster), whose operators make pods
+#     there that the namespace's application cannot give a tier.
 # The levels are ordered by what they permit: privileged, baseline, restricted.
 #
-# Prints, for each namespace, "NAMESPACE LEVEL N workloads, M listed"; with --list, also one line
-# "NAMESPACE/KIND/NAME LEVEL" for each workload, LEVEL being the strictest it passes.
+# Prints, for each namespace, "NAMESPACE LEVEL N workloads, M listed", followed by ", sandbox TIER"
+# for a namespace of a sandbox tier; with --list, also one line "NAMESPACE/KIND/NAME LEVEL" for each
+# workload, LEVEL being the strictest it passes.
 #
 # Usage: scripts/pod-security-check [--list] RENDER EXCEPTIONS VERSIONS
 set -euo pipefail
@@ -200,7 +208,20 @@ jq -n -c --arg minor "$minor" --argjson workloadKinds "$workload_kinds" \
   --slurpfile workloads "$tmp/workloads.jsonl" --slurpfile objects "$tmp/objects.jsonl" '
   {"privileged": 0, "baseline": 1, "restricted": 2} as $rank
   | ["privileged", "baseline", "restricted"] as $levels
+  # The sandbox tiers a namespace names with its label, and the API groups of the resources whose
+  # operators make pods no tier reaches, each with the component that brings them.
+  | ["userns", "gvisor", "kata"] as $tiers
+  | {"volsync.backube": "components/volsync", "postgresql.cnpg.io": "components/cnpg-cluster"} as $untiered
+  | ([$objects[] | select(.kind == "HelmRelease") | {key: ((.metadata.namespace // "") + "/" + .metadata.name),
+      value: (.spec.targetNamespace // .metadata.namespace // "")}] | from_entries) as $releases
   | def lbl($ns; $key): ($ns.metadata.labels // {})["pod-security.kubernetes.io/" + $key];
+  def tier($ns): ($ns.metadata.labels // {})["k8s-gitops/sandbox"];
+  # What a tier asks of a pod, said and checked on a pod spec.
+  def asks($tier): if $tier == "userns" then "hostUsers: false" else "runtimeClassName: \($tier)" end;
+  def meets($tier): if $tier == "userns" then .hostUsers == false else .runtimeClassName == $tier end;
+  # The namespace of an object, as for a workload: its own, or that of its release.
+  def nsof: (.metadata.labels // {}) as $l
+    | .metadata.namespace // $releases[($l["helm.toolkit.fluxcd.io/namespace"] // "") + "/" + ($l["helm.toolkit.fluxcd.io/name"] // "")] // "";
   # The checks a pod fails, and what Kubernetes would say of each.
   def verdicts($report): [$report.results[] | {key: (.resources[0].namespace + "/" + .resources[0].name),
     value: {result, controls: (.properties.controls // ""),
@@ -281,11 +302,25 @@ jq -n -c --arg minor "$minor" --argjson workloadKinds "$workload_kinds" \
                 "namespace \($ns) enforces \($enforce) and must pin audit and warn to the cluster minor: set pod-security.kubernetes.io/audit-version and /warn-version to \($minor)"
               else empty end)
            else empty end)
+        end),
+    # Each namespace of a sandbox tier: the label names a tier, every workload in it meets the tier,
+    # and no resource in it has its operator make pods the tier cannot reach.
+    ($declared | to_entries[] | select(.value.metadata.labels // {} | has("k8s-gitops/sandbox"))
+      | .key as $ns | tier(.value) as $tier
+      | if ($tier | IN($tiers[]) | not) then
+          "namespace \($ns) carries k8s-gitops/sandbox \(if $tier == null or $tier == "" then "\"\""
+            else $tier | tostring | gsub("[[:cntrl:]]"; "?") end), which is not userns, gvisor or kata"
+        else
+          ($ws[] | select(.ns == $ns and (.pod.spec | meets($tier) | not))
+            | "namespace \($ns) is of the \($tier) sandbox tier, but \(.workload) does not set \(asks($tier))"),
+          ($objects[] | select(nsof == $ns) | (.apiVersion // "" | split("/")[0]) as $group | select($untiered | has($group))
+            | "namespace \($ns) is of the \($tier) sandbox tier, but \(.kind)/\(.metadata.name) makes pods its operator gives no tier (\($untiered[$group]))")
         end)
   ] as $errors
   | {errors: $errors,
      namespaces: [$namespaces[] | . as $ns | select($declared[$ns] != null)
-       | "\($ns) \(lbl($declared[$ns]; "enforce")) \([$ws[] | select(.ns == $ns)] | length) workloads, \([$entries[] | select(.ns == $ns)] | length) listed"],
+       | "\($ns) \(lbl($declared[$ns]; "enforce")) \([$ws[] | select(.ns == $ns)] | length) workloads, \([$entries[] | select(.ns == $ns)] | length) listed"
+         + (tier($declared[$ns]) as $tier | if $tier == null then "" else ", sandbox \($tier)" end)],
      workloads: [$ws | sort_by(.id)[] | "\(.id) \(.need)"]}' >"$tmp/result.json" || die "the evaluation failed"
 
 if [[ $(jq '.errors | length' "$tmp/result.json") -gt 0 ]]; then

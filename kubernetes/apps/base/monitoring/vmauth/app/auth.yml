@@ -1,0 +1,72 @@
+---
+# vmauth's configuration: who may call the log store, and on which paths (docs/kubernetes.md, Who
+# may call the log store). vmauth puts each placeholder below in place from the variable it names
+# before it parses the file, and the Deployment sets every one of them from a Secret's key; the
+# values are 64 hexadecimal digits, or Basic and their base64, so none can be read as YAML or as a
+# placeholder.
+#
+# Each user's src_paths are regular expressions that must match the whole path, after vmauth has
+# removed dot segments and doubled slashes from it; a known user on a path none matches is refused
+# as a missing route, 400, and a request without a credential, or with one vmauth does not know, is
+# refused with 401, but for an OPTIONS request, a CORS preflight, which vmauth answers itself with
+# 204 and forwards nowhere. There is no unauthorized_user. Every entry sends to the store's
+# Service, and sets the header Authorization to the store's own credential in place of the
+# client's, and the tenant headers to the default tenant in place of any the client names.
+#
+# vector, the collector: the Elasticsearch bulk API its sink sends to, <endpoint>/_bulk.
+# grafana, logs-route and operator, the readers: the interface and its files, the query handlers,
+# the build information and the tenants, the paths the route sends on, the Grafana plugin asks and
+# just logs uses. Source: https://github.com/VictoriaMetrics/VictoriaLogs/blob/v1.54.0/app/vlselect/main.go
+users:
+  - username: vector
+    password: "%{VECTOR_PASSWORD}"
+    url_map:
+      - src_paths:
+          - /insert/elasticsearch/_bulk
+        url_prefix: http://victoria-logs.monitoring.svc.cluster.local:9428
+        headers:
+          - "Authorization: %{STORE_AUTHORIZATION}"
+          - "AccountID: 0"
+          - "ProjectID: 0"
+  - username: grafana
+    password: "%{GRAFANA_PASSWORD}"
+    url_map:
+      - src_paths:
+          - /select/vmui
+          - /select/vmui/.*
+          - /select/logsql/[a-z_]+
+          - /select/buildinfo
+          - /select/tenant_ids
+        url_prefix: http://victoria-logs.monitoring.svc.cluster.local:9428
+        headers:
+          - "Authorization: %{STORE_AUTHORIZATION}"
+          - "AccountID: 0"
+          - "ProjectID: 0"
+  - username: logs-route
+    password: "%{LOGS_ROUTE_PASSWORD}"
+    url_map:
+      - src_paths:
+          - /select/vmui
+          - /select/vmui/.*
+          - /select/logsql/[a-z_]+
+          - /select/buildinfo
+          - /select/tenant_ids
+        url_prefix: http://victoria-logs.monitoring.svc.cluster.local:9428
+        headers:
+          - "Authorization: %{STORE_AUTHORIZATION}"
+          - "AccountID: 0"
+          - "ProjectID: 0"
+  - username: operator
+    password: "%{OPERATOR_PASSWORD}"
+    url_map:
+      - src_paths:
+          - /select/vmui
+          - /select/vmui/.*
+          - /select/logsql/[a-z_]+
+          - /select/buildinfo
+          - /select/tenant_ids
+        url_prefix: http://victoria-logs.monitoring.svc.cluster.local:9428
+        headers:
+          - "Authorization: %{STORE_AUTHORIZATION}"
+          - "AccountID: 0"
+          - "ProjectID: 0"

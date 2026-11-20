@@ -1,7 +1,8 @@
 ---
 # yaml-language-server: $schema=https://raw.githubusercontent.com/yannh/kubernetes-json-schema/master/master-standalone-strict/service-v1.json
-# The master, for the workers on 5557 and for just locust's port forward on 8089. Of the cluster
-# alone: no route names it and nothing announces it.
+# The master, for the workers on 5557, and on 8089 for the route locust of locust-route, behind the
+# cluster's sign-in, and for just locust's port forward. Of the cluster alone: nothing announces it,
+# and the public Gateway reaches it through that route only.
 apiVersion: v1
 kind: Service
 metadata:

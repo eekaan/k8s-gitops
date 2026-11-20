@@ -18,8 +18,10 @@ a failing one ends with a line naming the step it failed in ([cluster.md](../clu
   bundle, so it has the same certificate authorities and keys: the credentials in a kubeconfig or
   talosconfig made for the old cluster are valid for the new one, and a copy kept anywhere works
   again once it is pointed at the new addresses.
-- The OpenBao custody file, which `just bao-recovery` wrote and the operator holds: the old store's
-  recovery keys and its seal key, which a snapshot of the old store opens with and no other
+- The OpenBao custody file, which `just bao-recovery` wrote and the operator holds, or after a
+  rotation of the seal key the newest one, which `just bao-seal-keep` wrote, and the older ones the
+  operator keeps beside it: the old store's recovery keys and its seal keys, the current one and
+  after a rotation the previous one, which a snapshot of the old store opens with and no other
   ([openbao.md](openbao.md#restoring-a-snapshot)).
 - The volume backups' master, in the custody file `just bao-seed-volsync` wrote, which the operator
   holds: it opens the repositories in the VolSync bucket, and the rebuilt cluster's store is seeded
@@ -36,7 +38,12 @@ a failing one ends with a line naming the step it failed in ([cluster.md](../clu
 - Addresses: the nodes' and the API load balancer's floating addresses go back to the cloud with
   the cluster stack, and the rebuilt cluster gets new ones. The generated files that held the old
   ones, the cluster's `talman.yaml`, talosconfig and kubeconfig, are removed with the stack and
-  written again by the build.
+  written again by the build. The edge routers' floating addresses go back with the edge stack, when
+  step 5 of [Taking it down](#taking-it-down) destroys it, and edges built again get new ones.
+- The DNS records of the routes' names, the A records at the edges' addresses and their TXT entries:
+  step 3 of [Taking it down](#taking-it-down) takes them out of the zone before the edges' addresses
+  go, and the rebuilt cluster's external-dns makes them again, at the addresses its `cluster-config`
+  holds ([Building it again](#building-it-again), step 2).
 - The contents of LINSTOR's volumes: they are on the workers' data volumes, which go with the
   cluster stack ([cluster.md](../cluster.md#the-workers-data-device)).
 - The databases' contents, as each instance's volume is LINSTOR's: the rebuilt cluster makes each
@@ -44,9 +51,9 @@ a failing one ends with a line naming the step it failed in ([cluster.md](../clu
   `bootstrap` section with initdb, empty. The database comes back from its archive or a dump in the
   postgres bucket ([Building it again](#building-it-again)).
 - OpenBao's store and every key in it, as its data is on LINSTOR's volumes: the rebuilt cluster's
-  OpenBao initialises anew, with a new seal key, and the recovery keys in the old store's custody
+  OpenBao initialises anew, with new seal keys, and the recovery keys in the old store's custody
   file open nothing in it, unless the old store's newest snapshot is restored into it with the old
-  seal key in place before its first member starts
+  seal keys in place before its first member starts
   ([openbao.md](openbao.md#restoring-a-snapshot)).
 - Everything in etcd: every object of the Kubernetes API, the Secrets made in the cluster among
   them. Flux applies again what Git holds. A snapshot restores into the same nodes only
@@ -63,11 +70,12 @@ a failing one ends with a line naming the step it failed in ([cluster.md](../clu
 
 1. **`just cluster-last-copies <openbao file> <volsync file> <postgres file>`**, while the cluster
    still runs and while its applications are idle, as what they write after a copy is not in it. The
-   files are the three custody files: `just bao-recovery`'s, `just bao-seed-volsync`'s and
-   `just bao-seed-postgres`'s. Once the cluster is gone, they and the Talos and Flux age keys are the
-   only copies of what they hold, and nothing compares them any more, so the recipe first compares
-   each with what the cluster holds, reading only: the seal key with the Secret `openbao-seal-1`, the
-   volume backups' master with every backed-up application's derived password, the customer key
+   files are the three custody files: `just bao-recovery`'s (after a rotation of the seal key, the
+   newest one `just bao-seal-keep` wrote), `just bao-seed-volsync`'s and `just bao-seed-postgres`'s.
+   Once the cluster is gone, they and the Talos and Flux age keys are the only copies of what they
+   hold, and nothing compares them any more, so the recipe first compares each with what the cluster
+   holds, reading only: each seal key the stanza names with the Secret of its id, `openbao-seal-1`
+   today, the volume backups' master with every backed-up application's derived password, the customer key
    with every database's backup Secret, and each age key with the recipient its `.sops.yaml` names. A
    file or key that does not hold what the cluster holds stops it, named, before any copy is taken;
    with `--check` it stops after the comparison and the plan, having changed nothing. Run it with
@@ -80,14 +88,28 @@ a failing one ends with a line naming the step it failed in ([cluster.md](../clu
    line per copy, with the custody files: the snapshot's name, each database's dump and the segment
    and time its WAL is archived through, and each volume's backup time, which are what the rebuild
    restores and what its checks compare with. A run that fails names what failed and why, and
-   takes no later copy: put that right and run it again. The destroy in step 3 checks for no
+   takes no later copy: put that right and run it again. The destroy in step 4 checks for no
    last copy, so it waits until a run has printed its summary.
 
 2. **`just cluster-snapshot`**, when the cluster's state matters: an etcd snapshot, encrypted, in
    the etcd bucket, which the rebuild leaves alone. It is of no use to the rebuild, as a snapshot
    restores into the same nodes only ([etcd-restore.md](etcd-restore.md#when-to-restore)).
 
-3. **`just cluster-destroy`**. It asks the cluster, through its kubeconfig, for every Service of
+3. **`just cluster-dns-remove`**, while the cluster still runs, with `--check` first:
+   `just cluster-dns-remove --check` lists, by type and by name under the domain, every A record and
+   TXT entry of the cluster's owner that a run of external-dns with no source would delete, from a
+   dry-run Job in `external-dns`, which it deletes again, and changes nothing else. Then
+   `just cluster-dns-remove`, once the cluster's name is typed back, suspends Flux's Kustomization
+   and HelmRelease `external-dns`, stops external-dns, deletes those records and entries with the
+   same Job, and plans again to check that none is left. Which records go is external-dns's own
+   owner rule, so records of another owner and those made by hand stay
+   ([cluster.md](../cluster.md#recipes)). external-dns stays stopped until the destroy:
+   `ExternalDNSSyncStale` fires and is expected until then
+   ([alerts.md](alerts.md#externaldnssyncstale)), and `FluxResourceSuspended`, which is `info`,
+   after a day. The recipe prints how to start external-dns again, for a teardown that stops here.
+   A second run finds nothing to delete and asks nothing.
+
+4. **`just cluster-destroy`**. It asks the cluster, through its kubeconfig, for every Service of
    type LoadBalancer and every PersistentVolume of a CSI driver. A cloud load balancer or volume
    behind one is the cluster's own and not in the cluster stack's state: its destroy would leave it
    in the cloud, where it keeps the network from being deleted. A Service whose addresses all come
@@ -103,15 +125,20 @@ a failing one ends with a line naming the step it failed in ([cluster.md](../clu
    typed back, and removes the cluster's `talman.yaml`, talosconfig and kubeconfig. The plumbing
    stack, the secrets bundle and the buckets stay.
 
-4. **`just infra-destroy sto2/plumbing`**, when the network and the Talos image should go too. The
-   CI host, the `sto2/ci` stack, is on the plumbing stack's network, and the network cannot be
-   removed while its port and floating IP exist. So first, in the state of every other stack, the
-   recipe looks for a resource, and while it finds one it plans and destroys nothing, naming the
-   stack and the recipe that destroys it: `just infra-destroy sto2/ci` for the CI host, which also
-   takes the runner away until [ci-host.md](ci-host.md) sets a new host up. Then it plans the
-   plumbing stack's destroy, prints the summary and destroys once `sto2/plumbing` is typed back.
-   Images left from earlier Talos versions are removed by hand
-   ([image-replacement.md](image-replacement.md#removing-old-images)).
+5. **`just infra-destroy sto2/plumbing`**, when the network and the Talos image should go too. The
+   CI host, the `sto2/ci` stack, and the edge routers, the `sto2/edge` stack, are on the plumbing
+   stack's network, and the network cannot be removed while their ports and floating IPs exist. So
+   first, in the state of every other stack, the recipe looks for a resource, and while it finds one
+   it plans and destroys nothing, naming the stack and the recipe that destroys it:
+   `just infra-destroy sto2/ci` for the CI host, which also takes the runner away until
+   [ci-host.md](ci-host.md) sets a new host up, and `just infra-destroy sto2/edge` for the edge
+   routers ([edge.md](edge.md#the-way-back)). The edge stack's destroy refuses, planning nothing,
+   while a name the routes publish still resolves at the public resolver to one of its addresses,
+   or cannot be looked up, naming each by its label under the domain; step 3 is what takes those
+   records out. `just infra-destroy sto2/edge --check` says whether it would refuse, and plans and
+   destroys nothing. Then the plumbing stack's destroy is planned, its summary printed, and it
+   destroys once `sto2/plumbing` is typed back. Images left from earlier Talos versions are removed
+   by hand ([image-replacement.md](image-replacement.md#removing-old-images)).
 
 ## Building it again
 
@@ -146,8 +173,8 @@ keys and Ascender's secret key, then the volumes, then the databases.
 
    Decide too whether OpenBao's store comes back from its snapshot (step 5), rather than starting
    anew with every key written again. Ascender's credentials depend on it: their key is a key of
-   the store, which only the snapshot brings back. The old seal key then has to be in the cluster
-   before OpenBao's first member starts, soon after `just cluster-flux`, so step 2 puts it in place.
+   the store, which only the snapshot brings back. The old seal keys then have to be in the cluster
+   before OpenBao's first member starts, soon after `just cluster-flux`, so step 2 puts them in place.
 
 2. **The build.** The build order in [cluster.md](../cluster.md#from-nothing-to-a-ready-cluster),
    from the start, up to and with `just cluster-flux`, leaving out the steps that make the age keys
@@ -158,12 +185,15 @@ keys and Ascender's secret key, then the volumes, then the databases.
    have new public addresses, which the records external-dns makes follow once `cluster-config`
    holds them ([kubernetes.md](../kubernetes.md#dns-records)).
 
-   When the store comes back from its snapshot, put the old seal key in place right after
+   When the store comes back from its snapshot, put the old seal keys in place right after
    `just cluster-flux`, before OpenBao's first member starts, as step 2 of
    [Restoring a snapshot](openbao.md#restoring-a-snapshot) says for a rebuilt cluster: once Flux has
    made the namespace `openbao`, and while `flux get kustomization openbao` shows it waiting for its
    dependencies, `flux suspend kustomization openbao`, then `just bao-seal-restore <openbao file>`,
-   then `flux resume kustomization openbao`. The rest of that restore waits for step 5.
+   then `flux resume kustomization openbao`. After a rotation of the seal key, `<openbao file>` is
+   the custody file `just bao-seal-keep` wrote, and the run writes the previous key's Secret too,
+   which a snapshot taken before the rotation needs ([Rotating](openbao.md#rotating)). The rest of
+   that restore waits for step 5.
 
 3. **`just cluster-check`**: every check passes. Before the namespace `flux-system` exists, the
    check of its pods is skipped, and the recipe says so.
@@ -187,7 +217,7 @@ keys and Ascender's secret key, then the volumes, then the databases.
    times in the machine's own time zone.
 
    Then either the old store's snapshot, restored as [openbao.md](openbao.md#restoring-a-snapshot)
-   says, with the seal key step 2 put in place and the snapshot the summary of
+   says, with the seal keys step 2 put in place and the snapshot the summary of
    `cluster-last-copies` named; it brings back every key the store held, Ascender's secret key at
    `ascender/ascender` among them, which the credentials in Ascender's database are encrypted
    under, and the recovery keys of the old custody file then open the restored store, as

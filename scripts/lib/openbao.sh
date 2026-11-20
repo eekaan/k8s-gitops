@@ -1,13 +1,15 @@
 # shellcheck shell=bash
-# Shared by scripts/bao-put, bao-recovery, bao-root, bao-seal-restore, bao-seed-volsync and
-# bao-volsync-password, which source it with scripts/cluster-env: where OpenBao answers and as whom
-# an operator logs in to it, the names a key-value path may hold, opening the operator's custody
-# file and putting a new one in place without replacing a file, and the session a recipe works in: a
+# Shared by scripts/bao-put, bao-recovery, bao-root, bao-seal-keep, bao-seal-restore,
+# bao-seed-volsync and bao-volsync-password, which source it with scripts/cluster-env: where OpenBao
+# answers and as whom an operator logs in to it, the names a key-value path may hold, the ids of the
+# seal keys the checkout names and those the servers run with, opening the operator's custody file
+# and putting a new one in place without replacing a file, and the session a recipe works in: a
 # private directory, a port-forward to OpenBao's active member, a short-lived token, and requests to
 # OpenBao's API through them. Nothing here prints a token, a value or a key, or passes one as an
 # argument: they reach kubectl, curl, jq and age on standard input or through a file descriptor, and
 # leave them on a pipe. scripts/secret-rotate sources it too, for the refusal to run traced, the
 # names and bao_kubectl: it opens no session, and its one write to OpenBao is bao-put's.
+# scripts/cluster-last-copies sources it for the custody checks and the seal keys' ids.
 
 # Traced, bash writes every command a recipe runs with the values it holds, the secrets among them,
 # so a recipe refuses to run while the shell traces, however that was turned on (bash -x,
@@ -31,8 +33,9 @@ bao_service=openbao-active
 bao_host=openbao-active.openbao.svc
 bao_port=8200
 bao_ca_secret=openbao-ca
-# shellcheck disable=SC2034 # read by scripts/bao-recovery
-bao_seal_secret=openbao-seal-1
+# The ConfigMap the chart renders the server configuration into, <release>-config, which every member
+# starts with; its seal stanza names the seal keys the servers run with, by their ids and files.
+bao_config_map=openbao-config
 # The account and role an operator logs in as, and the audience OpenBao's role checks.
 bao_operator_account=openbao-operator
 bao_operator_role=operator
@@ -52,6 +55,103 @@ bao_valid_path() {
 # bao_valid_key KEY: whether KEY is one name.
 bao_valid_key() {
   [[ $1 =~ ^$bao_name$ ]]
+}
+
+# OpenBao's static seal holds a current key and, after a rotation, the key before it, each under a
+# permanent id (https://openbao.org/docs/configuration/seal/static/#key-rotation); it seals with the
+# current key and opens what was sealed with either, by the id the sealed value carries, and nothing
+# else (Encrypt and Decrypt in wrappers/static/static.go of go-kms-wrapping, at the version OpenBao
+# v2.7.2 pins). The tree mounts each key from the Secret of its id, at /openbao/userconfig/<id>/key,
+# and an ExternalSecret of that name makes the Secret once (tests/openbao.bats), so an id names its
+# Secret too.
+
+# bao_stanza_ids WHERE: reads a server configuration on standard input and sets stanza_current and
+# stanza_previous to the current_key_id and previous_key_id of its seal "static" block, the previous
+# empty when the block names none. Fails naming WHERE, where the configuration is from, when it holds
+# more than one such block or none that names a current id, when an id is no name a Secret and its
+# volume take, or when the two ids are the same.
+bao_stanza_ids() {
+  local where=$1 line blocks=0 inside=0 id
+  local setting='^[[:space:]]*(current_key_id|previous_key_id)[[:space:]]*=[[:space:]]*"([^"]*)"[[:space:]]*(#.*)?$'
+  stanza_current="" stanza_previous=""
+  while IFS= read -r line || [[ -n $line ]]; do
+    if ((inside)); then
+      if [[ $line == '}'* ]]; then
+        inside=0
+      elif [[ $line =~ $setting ]]; then
+        if [[ ${BASH_REMATCH[1]} == current_key_id ]]; then
+          stanza_current=${BASH_REMATCH[2]}
+        else
+          stanza_previous=${BASH_REMATCH[2]}
+        fi
+      fi
+    elif [[ $line =~ ^seal[[:space:]]+\"static\"[[:space:]]*\{ ]]; then
+      inside=1 blocks=$((blocks + 1))
+    fi
+  done
+  if ((blocks >= 2)); then
+    infra_error "$where holds $blocks seal \"static\" blocks, and the recipes read one"
+    return 1
+  elif [[ -z $stanza_current ]]; then
+    infra_error "$where names no current_key_id in a seal \"static\" block"
+    return 1
+  fi
+  # The chart names the volume of a Secret userconfig-<name>, a DNS label of at most 63 characters.
+  for id in "$stanza_current" ${stanza_previous:+"$stanza_previous"}; do
+    if [[ ! $id =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]] || ! ((${#id} <= 52)); then
+      infra_error "the seal \"static\" block of $where names the key id $(printf '%s' "$id" | printable), which is no name a Secret and its volume take"
+      return 1
+    fi
+  done
+  if [[ $stanza_previous == "$stanza_current" ]]; then
+    infra_error "the seal \"static\" block of $where names $stanza_current as both current_key_id and previous_key_id"
+    return 1
+  fi
+}
+
+# bao_seal_ids [VALUES]: sets bao_seal_current and bao_seal_previous to the ids of the seal keys the
+# seal "static" block of server.ha.raft.config in VALUES names, this checkout's values.yaml of
+# OpenBao by default, as bao_stanza_ids reads them: the tree is what a rebuild applies, and the
+# servers' ConfigMap does not exist before OpenBao is installed. Fails as bao_stanza_ids does, and
+# when VALUES cannot be read.
+bao_seal_ids() {
+  local values=${1:-$infra_root/kubernetes/apps/base/openbao/openbao/app/values.yaml} config
+  if ! config=$(yq '.server.ha.raft.config // ""' "$values" 2> /dev/null); then
+    infra_error "$values cannot be read for the seal stanza"
+    return 1
+  fi
+  bao_stanza_ids "server.ha.raft.config in $values" <<< "$config" || return 1
+  # shellcheck disable=SC2034 # read by the scripts that source this file
+  bao_seal_current=$stanza_current bao_seal_previous=$stanza_previous
+}
+
+# bao_seal_named CURRENT PREVIOUS: the seal keys CURRENT and PREVIOUS, as a refusal names them.
+bao_seal_named() {
+  if [[ -n $2 ]]; then
+    printf 'current %s and previous %s' "$1" "$2"
+  else
+    printf 'current %s and no previous' "$1"
+  fi
+}
+
+# bao_seal_running: whether the servers run with the seal keys this checkout names, bao_seal_current
+# and bao_seal_previous, which bao_seal_ids sets: reads the seal stanza of the server ConfigMap,
+# which holds file paths and no key, and compares its ids with those. Fails naming both when they
+# differ, and when the ConfigMap is missing or its stanza is not one bao_stanza_ids reads.
+bao_seal_running() {
+  local config
+  config=$(bao_kubectl get configmap "$bao_config_map" --namespace "$bao_namespace" --output json \
+    --ignore-not-found --request-timeout=30s) || return 1
+  if [[ -z $config ]]; then
+    infra_error "the ConfigMap $bao_config_map does not exist in $bao_namespace, so the seal keys the servers run with are not known"
+    return 1
+  fi
+  bao_stanza_ids "the ConfigMap $bao_namespace/$bao_config_map" \
+    <<< "$(printf '%s' "$config" | jq -r '.data["extraconfig-from-values.hcl"] // ""')" || return 1
+  if [[ $stanza_current != "$bao_seal_current" || $stanza_previous != "$bao_seal_previous" ]]; then
+    infra_error "the servers run with the seal keys $(bao_seal_named "$stanza_current" "$stanza_previous"), and this checkout names $(bao_seal_named "$bao_seal_current" "$bao_seal_previous"): run it from a checkout of main"
+    return 1
+  fi
 }
 
 # bao_decrypt FILE: FILE decrypted with the Talos age key, the operator's, on standard output for a

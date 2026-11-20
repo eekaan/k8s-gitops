@@ -1,0 +1,8 @@
+﻿2026-11-19T08:15:28.9584339Z ##[group]Run just ci "$GROUP"
+2026-11-19T08:15:28.9584609Z [36;1mjust ci "$GROUP"[0m
+2026-11-19T08:15:28.9637043Z   GROUP: signatures
+2026-11-19T08:15:28.9637205Z ##[endgroup]
+2026-11-19T08:16:41.5543341Z [95m41  : [0m[90;2m┆ [0mContainer.[1mstdout[0m[32m DONE[0m[90m [0.2s][0m
+2026-11-19T08:16:41.7928473Z tools: built from the pins, as no tools image is given
+2026-11-19T08:16:41.7928866Z == signatures: passed (signatures-verify)
+2026-11-19T08:16:41.8148047Z passed: signatures

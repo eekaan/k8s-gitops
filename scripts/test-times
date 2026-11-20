@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+# Writes tests/times.tsv, the record of how long each bats test file took, from the lines
+# scripts/test-run prints, test: tests/<name>.bats took <N>s, read on standard input: test-run's
+# output as it is, or the log of a CI job, where each line can follow GitHub's timestamp and
+# Dagger's progress prefix, carry terminal colour codes and end in a carriage return, and comes
+# again in the group's report at the end. A timing line is found wherever on its line it starts.
+#
+# Each timed file that tests/ holds gets its new seconds, and a file timed twice with the same
+# seconds counts once. A file tests/ holds that was not timed keeps its line, and the header, the
+# record's lines that start with #, is kept; the other lines are sorted by path, byte by byte. A
+# line just test refuses is dropped: one that is not a test file, a tab and its whole seconds, a
+# second line for a file, and a line for a file tests/ no longer has. Prints one line for each line
+# dropped and each file whose time changed. Fails, leaving the record as it was, when the input
+# holds no timing line or gives one file two times. The record is written whole, once the new one
+# is complete.
+# Usage: scripts/test-times < OUTPUT
+set -euo pipefail
+export LC_ALL=C
+
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+record=tests/times.tsv
+
+die() {
+  echo "test-times: $*" >&2
+  exit 1
+}
+
+[[ -f $record ]] || die "$record is missing"
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
+# The timing lines, without the terminal's control sequences and a carriage return at the end.
+esc=$'\e' cr=$'\r'
+sed -e "s|$esc\\[[0-?]*[ -/]*[@-~]||g" -e "s|$cr\$||" |
+  { grep -oE 'test: tests/[^[:space:]/]+\.bats took [0-9]+s$' || true; } > "$tmp/timed"
+[[ -s $tmp/timed ]] || die "no line test: tests/<name>.bats took <N>s in the input"
+
+shopt -s nullglob
+files=(tests/*.bats)
+printf '%s\n' "${files[@]}" > "$tmp/files"
+
+# The timed lines, the files tests/ holds and the record give the new record; the lines saying what
+# changed go to a file of their own.
+awk -v changes="$tmp/changes" '
+  FILENAME == ARGV[1] {
+    file = $2
+    seconds = substr($4, 1, length($4) - 1) + 0
+    if (!(file in timed)) {
+      timed[file] = seconds
+      said[file] = seconds "s"
+    } else if (!((file, seconds) in seen)) {
+      if (!(file in twice)) {
+        twice[file] = 1
+        conflicts[++conflicted] = file
+      }
+      said[file] = said[file] " and " seconds "s"
+    }
+    seen[file, seconds] = 1
+    next
+  }
+  FILENAME == ARGV[2] {
+    order[++held] = $0
+    holds[$0] = 1
+    next
+  }
+  /^#/ {
+    header[++headed] = $0
+    next
+  }
+  {
+    fields = split($0, field, "\t")
+    if (fields != 2 || field[1] !~ "^tests/[^/]+[.]bats$" || field[2] !~ "^[0-9]+$") {
+      print "test-times: " FILENAME ":" FNR " is not a test file, a tab and its whole seconds; dropped" > changes
+      next
+    }
+    if (field[1] in listed) {
+      print "test-times: " FILENAME ":" FNR " repeats " field[1] "; dropped" > changes
+      next
+    }
+    listed[field[1]] = 1
+    if (!(field[1] in holds)) {
+      print "test-times: " field[1] " " field[2] "s -> dropped (not in tests/)" > changes
+      next
+    }
+    line[field[1]] = $0
+    was[field[1]] = field[2]
+  }
+  END {
+    if (conflicted) {
+      for (i = 1; i <= conflicted; i++) {
+        print "test-times: " conflicts[i] " took " said[conflicts[i]] " in the input" > "/dev/stderr"
+      }
+      exit 1
+    }
+    for (i = 1; i <= headed; i++) {
+      print header[i]
+    }
+    for (i = 1; i <= held; i++) {
+      file = order[i]
+      if (file in timed) {
+        print file "\t" timed[file]
+        if (!(file in was)) {
+          print "test-times: " file " no time -> " timed[file] "s" > changes
+        } else if (was[file] != timed[file]) {
+          print "test-times: " file " " was[file] "s -> " timed[file] "s" > changes
+        }
+      } else if (file in line) {
+        print line[file]
+      }
+    }
+  }
+' "$tmp/timed" "$tmp/files" "$record" > "$tmp/record"
+
+cat "$tmp/record" > "$record"
+if [[ -f $tmp/changes ]]; then
+  cat "$tmp/changes"
+fi

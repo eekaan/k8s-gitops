@@ -520,17 +520,18 @@ render_chart() {
   # on: the demo's page, n8n's health and Open WebUI's readiness endpoints, a badge of kromgo's,
   # dex's discovery document, oauth2-proxy's readiness endpoint, Backstage's and Ascender's ping
   # endpoint; and the pages behind
-  # sign-in, which answer with the redirect: the demo's, and the log store's interface, not its root,
-  # which its route redirects itself. A second target, or one that is not the Service, shows whole.
+  # sign-in, which answer with the redirect: the demo's, the log store's interface, not its root,
+  # which its route redirects itself, and Locust's interface, whose page Locust answers to anyone. A
+  # second target, or one that is not the Service, shows whole.
   # shellcheck disable=SC2016 # $service is a jq variable.
   [ "$(jq -r --arg service "$service" '[.[] | select(.kind == "Probe" and (.spec.module | startswith("public_https")))
       | "\(.metadata.namespace)/\(.metadata.name) \(.spec.module) \(.spec.targets.staticConfig.static | map(ltrimstr("https://" + $service)) | join(" "))"] | sort | join(",")' "$objects")" = \
-    "ai-system/n8n public_https /healthz,ai-system/open-webui public_https /health/db,ascender/ascender public_https /api/v2/ping/,backstage/backstage public_https /.backstage/health/v1/readiness,demo/hello public_https /,demo/hello-sso public_https_signin /,kromgo/kromgo public_https /badges/cluster_node_count,monitoring/logs public_https_signin /select/vmui/,sso-system/auth public_https /ready,sso-system/dex public_https /.well-known/openid-configuration" ]
+    "ai-system/n8n public_https /healthz,ai-system/open-webui public_https /health/db,ascender/ascender public_https /api/v2/ping/,backstage/backstage public_https /.backstage/health/v1/readiness,demo/hello public_https /,demo/hello-sso public_https_signin /,kromgo/kromgo public_https /badges/cluster_node_count,locust/locust public_https_signin /,monitoring/logs public_https_signin /select/vmui/,sso-system/auth public_https /ready,sso-system/dex public_https /.well-known/openid-configuration" ]
   # The Probes are in the namespaces of their routes, and the rules read the job they name: of the
   # five alerts the cluster applies, read from the render, every reference to a series of a probe or
   # of its scrape, two in each of the first three and one in each of the last two, selects that job,
   # so a probe of another job raises none of them.
-  [ "$(jq -r '[.[] | select(.kind == "Probe") | .metadata.namespace] | sort | join(",")' "$objects")" = "ai-system,ai-system,ascender,backstage,demo,demo,envoy-gateway-system,kromgo,monitoring,sso-system,sso-system" ]
+  [ "$(jq -r '[.[] | select(.kind == "Probe") | .metadata.namespace] | sort | join(",")' "$objects")" = "ai-system,ai-system,ascender,backstage,demo,demo,envoy-gateway-system,kromgo,locust,monitoring,sso-system,sso-system" ]
   [ "$(yq -o json -I0 '.spec.groups' "$RENDER"/lab-sto2/blackbox-exporter/PrometheusRule.monitoring.coreos.com_monitoring_blackbox-exporter-alerts.yaml |
     jq -c '[.[].rules[] | [.alert, (.expr | [scan("\\b(?:probe_[a-z_]+|up)\\b")] | length),
       (.expr | [scan("\\b(?:probe_[a-z_]+|up)\\{job=\"public-endpoints\"\\}")] | length)]]')" = \
@@ -730,12 +731,12 @@ render_chart() {
   tree_render
   collect "$RENDER" "$objects"
   # Every route of the tree is probed: the demo's, kromgo's, n8n's, Open WebUI's, dex's, the sign-in
-  # host's, Backstage's, Ascender's, and the demo's and the log store's interface's behind sign-in with their
-  # sign-in paths by their hostnames, and the redirect. They are the routes of the render, which
-  # holds those a chart makes as well.
+  # host's, Backstage's, Ascender's, and the demo's, the log store's interface's and Locust's
+  # interface's behind sign-in with their sign-in paths by their hostnames, and the redirect. They
+  # are the routes of the render, which holds those a chart makes as well.
   routes="$(jq -r '[.[] | select(.kind == "HTTPRoute") | .metadata.name] | sort | join(",")' "$objects")"
   echo "routes: $routes"
-  [ "$routes" = "ascender,auth,backstage,dex,hello,hello-sso,hello-sso-oauth2,https-redirect,kromgo,logs,logs-oauth2,n8n,open-webui" ]
+  [ "$routes" = "ascender,auth,backstage,dex,hello,hello-sso,hello-sso-oauth2,https-redirect,kromgo,locust,locust-oauth2,logs,logs-oauth2,n8n,open-webui" ]
   run unprobed "$objects"
   echo "$output"
   [ "$status" -eq 0 ]
@@ -927,7 +928,7 @@ EOF
   echo "$output"
   [ -z "$output" ]
   # A route that no such policy covers probed for the redirect is refused: hello's Probe expecting it,
-  # and hello-sso's and the log store's once the policies are gone or ask for no external
+  # and hello-sso's, the log store's and Locust's once the policies are gone or ask for no external
   # authorisation, when each host needs a Probe for 200.
   jq '(.[] | select(.kind == "Probe" and .metadata.name == "hello") | .spec.module) = "public_https_signin"' "$objects" >"$fixture"
   run unprobed "$fixture"
@@ -939,38 +940,42 @@ EOF
     jq "$refusal" "$objects" >"$fixture"
     run unprobed "$fixture"
     echo "$refusal: $output"
-    [ "$(wc -l <<<"$output")" -eq 6 ]
+    [ "$(wc -l <<<"$output")" -eq 9 ]
     [[ $output == *"Probe demo/hello-sso probes the hostname hello-sso.$DOMAIN for the sign-in redirect with public_https_signin, and no external-authorisation SecurityPolicy covers it"* ]]
     [[ $output == *"HTTPRoute demo/hello-sso: no Probe over https through "*" names the hostname hello-sso.$DOMAIN"* ]]
     [[ $output == *"HTTPRoute demo/hello-sso-oauth2: no Probe over https through "*" names the hostname hello-sso.$DOMAIN"* ]]
     [[ $output == *"Probe monitoring/logs probes the hostname logs.$DOMAIN for the sign-in redirect with public_https_signin, and no external-authorisation SecurityPolicy covers it"* ]]
     [[ $output == *"HTTPRoute monitoring/logs: no Probe over https through "*" names the hostname logs.$DOMAIN"* ]]
     [[ $output == *"HTTPRoute monitoring/logs-oauth2: no Probe over https through "*" names the hostname logs.$DOMAIN"* ]]
+    [[ $output == *"Probe locust/locust probes the hostname locust.$DOMAIN for the sign-in redirect with public_https_signin, and no external-authorisation SecurityPolicy covers it"* ]]
+    [[ $output == *"HTTPRoute locust/locust: no Probe over https through "*" names the hostname locust.$DOMAIN"* ]]
+    [[ $output == *"HTTPRoute locust/locust-oauth2: no Probe over https through "*" names the hostname locust.$DOMAIN"* ]]
   done
 }
 
 @test "A cluster that selects the probes without the exporter or the Gateway is refused" {
   local app dir problems fixture="$BATS_TEST_TMPDIR/fixture"
   # The tree as it is passes, with the exporter, the issuer, the Gateway and the routes listed, and
-  # the eleven applications that declare a Probe name the exporter.
+  # the twelve applications that declare a Probe name the exporter.
   run "$REPO/scripts/kubernetes-check" "$REPO"
   echo "$output"
   [ "$status" -eq 0 ]
-  for app in blackbox-exporter cluster-ca gateway-public hello-route kromgo n8n open-webui dex oauth2-proxy hello-sso backstage victoria-logs-route ascender; do
+  for app in blackbox-exporter cluster-ca gateway-public hello-route kromgo n8n open-webui dex oauth2-proxy hello-sso backstage victoria-logs-route ascender \
+    locust-route; do
     [ "$(yq '.resources[] | select(test("/'"$app"'/ks.yaml$"))' "$REPO/kubernetes/apps/overlays/lab-sto2/kustomization.yaml")" ] \
       || { echo "the lab-sto2 overlay does not list $app"; return 1; }
   done
   # Every application of the cluster that holds a Probe, in what the cluster applies, names the
   # exporter, which is what makes a cluster that lists it without the exporter refused below. They
-  # are these eleven, read from the render, which holds a Probe a chart makes as well.
+  # are these twelve, read from the render, which holds a Probe a chart makes as well.
   tree_render
   problems="$(probe_apps_without_exporter "$RENDER")"
   echo "$problems"
   [ -z "$problems" ]
   [ "$(for dir in "$RENDER"/lab-sto2/*/; do
       if compgen -G "${dir}Probe.monitoring.coreos.com_*.yaml" >/dev/null; then basename "$dir"; fi
-    done | LC_ALL=C sort | paste -sd' ' -)" = "ascender backstage dex gateway-public hello-route hello-sso kromgo n8n oauth2-proxy open-webui victoria-logs-route" ]
-  for app in gateway-public hello-route kromgo n8n open-webui dex oauth2-proxy hello-sso backstage victoria-logs-route ascender; do
+    done | LC_ALL=C sort | paste -sd' ' -)" = "ascender backstage dex gateway-public hello-route hello-sso kromgo locust-route n8n oauth2-proxy open-webui victoria-logs-route" ]
+  for app in gateway-public hello-route kromgo n8n open-webui dex oauth2-proxy hello-sso backstage victoria-logs-route ascender locust-route; do
     [ "$(yq '.spec.dependsOn[].name | select(. == "blackbox-exporter")' "$REPO"/kubernetes/apps/base/*/"$app"/ks.yaml)" = blackbox-exporter ]
   done
   # A Probe added to another application is refused, however its file spells the kind: hello with a
@@ -999,7 +1004,7 @@ lab-sto2: the application kromgo declares a Probe and its Kustomization does not
   run probe_apps_without_exporter "$fixture-named"
   echo "$output"
   [ "$output" = "lab-sto2: the application hello declares a Probe and its Kustomization does not name blackbox-exporter in dependsOn" ]
-  # Without the exporter all eleven are refused, each naming it and the overlay.
+  # Without the exporter all twelve are refused, each naming it and the overlay.
   tree_without blackbox-exporter
   run "$REPO/scripts/kubernetes-check" "$TREE"
   echo "$output"
@@ -1015,6 +1020,7 @@ lab-sto2: the application kromgo declares a Probe and its Kustomization does not
   [[ $output == *"kubernetes/apps/base/backstage/backstage/ks.yaml: Kustomization backstage names blackbox-exporter"* ]]
   [[ $output == *"kubernetes/apps/base/monitoring/victoria-logs-route/ks.yaml: Kustomization victoria-logs-route names blackbox-exporter"* ]]
   [[ $output == *"kubernetes/apps/base/ascender/ascender/ks.yaml: Kustomization ascender names blackbox-exporter"* ]]
+  [[ $output == *"kubernetes/apps/base/locust/locust-route/ks.yaml: Kustomization locust-route names blackbox-exporter"* ]]
   [[ $output == *"apps/overlays/lab-sto2"* ]]
   [[ $output == *"does not enable"* ]]
   # Without the Gateway, and with the route that declares a Probe, the route is refused.
@@ -1028,9 +1034,10 @@ lab-sto2: the application kromgo declares a Probe and its Kustomization does not
   # Without the Gateway and what needs it, CrowdSec's reader of its access logs and CrowdSec, which
   # needs the reader, and external-dns's dashboard, which needs external-dns, among them, the
   # exporter alone builds: it probes nothing, and nothing alerts on that (ProbeNotRunning reads the
-  # scrapes of declared Probes).
+  # scrapes of declared Probes). Robot Framework's suite of Ascender's sign-in page, robot-ascender,
+  # names ascender and goes with it.
   tree_without gateway-public hello-route n8n kromgo open-webui external-dns external-dns-dashboard hello-sso dex \
-    oauth2-proxy backstage crowdsec-gateway-logs crowdsec victoria-logs-route ascender
+    oauth2-proxy backstage crowdsec-gateway-logs crowdsec victoria-logs-route ascender robot-ascender locust-route
   run "$REPO/scripts/kubernetes-check" "$TREE"
   echo "$output"
   [ "$status" -eq 0 ]
@@ -1129,4 +1136,99 @@ lab-sto2: the application kromgo declares a Probe and its Kustomization does not
   # The exporter's own metrics are scraped, and the modules are in its configuration.
   [ "$(yq -N 'select(.kind == "ServiceMonitor") | .spec.endpoints | length' "$rendered")" -eq 1 ]
   [ "$(yq -N 'select(.kind == "ConfigMap") | .data["blackbox.yaml"]' "$rendered" | yq -o json -I0 '.modules | keys | sort' -)" = "$PROBE_MODULES" ]
+}
+
+# limit_objects RENDER OUT: what the count of the probes under a rate limit reads of the cluster
+# lab-sto2 in RENDER, a render scripts/render made, as a JSON array in OUT: every
+# BackendTrafficPolicy, HTTPRoute, Probe and Prometheus, and the definition of the Prometheus kind.
+limit_objects() {
+  local files kind
+  mapfile -t files < <(for kind in BackendTrafficPolicy.gateway.envoyproxy.io HTTPRoute.gateway.networking.k8s.io \
+    Probe.monitoring.coreos.com Prometheus.monitoring.coreos.com; do
+    compgen -G "$1/lab-sto2/*/${kind}_*.yaml" || true
+  done
+    compgen -G "$1/lab-sto2/*/CustomResourceDefinition.apiextensions.k8s.io__prometheuses.monitoring.coreos.com.yaml" || true)
+  [ "${#files[@]}" -gt 0 ] || { echo "the render $1 holds nothing of lab-sto2 to count"; return 1; }
+  (set -o pipefail; yq -N -o json -I0 'select(. != null)' "${files[@]}" | jq -s . >"$2")
+}
+
+# probe_rates OBJECTS: for each route a BackendTrafficPolicy's local rule without client selectors
+# limits, in OBJECTS (limit_objects), one line "NAMESPACE/ROUTE: N a UNIT against FIGURE", N the
+# requests the route's Probes make in one unit of the limit; and a line more, naming the route, for
+# each Probe of it that sets an interval of its own, and when N is more than a fifth of the figure.
+# A Probe is the route's when its hostname label is one of the route's hostnames, and it makes one
+# request each scrape: at the scrapeInterval of the one Prometheus, or, where that sets none, the
+# default of the Prometheus definition, which the operator documents in it ("Default: \"30s\"");
+# Prometheus scrapes a Probe at that interval unless the Probe sets its own (the Probe definition's
+# interval: "If not specified Prometheus' global scrape interval is used"). Each replica of the
+# Prometheus scrapes it, so the requests are as many times more: its replicas, or 1 where it sets
+# none ("replicas of each shard", "Default: 1", in the definition; a target is one shard's). One
+# unit holds at least one request of each Probe and replica, as a request can fall in any unit.
+probe_rates() {
+  # shellcheck disable=SC2016 # $d, $all, $own, $replicas, $default, $interval, $p, $limit, $unit, $route, $id, $hosts, $probes, $i and $count are jq variables.
+  jq -r '
+    def seconds: . as $d | [scan("([0-9]+)(ms|h|m|s)")]
+      | if length == 0 or (map(.[0] + .[1]) | join("")) != $d then error("not a duration: \($d)")
+        else map((.[0] | tonumber) * {"ms": 0.001, "s": 1, "m": 60, "h": 3600}[.[1]]) | add end;
+    def unit_seconds: {"Second": 1, "Minute": 60, "Hour": 3600, "Day": 86400}[.] // error("a unit the count does not know: \(.)");
+    . as $all
+    | [$all[] | select(.kind == "Prometheus")] as $proms
+    | (if ($proms | length) == 1 then $proms[0].spec.scrapeInterval else error("not one Prometheus but \($proms | length)") end) as $own
+    | ($proms[0].spec.replicas // 1) as $replicas
+    | [$all[] | select(.kind == "CustomResourceDefinition" and .metadata.name == "prometheuses.monitoring.coreos.com")
+        | .spec.versions[] | select(.name == "v1") | .schema.openAPIV3Schema.properties.spec.properties.scrapeInterval.default][0] as $default
+    | (($own // $default // error("no scrape interval, of the Prometheus or its definition")) | seconds) as $interval
+    | $all[] | select(.kind == "BackendTrafficPolicy") | . as $p
+    | ($p.spec.rateLimit.local.rules // [])[] | select(has("clientSelectors") | not) | .limit as $limit
+    | ($limit.unit | unit_seconds) as $unit
+    | ($p.spec.targetRefs // [])[] | select(.kind == "HTTPRoute") | .name as $route
+    | "\($p.metadata.namespace)/\($route)" as $id
+    | [$all[] | select(.kind == "HTTPRoute" and .metadata.namespace == $p.metadata.namespace and .metadata.name == $route)
+        | .spec.hostnames[]?] as $hosts
+    | [$all[] | select(.kind == "Probe" and ((.spec.targets.staticConfig.labels.hostname // "") | IN($hosts[])))] as $probes
+    | (([$probes[] | ((.spec.interval // null) | if . == null then $interval else seconds end) as $i
+        | [1, ($unit / $i | ceil)] | max] | add // 0) * $replicas) as $count
+    | "\($id): \($count) a \($limit.unit) against \($limit.requests)",
+      ($probes[] | select(.spec | has("interval"))
+        | "\($id): the Probe \(.metadata.namespace)/\(.metadata.name) sets an interval of its own, \(.spec.interval), in place of the \($interval) seconds Prometheus gives it"),
+      (select($count * 5 > $limit.requests)
+        | "\($id): its Probes make \($count) a \($limit.unit), more than a fifth of its \($limit.requests)")' "$1" | LC_ALL=C sort
+}
+
+@test "The probes of a rate-limited route stay well under its limit" {
+  local objects="$BATS_TEST_TMPDIR/limits.json" rates
+  tree_render
+  limit_objects "$RENDER" "$objects"
+  # The Prometheus the cluster runs sets no scrape interval of its own, so its Probes are scraped at
+  # the definition's default, 30 seconds.
+  [ "$(jq -c '[.[] | select(.kind == "Prometheus") | .spec.scrapeInterval]' "$objects")" = '[null]' ]
+  [ "$(jq -r '.[] | select(.kind == "CustomResourceDefinition" and .metadata.name == "prometheuses.monitoring.coreos.com")
+    | .spec.versions[] | select(.name == "v1") | .schema.openAPIV3Schema.properties.spec.properties.scrapeInterval.default' "$objects")" = 30s ]
+  # It runs one replica, and each replica scrapes every Probe.
+  [ "$(jq -c '[.[] | select(.kind == "Prometheus") | .spec.replicas]' "$objects")" = '[1]' ]
+  # Each rate-limited route's Probes, one request a scrape, stay at a fifth of its figure or less: the
+  # demo's one in each second against 5 a second, two a minute against kromgo's and the demo's
+  # signed-in route's 300.
+  rates="$(probe_rates "$objects")"
+  echo "$rates"
+  [ "$rates" = "$(printf '%s\n' 'demo/hello-sso: 2 a Minute against 300' 'demo/hello: 1 a Second against 5' 'kromgo/kromgo: 2 a Minute against 300')" ]
+  # The demo route limited to 4 a second would leave its Probe more than a fifth of it.
+  jq '(.[] | select(.kind == "BackendTrafficPolicy" and .metadata.namespace == "demo" and .metadata.name == "hello")
+    | .spec.rateLimit.local.rules[0].limit.requests) = 4' "$objects" >"$BATS_TEST_TMPDIR/four.json"
+  rates="$(probe_rates "$BATS_TEST_TMPDIR/four.json")"
+  echo "$rates"
+  [[ $rates == *"demo/hello: its Probes make 1 a Second, more than a fifth of its 4"* ]]
+  # A second replica of Prometheus scrapes each Probe again, which doubles what it asks of a route.
+  jq '(.[] | select(.kind == "Prometheus") | .spec.replicas) = 2' "$objects" >"$BATS_TEST_TMPDIR/replicas.json"
+  rates="$(probe_rates "$BATS_TEST_TMPDIR/replicas.json")"
+  echo "$rates"
+  [[ $rates == *"demo/hello: its Probes make 2 a Second, more than a fifth of its 5"* ]]
+  [[ $rates == *"kromgo/kromgo: 4 a Minute against 300"* ]]
+  # A Probe with an interval of its own is named, whatever the interval, as it no longer takes the
+  # one this count reads.
+  jq '(.[] | select(.kind == "Probe" and .metadata.namespace == "demo" and .metadata.name == "hello") | .spec.interval) = "30s"' \
+    "$objects" >"$BATS_TEST_TMPDIR/interval.json"
+  rates="$(probe_rates "$BATS_TEST_TMPDIR/interval.json")"
+  echo "$rates"
+  [[ $rates == *"demo/hello: the Probe demo/hello sets an interval of its own, 30s, in place of the 30 seconds Prometheus gives it"* ]]
 }

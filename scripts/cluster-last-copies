@@ -10,14 +10,16 @@
 #      three custody files there and where only this user can have written it (bao_custody_trusted
 #      in scripts/lib/openbao.sh), each named by its role.
 #   2. Custody, reading only: the Talos age key is the key talos/.sops.yaml encrypts to and the Flux
-#      age key the one .sops.yaml encrypts to; the OpenBao custody file holds the seal key the Secret
-#      openbao-seal-1 holds (bao-seal-restore --check); for every ReplicationSource, the password the
-#      volume backups' custody file derives for its application hashes as its Secret's does
-#      (bao-volsync-password, as docs/runbooks/volume-backups.md compares them); the PostgreSQL
-#      backups' custody file holds the customer key of every database's backup Secret, compared by
-#      digest. Every Cluster has a primary, an archiver plugin and its dump CronJob, and every
-#      ReplicationSource the labels of the Kustomization that owns it, which is not suspended
-#      already, as the run resumes what it suspends. No copy is taken until each of these holds.
+#      age key the one .sops.yaml encrypts to; the OpenBao custody file holds the keys the Secrets of
+#      the seal stanza's current key and previous key, when it names one, hold (bao-seal-restore
+#      --check, which says why it refuses a file older than the current key); for every
+#      ReplicationSource, the password the volume backups' custody file derives for its application
+#      hashes as its Secret's does (bao-volsync-password, as docs/runbooks/volume-backups.md compares
+#      them); the PostgreSQL backups' custody file holds the customer key of every database's backup
+#      Secret, compared by digest. Every Cluster has a primary, an archiver plugin and its dump
+#      CronJob, and every ReplicationSource the labels of the Kustomization that owns it, which is not
+#      suspended already, as the run resumes what it suspends. No copy is taken until each of these
+#      holds.
 #   3. The plan, each copy by namespace and name. --check stops here, having changed nothing.
 #   4. The secret store: a Job from the CronJob openbao-snapshots, waited for until it is complete,
 #      then openbao-snapshot-check latest, whose snapshot must be named for a time no earlier than
@@ -39,7 +41,7 @@
 # A Job is named last-<start>-<its CronJob's name cut to 47 characters>, at most 63 characters, the
 # most its pods' job-name label takes. Every wait is bounded by LAST_COPIES_TIMEOUT seconds (3600)
 # and fails naming the copy when it runs out, and every kubectl call the run makes itself but exec by
-# 30 seconds; psql in a pod is bounded by neither, nor is the read of the seal Secret that
+# 30 seconds; psql in a pod is bounded by neither, nor are the reads of the seal Secrets that
 # bao-seal-restore makes. A copy that fails, a check that fails or a copy not taken by this run fails
 # the run with the copy's name and the reason, and no later copy is taken.
 # Every Kustomization the run suspended is resumed on every exit, and one that cannot be is named
@@ -60,7 +62,7 @@ here=$(dirname "$0")
 . "$here/lib/postgres-dumps.sh"
 
 usage() {
-  infra_error "usage: cluster-last-copies <openbao file> <volsync file> <postgres file> [cluster] [--check]; the files are the custody files bao-recovery, bao-seed-volsync and bao-seed-postgres wrote"
+  infra_error "usage: cluster-last-copies <openbao file> <volsync file> <postgres file> [cluster] [--check]; the files are the custody files bao-recovery (after a rotation of the seal key, bao-seal-keep), bao-seed-volsync and bao-seed-postgres wrote"
   exit 2
 }
 
@@ -273,6 +275,8 @@ fi
 custody_ready "the OpenBao custody file" "$openbao_file" || complete=0
 custody_ready "the volume backups' custody file" "$volsync_file" || complete=0
 custody_ready "the PostgreSQL backups' custody file" "$postgres_file" || complete=0
+# The seal keys the OpenBao custody file must hold, by the ids of the checkout's seal stanza.
+bao_seal_ids || complete=0
 ((complete))
 
 step="reading what $cluster holds"
@@ -309,11 +313,18 @@ if [[ -z $recipient ]] || is_placeholder "$recipient" || ! grep -qxF -- "$recipi
 fi
 require_flux_age_key || agrees=0
 
+# Any file that holds a seal key goes to bao-seal-restore, which compares its ids with the stanza's
+# and says why it refuses one, such as a file older than the current key.
 if opened "the OpenBao custody file" "$openbao_file" "seal key" \
-  '.seal.secret == "openbao-seal-1" and (.seal.key // "" | test("^[0-9a-f]{64}$"))'; then
+  '(.seal.key_id | type == "string" and length > 0)
+    and (.seal.key | type == "string" and test("^[0-9a-f]{64}$"))'; then
   opened=
   if ! "$here/bao-seal-restore" "$openbao_file" --check; then
-    infra_error "the OpenBao custody file, $openbao_file, does not hold the seal key the Secret $bao_namespace/$bao_seal_secret holds"
+    if [[ -n $bao_seal_previous ]]; then
+      infra_error "the OpenBao custody file, $openbao_file, does not hold the seal keys the Secrets $bao_namespace/$bao_seal_current and $bao_namespace/$bao_seal_previous hold"
+    else
+      infra_error "the OpenBao custody file, $openbao_file, does not hold the seal key the Secret $bao_namespace/$bao_seal_current holds"
+    fi
     agrees=0
   fi
 else

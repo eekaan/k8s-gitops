@@ -712,6 +712,71 @@ chart_config() {
     | .spec.template.metadata.annotations["cilium.io/cilium-configmap-checksum"] // ""' "$BATS_TEST_TMPDIR/render.yaml")" ]
 }
 
+@test "Cilium encrypts traffic between pods on different nodes with WireGuard, changes nothing else in its configuration, and the docs say so" {
+  local sentence='^\*\*Traffic between pods on different nodes is encrypted\.\*\*' said under changed key
+  local on="$BATS_TEST_TMPDIR/render.yaml" off="$BATS_TEST_TMPDIR/render-off.yaml"
+  # The chart rendered with the values, into the file chart_config renders, and with the same values
+  # but encryption off.
+  chart_ref
+  echo "enable-wireguard: $(chart_config enable-wireguard)"
+  [ "$(chart_config enable-wireguard)" = true ]
+  yq '.encryption = {"enabled": false}' "$APP/values.yaml" > "$BATS_TEST_TMPDIR/values-off.yaml"
+  helm template cilium "$url" --version "$tag" --namespace kube-system \
+    --kube-version "$(yq -e '.kubernetes' "$REPO/versions.yaml")" --values "$BATS_TEST_TMPDIR/values-off.yaml" > "$off"
+
+  # cilium-config gains exactly the two keys, and loses or changes none.
+  config() {
+    yq -o json -I0 'select(.kind == "ConfigMap" and .metadata.name == "cilium-config") | .data' "$1"
+  }
+  # shellcheck disable=SC2016 # $on and $off are jq variables.
+  changed=$(jq -cn --argjson on "$(config "$on")" --argjson off "$(config "$off")" \
+    '[$on, $off | keys[]] | unique | map(select($on[.] != $off[.])) | map({(.): $on[.]}) | add // {}')
+  echo "what encryption changes in cilium-config: $changed"
+  [ "$changed" = '{"enable-wireguard":"true","wireguard-persistent-keepalive":"0s"}' ]
+  for key in encrypt-node enable-ipsec enable-ztunnel enable-encryption-strict-mode-ingress enable-encryption-strict-mode-egress; do
+    [ -z "$(chart_config "$key")" ]
+  done
+  # The values that do it: encryption on, by WireGuard named, as the chart's own default type is
+  # ipsec, and node-to-node encryption off, and nothing else under the key.
+  [ "$(yq -o json -I0 '.encryption' "$APP/values.yaml")" = '{"enabled":true,"type":"wireguard","nodeEncryption":false}' ]
+
+  # Every other object is the same, but for the ConfigMap's checksum on the pod templates that carry
+  # it, which restarts the agents and the operator, and the data of the Secrets the chart generates
+  # anew on every render, whose names and keys stay.
+  normalized() {
+    yq -o json -I0 'del(.spec.template.metadata.annotations["cilium.io/cilium-configmap-checksum"])
+      | (select(.kind == "Secret") | .data) |= with_entries(.value = "")
+      | (select(.kind == "ConfigMap" and .metadata.name == "cilium-config") | .data)
+        |= del(.["enable-wireguard"], .["wireguard-persistent-keepalive"])' "$1"
+  }
+  diff <(normalized "$off") <(normalized "$on")
+  checksums() {
+    yq -N 'select(.spec.template.metadata.annotations["cilium.io/cilium-configmap-checksum"] != null)
+      | .kind + "/" + .metadata.name + " " + .spec.template.metadata.annotations["cilium.io/cilium-configmap-checksum"]' "$1" | sort
+  }
+  [ "$(join <(checksums "$off") <(checksums "$on") | awk '$2 != $3 { print $1 }' | paste -sd' ' -)" = 'DaemonSet/cilium Deployment/cilium-operator' ]
+  # No ztunnel object: the only names that hold it are the operator's Role and RoleBinding, which
+  # the chart renders with or without encryption.
+  [ "$(yq -N '.kind + "/" + .metadata.name | select(test("(?i)ztunnel"))' "$on" | LC_ALL=C sort | paste -sd' ' -)" = \
+    'Role/cilium-operator-ztunnel RoleBinding/cilium-operator-ztunnel' ]
+
+  # What docs/kubernetes.md says is encrypted, and what Hubble shows of it, rests on these: tunnel
+  # mode over VXLAN, kube-proxy replacement without DSR or XDP acceleration, a Service's address
+  # translated at the pod's interface rather than at its socket, no host firewall, no MTU set, which
+  # the agents derive, and the chart's default monitor aggregation.
+  for key in routing-mode=tunnel tunnel-protocol=vxlan kube-proxy-replacement=true bpf-lb-acceleration=disabled \
+    bpf-lb-sock-hostns-only=true enable-host-firewall=false bpf-lb-mode= mtu= monitor-aggregation=medium; do
+    [ "$(chart_config "${key%%=*}")" = "${key#*=}" ]
+  done
+
+  # The docs open one paragraph, under Encryption between nodes, with the sentence that says so.
+  said=$(grep -cE "$sentence" "$REPO/docs/kubernetes.md" || true)
+  under=$(awk '/^## / { inside = ($0 == "## Encryption between nodes") } inside' "$REPO/docs/kubernetes.md" | grep -cE "$sentence" || true)
+  echo "docs say so: $said time(s), $under under Encryption between nodes"
+  [ "$said" -eq 1 ]
+  [ "$under" -eq 1 ]
+}
+
 @test "Pods under a sandbox runtime reach Service addresses" {
   local classes dir outside said under value
   local sentence='^\*\*Pods under a sandbox runtime reach Services\.\*\*'

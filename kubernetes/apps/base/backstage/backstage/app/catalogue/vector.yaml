@@ -19,3 +19,4 @@ spec:
   system: observability
   dependsOn:
     - resource:default/prometheus-operator-crds
+    - component:default/vmauth

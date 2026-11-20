@@ -317,18 +317,23 @@ selector() {
 }
 
 # runbook_cluster OLD FILE: the Cluster that docs/runbooks/postgres-restore.md adds beside a
-# database to restore it to a point in time, its one fenced YAML block that is a Cluster, as
-# tests/postgresql.bats reads it, for the database OLD in place of the runbook's example and with the
-# component's image in place of the placeholder; written to FILE.
+# database to restore it to a point in time, the one fenced YAML block of it that is a Cluster
+# bootstrapped by recovery, as tests/postgresql.bats reads it, for the database OLD in place of the
+# runbook's example and with the component's image in place of the placeholder; written to FILE.
 runbook_cluster() {
-  local blocks="$BATS_TEST_TMPDIR/runbook-blocks" block example
+  local blocks="$BATS_TEST_TMPDIR/runbook-blocks" block="" each example
   rm -rf "$blocks"
   mkdir -p "$blocks"
   awk -v dir="$blocks" '/^ *```yaml$/ { inside = 1; block++; match($0, /^ */); indent = RLENGTH; next }
     /^ *```$/ { inside = 0; next } inside { print substr($0, indent + 1) > (dir "/block-" block ".yaml") }' \
     "$REPO/docs/runbooks/postgres-restore.md"
-  block="$(grep -lx 'kind: Cluster' "$blocks"/block-*.yaml || true)"
-  [ -n "$block" ] && [ "$(grep -c . <<<"$block")" -eq 1 ] || { echo "the restore runbook has no one Cluster"; return 1; }
+  for each in "$blocks"/block-*.yaml; do
+    if grep -qx 'kind: Cluster' "$each" && [ "$(yq '(.spec.bootstrap // {}) | has("recovery")' "$each")" = true ]; then
+      block+="$each"$'\n'
+    fi
+  done
+  block="${block%$'\n'}"
+  [ -n "$block" ] && [ "$(grep -c . <<<"$block")" -eq 1 ] || { echo "the restore runbook has no one Cluster that bootstraps by recovery"; return 1; }
   # The example's old cluster is the one whose archive the recovery reads.
   # shellcheck disable=SC2016 # $source is a yq variable.
   example="$(yq '.spec.bootstrap.recovery.source as $source | .spec.externalClusters[] | select(.name == $source) | .plugin.parameters.serverName' "$block")"
@@ -380,15 +385,16 @@ docs() {
   echo "$output"
   [ "$status" -eq 0 ]
   # With only the namespace directory's entry, the cluster builds the namespace, its defaults and
-  # its default deny, and nothing of Ascender.
-  tree_without '/ascender/ascender-operator/ks.yaml$' '/ascender/ascender/ks.yaml$'
+  # its default deny, and nothing of Ascender. Robot Framework's suite of Ascender's sign-in page,
+  # robot-ascender, names ascender, so it goes too.
+  tree_without '/ascender/ascender-operator/ks.yaml$' '/ascender/ascender/ks.yaml$' '/robot/robot-ascender/ks.yaml$'
   run "$REPO/scripts/kubernetes-check" "$TREE"
   echo "$output"
   [ "$status" -eq 0 ]
   overlay "$TREE/kubernetes/apps/overlays/lab-sto2"
   [ "$(of_namespace "$OVERLAY")" = ConfigMap/ascender/app-template-defaults,Namespace/-/ascender,NetworkPolicy/ascender/default-deny ]
-  # With none, nothing of the namespace.
-  tree_without '/ascender(/|$)'
+  # With none, nothing of the namespace; robot-ascender, which names ascender, goes with them.
+  tree_without '/ascender(/|$)' '/robot/robot-ascender/ks.yaml$'
   run "$REPO/scripts/kubernetes-check" "$TREE"
   echo "$output"
   [ "$status" -eq 0 ]
@@ -631,7 +637,7 @@ docs() {
   # labels the operator's templates give them, the job pods by their label, the database as
   # Backstage's is.
   [ "$(yq -N 'select(.kind == "CiliumNetworkPolicy" or .kind == "NetworkPolicy" or .kind == "CiliumClusterwideNetworkPolicy") | .kind + "/" + .metadata.name' "$OPERATOR_BUILT" "$APP_BUILT" "$RENDERED" | LC_ALL=C sort | paste -sd' ' -)" \
-    = "CiliumNetworkPolicy/ascender-db CiliumNetworkPolicy/ascender-db-instances CiliumNetworkPolicy/ascender-db-instances-world CiliumNetworkPolicy/ascender-db-pgdump CiliumNetworkPolicy/ascender-db-pgdump-world CiliumNetworkPolicy/ascender-instance CiliumNetworkPolicy/ascender-jobs CiliumNetworkPolicy/ascender-jobs-world-https CiliumNetworkPolicy/ascender-jobs-world-ssh CiliumNetworkPolicy/ascender-operator CiliumNetworkPolicy/ascender-task CiliumNetworkPolicy/ascender-task-world-https CiliumNetworkPolicy/ascender-task-world-ssh CiliumNetworkPolicy/ascender-web" ]
+    = "CiliumNetworkPolicy/ascender-db CiliumNetworkPolicy/ascender-db-full-recovery-world CiliumNetworkPolicy/ascender-db-instances CiliumNetworkPolicy/ascender-db-instances-world CiliumNetworkPolicy/ascender-db-pgdump CiliumNetworkPolicy/ascender-db-pgdump-world CiliumNetworkPolicy/ascender-instance CiliumNetworkPolicy/ascender-jobs CiliumNetworkPolicy/ascender-jobs-world-https CiliumNetworkPolicy/ascender-jobs-world-ssh CiliumNetworkPolicy/ascender-operator CiliumNetworkPolicy/ascender-task CiliumNetworkPolicy/ascender-task-world-https CiliumNetworkPolicy/ascender-task-world-ssh CiliumNetworkPolicy/ascender-web" ]
   for policy in $(yq -N 'select(.kind == "CiliumNetworkPolicy") | .metadata.name' "$OPERATOR_BUILT" "$APP_BUILT"); do
     [ "$(yq -N -o json -I0 "select(.kind == \"CiliumNetworkPolicy\" and .metadata.name == \"$policy\") | .spec.enableDefaultDeny" "$OPERATOR_BUILT" "$APP_BUILT" | jq -cS .)" = '{"egress":false,"ingress":false}' ]
   done
@@ -650,10 +656,12 @@ docs() {
   [ "$(container "$RENDERED" awx-manager | yq '[.livenessProbe.httpGet.port, .readinessProbe.httpGet.port] | unique | join(" ")')" = 6789 ]
   [ "$(rule_peers "$OPERATOR_BUILT" ascender-operator ingress)" = "@host -> 6789/TCP" ]
   [ "$(rule_peers "$OPERATOR_BUILT" ascender-operator egress)" = "@kube-apiserver -> 443/TCP 6443/TCP" ]
-  # The web pods take the proxies, the kubelet's readiness probe and the task pods' relay on 8052.
+  # The web pods take the proxies, the kubelet's readiness probe and the task pods' relay on 8052,
+  # and Robot Framework's runner, whose suite opens the sign-in page from inside the cluster.
   [ "$(rule_peers "$APP_BUILT" ascender-web ingress | LC_ALL=C sort)" = "$(printf '%s\n' \
     "@host -> 8052/TCP" \
     "$task_labels -> 8052/TCP" \
+    "app.kubernetes.io/component=runner,app.kubernetes.io/name=robot,k8s:io.kubernetes.pod.namespace=robot -> 8052/TCP" \
     "app.kubernetes.io/component=proxy,app.kubernetes.io/managed-by=envoy-gateway,app.kubernetes.io/name=envoy,gateway.envoyproxy.io/owning-gateway-name=public,gateway.envoyproxy.io/owning-gateway-namespace=envoy-gateway-system,k8s:io.kubernetes.pod.namespace=envoy-gateway-system -> 8052/TCP" | LC_ALL=C sort)" ]
   [ -z "$(rule_peers "$APP_BUILT" ascender-web egress)" ]
   # The task pods reach the web pods and the API server, and the world on 443 and on 22, each world
@@ -662,10 +670,11 @@ docs() {
   [ -z "$(rule_peers "$APP_BUILT" ascender-task ingress)" ]
   [ "$(rule_peers "$APP_BUILT" ascender-task-world-https egress)" = "@world -> 443/TCP" ]
   [ "$(rule_peers "$APP_BUILT" ascender-task-world-ssh egress)" = "@world -> 22/TCP" ]
-  # Every pod of the instance, the migration job's included, reaches the resolver and the database.
+  # Every pod of the instance, the migration job's included, reaches the resolver and the database:
+  # the instances of every cluster of the namespace, a restore's beside ascender-db included.
   [ "$(rule_peers "$APP_BUILT" ascender-instance egress | LC_ALL=C sort)" = "$(printf '%s\n' \
     "k8s:io.kubernetes.pod.namespace=kube-system,k8s:k8s-app=kube-dns -> 53/TCP 53/UDP" \
-    "cnpg.io/cluster=ascender-db,cnpg.io/podRole=instance -> 5432/TCP" | LC_ALL=C sort)" ]
+    '{"matchExpressions":[{"key":"cnpg.io/cluster","operator":"Exists"}],"matchLabels":{"cnpg.io/podRole":"instance"}} -> 5432/TCP' | LC_ALL=C sort)" ]
   [ -z "$(rule_peers "$APP_BUILT" ascender-instance ingress)" ]
   # The job pods reach the resolver, and the world on 443 and 22 by a policy each, and take nothing.
   [ "$(rule_peers "$APP_BUILT" ascender-jobs egress)" = "k8s:io.kubernetes.pod.namespace=kube-system,k8s:k8s-app=kube-dns -> 53/TCP 53/UDP" ]
@@ -675,7 +684,7 @@ docs() {
     [ -z "$(rule_peers "$APP_BUILT" "$policy" ingress)" ]
   done
   # Each world rule is the one rule of its policy, with its reason; no other policy has a reason.
-  for policy in ascender-task-world-https ascender-task-world-ssh ascender-jobs-world-https ascender-jobs-world-ssh ascender-db-instances-world ascender-db-pgdump-world; do
+  for policy in ascender-task-world-https ascender-task-world-ssh ascender-jobs-world-https ascender-jobs-world-ssh ascender-db-instances-world ascender-db-full-recovery-world ascender-db-pgdump-world; do
     [ -n "$(object "$APP_BUILT" CiliumNetworkPolicy "$policy" | yq '.metadata.annotations["k8s-gitops/network-policy-reason"] // ""')" ]
   done
   [ "$(yq -N 'select(.kind == "CiliumNetworkPolicy" and .metadata.annotations["k8s-gitops/network-policy-reason"] == null) | .metadata.name' "$APP_BUILT" "$OPERATOR_BUILT" | LC_ALL=C sort | paste -sd' ' -)" \
@@ -852,28 +861,42 @@ docs() {
 }
 
 @test "Ascender's database comes from the PostgreSQL component, and no secret is in the tree" {
-  local ks cluster generator es keys restore
+  local ks cluster generator es keys restore file restores copies new secret copy want
   both
   ks="$(yq -o json -I0 '.' "$BATS_TEST_TMPDIR/ascender-ks.yaml")"
   # The component, for the cluster ascender-db in the namespace ascender, 5Gi for each instance, as
   # job events grow until the weekly cleanup removes those older than 120 days.
   [ "$(jq -c '.spec.components' <<<"$ks")" = '["../../../../../components/cnpg-cluster"]' ]
   [ "$(jq -c '.spec.postBuild.substitute | {CNPG_CLUSTER_NAME, CNPG_NAMESPACE, CNPG_STORAGE_SIZE}' <<<"$ks")" = '{"CNPG_CLUSTER_NAME":"ascender-db","CNPG_NAMESPACE":"ascender","CNPG_STORAGE_SIZE":"5Gi"}' ]
-  cluster="$(yq -N -o json -I0 'select(.kind == "Cluster")' "$APP_BUILT")"
+  # The component's Cluster, by the name the Kustomization gives it, beside which a restore adds one
+  # of its own (docs/runbooks/postgres-restore.md).
+  cluster="$(NAME="$(jq -r '.spec.postBuild.substitute.CNPG_CLUSTER_NAME' <<<"$ks")" yq -N -o json -I0 \
+    'select(.kind == "Cluster" and .metadata.name == strenv(NAME))' "$APP_BUILT")"
+  [ "$(grep -c . <<<"$cluster")" -eq 1 ] || { echo "the build holds no one Cluster by the name the Kustomization gives it"; return 1; }
   [ "$(jq -c '[.metadata.name, .spec.instances, .spec.storage.size]' <<<"$cluster")" = '["ascender-db",3,"5Gi"]' ]
   [ "$(jq -cS '.spec.bootstrap' <<<"$cluster")" = '{"initdb":{"database":"app","owner":"app","secret":{"name":"ascender-db-app"}}}' ]
   # A restore to a point in time adds a Cluster of its own beside the component's in app/, as the
-  # restore runbook says. Built so, the patch reaches the component's Cluster alone: the restore
-  # keeps the runbook's recovery from the archive of ascender-db, and the component's its initdb.
+  # restore runbook says, which for Ascender names its own copy of the owner's Secret,
+  # ascender-db-restored-app (docs/kubernetes.md, Ascender, Restoring the database). Built so, the
+  # patch reaches the component's Cluster alone: the restore keeps the runbook's recovery from the
+  # archive of ascender-db with that Secret, and the component's its initdb.
   restore="$BATS_TEST_TMPDIR/ascender-db-restored.yaml"
   runbook_cluster ascender-db "$restore"
   [ "$(yq '.metadata.name + " " + (.spec.bootstrap | keys | join(","))' "$restore")" = "ascender-db-restored recovery" ]
+  yq -i '.spec.bootstrap.recovery.secret.name = .metadata.name + "-app"' "$restore"
   TREE="$BATS_TEST_TMPDIR/tree"
   rm -rf "$TREE"
   mkdir -p "$TREE"
   cp -r "$REPO/kubernetes" "$TREE/kubernetes"
-  cp "$restore" "$TREE/kubernetes/apps/base/ascender/ascender/app/"
-  yq -i '.resources += ["ascender-db-restored.yaml"]' "$TREE/kubernetes/apps/base/ascender/ascender/app/kustomization.yaml"
+  # A tree in the middle of a restore holds a Cluster of that name already, in a file of app/ of
+  # whatever name (tests/postgres-restore.bats): that file takes the runbook's, so the build holds
+  # one Cluster of the name.
+  file="$(yq -N 'select(.kind == "Cluster" and .metadata.name == "ascender-db-restored") | filename' "$TREE"/kubernetes/apps/base/ascender/ascender/app/*.yaml | sort -u)"
+  [ "$(grep -c . <<<"$file")" -le 1 ] || { echo "app/ holds the Cluster ascender-db-restored in more than one file: $file"; return 1; }
+  file="$(basename "${file:-ascender-db-restored.yaml}")"
+  cp "$restore" "$TREE/kubernetes/apps/base/ascender/ascender/app/$file"
+  FILE="$file" yq -e '.resources | any_c(. == strenv(FILE))' "$TREE/kubernetes/apps/base/ascender/ascender/app/kustomization.yaml" >/dev/null ||
+    FILE="$file" yq -i '.resources += [strenv(FILE)]' "$TREE/kubernetes/apps/base/ascender/ascender/app/kustomization.yaml"
   flux_build ascender "$BATS_TEST_TMPDIR/ascender-ks.yaml" "$TREE" >"$BATS_TEST_TMPDIR/restore-built.yaml"
   echo "the restore's bootstrap: $(object "$BATS_TEST_TMPDIR/restore-built.yaml" Cluster ascender-db-restored | yq -o json -I0 '.spec.bootstrap')"
   [ "$(object "$BATS_TEST_TMPDIR/restore-built.yaml" Cluster ascender-db-restored | yq -o json -I0 '.spec.bootstrap' | jq -cS .)" \
@@ -888,16 +911,51 @@ docs() {
     = '{"app.kubernetes.io/instance":"ascender-db","app.kubernetes.io/name":"pgdump"}' ]
   # The Secret ascender-db-app, made once by External Secrets from a generated password in the
   # operator's application, so that it exists before ascender applies the AWX: the operator reads it
-  # once at the start of its run and makes a PostgreSQL of its own without it.
-  generator="$(yq -N -o json -I0 'select(.kind == "Password")' "$OPERATOR_BUILT")"
+  # once at the start of its run and makes a PostgreSQL of its own without it. Each is taken by its
+  # name, as a restore adds a copy of its own beside it (below).
+  generator="$(yq -N -o json -I0 'select(.kind == "Password" and .metadata.name == "ascender-db-app")' "$OPERATOR_BUILT")"
+  [ "$(grep -c . <<<"$generator")" -eq 1 ] || { echo "ascender-operator builds no one Password ascender-db-app"; return 1; }
   [ "$(jq -cS '[.apiVersion, .metadata.name, .spec]' <<<"$generator")" = '["generators.external-secrets.io/v1alpha1","ascender-db-app",{"allowRepeat":true,"encoding":"hex","length":32,"noUpper":false,"secretKeys":["password"]}]' ]
   es="$(yq -N -o json -I0 'select(.kind == "ExternalSecret" and .metadata.name == "ascender-db-app")' "$OPERATOR_BUILT")"
+  [ "$(grep -c . <<<"$es")" -eq 1 ] || { echo "ascender-operator builds no one ExternalSecret ascender-db-app"; return 1; }
   [ "$(jq -c '[.metadata.name, .spec.refreshPolicy, .spec.target.name, .spec.target.creationPolicy, .spec.target.template.type, .spec.target.template.engineVersion, .spec.target.template.mergePolicy]' <<<"$es")" \
     = '["ascender-db-app","CreatedOnce","ascender-db-app","Owner","kubernetes.io/basic-auth","v2","Replace"]' ]
   [ "$(jq -cS '.spec.dataFrom' <<<"$es")" = '[{"sourceRef":{"generatorRef":{"apiVersion":"generators.external-secrets.io/v1alpha1","kind":"Password","name":"ascender-db-app"}}}]' ]
   keys="$(jq -cS '.spec.target.template.data' <<<"$es")"
   [ "$keys" = '{"database":"app","dbname":"app","host":"ascender-db-rw","password":"{{ .password }}","port":"5432","sslmode":"require","type":"unmanaged","username":"app"}' ]
-  [ -z "$(yq -N 'select(.kind == "ExternalSecret" or .kind == "Password") | .metadata.name' "$APP_BUILT" | grep -vE '^ascender-db-(backup|dump-s3)$' || true)" ]
+  [ -z "$(yq -N 'select(.kind == "ExternalSecret") | .metadata.name' "$APP_BUILT" | grep -vE '^ascender-db-(backup|dump-s3)$' || true)" ]
+  [ -z "$(yq -N 'select(.kind == "Password") | .metadata.name' "$APP_BUILT")" ]
+  # Every other Cluster of app/ is a restore's, which names as its owner's a Secret of its own name
+  # followed by -app; and every other Password and ExternalSecret of the operator's application, but
+  # the ExternalSecret of the Secret the AWX names for its secret key (the last test), is such a
+  # Secret: the copy of ascender-db-app's two that the restore's pull request adds, under that name,
+  # with the restore's host and every other key as it is (the file of step 2 of the point-in-time
+  # restore of docs/runbooks/postgres-restore.md; docs/kubernetes.md, Ascender, Restoring the
+  # database).
+  restores="$(yq -N -o json -I0 'select(.kind == "Cluster" and .metadata.name != "ascender-db")' "$APP_BUILT" |
+    jq -r '.metadata.name + " " + ([(.spec.bootstrap // {})[] | .secret.name // empty] | join(","))' | sort)"
+  copies="$(SECRET="$(jq -r '.spec.secret_key_secret // ""' "$AWX")" yq -N 'select((.kind == "Password" or .kind == "ExternalSecret") and .metadata.name != "ascender-db-app"
+    and (.kind != "ExternalSecret" or (.spec.target.name // .metadata.name) != strenv(SECRET))) | .kind + " " + .metadata.name' "$OPERATOR_BUILT" | sort)"
+  echo "the restores' Clusters and their owners' Secrets: ${restores:-none}; their copies of ascender-db-app: ${copies:-none}"
+  while read -r new secret; do
+    [ -n "$new" ] || continue
+    [ "$secret" = "$new-app" ] || { echo "the restore's Cluster $new names ${secret:-no Secret} as its owner's, not $new-app"; return 1; }
+    [ "$(grep -E " $new-app\$" <<<"$copies" | cut -d' ' -f1 | paste -sd, -)" = ExternalSecret,Password ] ||
+      { echo "ascender-operator builds no one Password and ExternalSecret $new-app for the restore's Cluster $new"; return 1; }
+    # Each is the original as Flux builds it, its metadata included, so no label or annotation of its
+    # own, with only the name, and for the ExternalSecret the Secret it writes, the generator it reads
+    # and the host, changed.
+    copy="$(NAME="$new-app" yq -N -o json -I0 'select(.kind == "Password" and .metadata.name == strenv(NAME))' "$OPERATOR_BUILT" | jq -cS '[.apiVersion, .metadata, .spec]')"
+    want="$(jq -cS --arg name "$new-app" '[.apiVersion, (.metadata | .name = $name), .spec]' <<<"$generator")"
+    [ "$copy" = "$want" ] || { echo "the Password $new-app is not ascender-db-app's with the name $new-app: $copy, not $want"; return 1; }
+    copy="$(NAME="$new-app" yq -N -o json -I0 'select(.kind == "ExternalSecret" and .metadata.name == strenv(NAME))' "$OPERATOR_BUILT" | jq -cS '[.apiVersion, .metadata, .spec]')"
+    want="$(jq -cS --arg name "$new-app" --arg host "$new-rw" '[.apiVersion, (.metadata | .name = $name), (.spec | .target.name = $name
+      | .dataFrom[].sourceRef.generatorRef.name = $name | .target.template.data.host = $host)]' <<<"$es")"
+    [ "$copy" = "$want" ] ||
+      { echo "the ExternalSecret $new-app is not ascender-db-app's with $new-app for every ascender-db-app, its name, the Secret it writes and the generator it reads, and the host $new-rw: $copy, not $want"; return 1; }
+  done <<<"$restores"
+  [ "$(awk '{ print $2 }' <<<"$copies" | sort -u | grep . || true)" = "$(awk '{ print $2 }' <<<"$restores" | sort -u | grep . || true)" ] ||
+    { echo "ascender-operator builds a Password or an ExternalSecret that no restore's Cluster names"; return 1; }
   # The AWX names it as its database, and leaves the admin password and the websocket secret to the
   # operator, which keeps the Secrets it makes after the AWX; the secret key is the store's (the
   # last test).
@@ -950,9 +1008,9 @@ docs() {
   path="$(jq -r '.spec.data[0].remoteRef.key' <<<"$es")"
   property="$(jq -r '.spec.data[0].remoteRef.property' <<<"$es")"
   [ "$(STORE_PATH="$path" KEY="$property" yq -o json -I0 '[.secrets[] | select(.path == strenv(STORE_PATH) and .key == strenv(KEY)) | .rotation]' "$REPO/secret-rotation.yaml" | jq -c .)" = '["re-encryption"]' ]
-  # Nothing built is a Secret, and the one generator is the database's password.
+  # Nothing built is a Secret. No generator makes the key: its ExternalSecret, held whole above,
+  # reads the store, and the database's test holds every Password to the database's or a restore's.
   [ -z "$(yq -N 'select(.kind == "Secret") | .metadata.name' "$OPERATOR_BUILT" "$APP_BUILT")" ]
-  [ "$(yq -N 'select(.kind == "Password") | .metadata.name' "$OPERATOR_BUILT" "$APP_BUILT")" = ascender-db-app ]
   # The docs give the first write and the carry of a key the operator made as pipes into bao-put,
   # and name the recipe for the key nowhere else, so no value goes on a command line; and they give
   # the line Ascender logs when a stored secret does not open under the key it has

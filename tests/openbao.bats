@@ -433,6 +433,101 @@ covers() {
   [ -z "$found" ]
 }
 
+# seal_ids VALUES SEAL: the ids of the seal keys the stanza of VALUES, a values.yaml of openbao, names,
+# as the recipes read them (bao_seal_ids in scripts/lib/openbao.sh), the current one first, each on
+# a line of its own; and for each, read with yq from VALUES and SEAL, which holds the application's
+# ExternalSecrets and generators, the convention the recipes rely on: the stanza reads the key from
+# file:///openbao/userconfig/<id>/key, extraVolumes mounts the Secret <id>, and an ExternalSecret <id>
+# writes that Secret once from a Password generator <id>, with the settings the seal test above
+# asserts of the Secret the render mounts. Fails naming the first that does not hold.
+# shellcheck disable=SC2016 # the dollars are yq's and jq's variables.
+seal_ids() {
+  local values=$1 seal=$2 stanza id setting external
+  bao_seal_ids "$values" || return 1
+  stanza=$(yq '.server.ha.raft.config' "$values" | awk '/^seal "static" \{/ {inside = 1} inside {print} inside && /^}/ {inside = 0}')
+  for id in "$bao_seal_current" ${bao_seal_previous:+"$bao_seal_previous"}; do
+    if [ "$id" = "$bao_seal_current" ]; then setting=current_key; else setting=previous_key; fi
+    [ "$(setting "$setting" "$stanza")" = "file:///openbao/userconfig/$id/key" ] ||
+      { echo "$values: the $setting is not the file of the Secret $id" >&2; return 1; }
+    [ "$(ID=$id yq '[.server.extraVolumes[] | select(.type == "secret" and .name == strenv(ID))] | length' "$values")" = 1 ] ||
+      { echo "$values: extraVolumes does not mount the Secret $id" >&2; return 1; }
+    external=$(ID=$id yq -N -o json -I0 'select(.kind == "ExternalSecret" and .metadata.name == strenv(ID))' "$seal")
+    [ "$(jq -cS '{refresh: .spec.refreshPolicy, target: .spec.target, data: (.spec.data // []),
+      from: [.spec.dataFrom[] | .sourceRef.generatorRef | {apiVersion, kind, name}]}' <<<"$external")" = \
+      "$(jq -ncS --arg id "$id" '{refresh: "CreatedOnce",
+        target: {name: $id, creationPolicy: "Orphan", deletionPolicy: "Retain", immutable: true}, data: [],
+        from: [{apiVersion: "generators.external-secrets.io/v1alpha1", kind: "Password", name: $id}]}')" ] ||
+      { echo "$seal: the ExternalSecret $id does not write the Secret $id once from the generator $id" >&2; return 1; }
+    [ "$(ID=$id yq ea -N -o json -I0 '[select(.kind == "Password" and .metadata.name == strenv(ID))] | .[0].spec
+      | [.length, .encoding, .secretKeys, .allowRepeat, .noUpper, .digits // "default", .symbols // "default",
+        .symbolCharacters // "default"]' "$seal")" = '[32,"hex",["key"],true,false,"default","default","default"]' ] ||
+      { echo "$seal: the generator $id does not make 32 characters, hex-encoded, as the key" >&2; return 1; }
+    echo "$id"
+  done
+}
+
+@test "Every seal key the stanza names is read from the Secret of its own id, which an ExternalSecret makes once" {
+  local app="$TREE/kubernetes/apps/base/openbao/openbao/app" rotated="$BATS_TEST_TMPDIR/rotated" seal ids names name
+  render
+  statefulset
+  # What the library's refusals print with, sourced once the chart is rendered, as it puts its
+  # wrappers in front of helm and flux.
+  # shellcheck source=scripts/lib/infra.sh
+  . "$REPO/scripts/lib/infra.sh"
+  # shellcheck source=scripts/lib/errors.sh
+  . "$REPO/scripts/lib/errors.sh"
+  # The chart mounts each Secret of extraVolumes at /openbao/userconfig/<name> in the servers.
+  names=$(yq '.server.extraVolumes[] | select(.type == "secret") | .name' "$VALUES")
+  echo "extraVolumes Secrets: $(paste -sd' ' - <<<"$names")"
+  [ -n "$names" ]
+  for name in $names; do
+    [ "$(mounted "/openbao/userconfig/$name/key")" = "Secret/$name key" ]
+    [ "$(volume_at "/openbao/userconfig/$name" openbao)" = "userconfig-$name secret true" ]
+  done
+  # The ids the recipes read from values.yaml are the rendered stanza's, and they read the same from
+  # the ConfigMap the chart renders for the servers to run, which bao_config_map names.
+  seal=$(block seal static)
+  bao_seal_ids "$app/values.yaml"
+  echo "the recipes read: $bao_seal_current, previous ${bao_seal_previous:-none}"
+  [ "$bao_seal_current" = "$(setting current_key_id "$seal")" ]
+  [ "$bao_seal_previous" = "$(setting previous_key_id "$seal")" ]
+  bao_stanza_ids "the render" < <(NAME=$bao_config_map yq -N 'select(.kind == "ConfigMap" and .metadata.name == strenv(NAME))
+    | .data["extraconfig-from-values.hcl"]' "$RENDERED")
+  [ "$stanza_current $stanza_previous" = "$bao_seal_current $bao_seal_previous" ]
+  # The tree holds the convention for every id it names.
+  ids=$(seal_ids "$app/values.yaml" "$OPENBAO")
+  [ "$ids" = "$(printf '%s\n' "$bao_seal_current" ${bao_seal_previous:+"$bao_seal_previous"})" ]
+
+  # A copy rotated as docs/runbooks/openbao.md rotates the seal key: seal.yaml gains openbao-seal-2
+  # beside openbao-seal-1, extraVolumes mounts both, and the stanza's current key is openbao-seal-2
+  # and its previous key openbao-seal-1.
+  mkdir "$rotated"
+  { cat "$app/seal.yaml" && sed 's/openbao-seal-1/openbao-seal-2/g' "$app/seal.yaml"; } >"$rotated/seal.yaml"
+  yq '.server.ha.raft.config |= sub("seal \"static\" \\{[^}]*\\}"; "seal \"static\" {\n  current_key_id = \"openbao-seal-2\"\n  current_key = \"file:///openbao/userconfig/openbao-seal-2/key\"\n  previous_key_id = \"openbao-seal-1\"\n  previous_key = \"file:///openbao/userconfig/openbao-seal-1/key\"\n}")
+    | .server.extraVolumes = [{"type": "secret", "name": "openbao-seal-2"}] + .server.extraVolumes' "$app/values.yaml" >"$rotated/values.yaml"
+  ids=$(seal_ids "$rotated/values.yaml" "$rotated/seal.yaml")
+  echo "the rotated copy's ids: $(paste -sd' ' - <<<"$ids")"
+  [ "$ids" = "$(printf '%s\n' openbao-seal-2 openbao-seal-1)" ]
+
+  # A stanza that does not name its keys so is refused, naming why.
+  run bao_stanza_ids "a stanza" <<<$'seal "static" {\n  current_key_id = "openbao-seal-1"\n}\nseal "static" {\n  current_key_id = "openbao-seal-2"\n}'
+  echo "two blocks: $output"
+  [ "$status" -ne 0 ]
+  [ "$output" = "${0##*/}: a stanza holds 2 seal \"static\" blocks, and the recipes read one" ]
+  run bao_stanza_ids "a stanza" <<<$'seal "static" {\n  previous_key_id = "openbao-seal-1"\n}'
+  echo "no current id: $output"
+  [ "$status" -ne 0 ]
+  [ "$output" = "${0##*/}: a stanza names no current_key_id in a seal \"static\" block" ]
+  run bao_stanza_ids "a stanza" <<<$'seal "static" {\n  current_key_id = "Openbao_Seal"\n}'
+  echo "no Secret's name: $output"
+  [ "$status" -ne 0 ]
+  [ "$output" = "${0##*/}: the seal \"static\" block of a stanza names the key id Openbao_Seal, which is no name a Secret and its volume take" ]
+  run bao_stanza_ids "a stanza" <<<$'seal "static" {\n  current_key_id = "openbao-seal-1"\n  previous_key_id = "openbao-seal-1"\n}'
+  echo "the same id twice: $output"
+  [ "$status" -ne 0 ]
+  [ "$output" = "${0##*/}: the seal \"static\" block of a stanza names openbao-seal-1 as both current_key_id and previous_key_id" ]
+}
+
 @test "No root token and no recovery material is stored by anything the build renders" {
   local kinds paths tokens sources level roles sudo grants audit
   render

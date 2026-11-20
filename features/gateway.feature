@@ -14,7 +14,7 @@ Feature: Public Gateway
   Scenario: The HTTPS listener serves a wildcard certificate for the cluster's domain from the cluster's issuer
     Given the public Gateway and the issuer application, built offline with the example cluster-config
     When the https listener, its certificate and the issuers are read
-    Then the listener terminates TLS with the Secret of an ECDSA certificate for the wildcard and the apex of the cluster's domain, renewed at a share of its lifetime and with a new key, issued with nothing chosen by the cluster-wide CA issuer whose CA is a certificate the bootstrap self-signed issuer signed, with no private key in the tree, and a client traffic policy that sets TLS 1.2 and the PROXY protocol as optional, and nothing else, is the one policy on the Gateway or its routes, with no patch policy anywhere and no filter of a route attached to the Gateway that sets or removes x-forwarded-for
+    Then the listener terminates TLS with the Secret of an ECDSA certificate for the wildcard and the apex of the cluster's domain, renewed at a share of its lifetime and with a new key, issued with nothing chosen by the cluster-wide CA issuer whose CA is a certificate the bootstrap self-signed issuer signed, with no private key in the tree, and a client traffic policy that sets TLS 1.2, the PROXY protocol as optional and the listener limits, and nothing else, is the one policy on the Gateway, and the policies on its routes are the sign-in's, the firewall's and the rate limits' that are named, with no patch policy anywhere and no filter of a route attached to the Gateway that sets or removes x-forwarded-for
 
   Scenario: A route attaches to the public Gateway only from a namespace that opts in
     Given the public Gateway's listeners and the namespaces of the tree
@@ -75,3 +75,23 @@ Feature: Public Gateway
     Given the public Gateway's EnvoyProxy built offline with the example cluster-config
     When its telemetry is read
     Then access logging is on and every request, routed or not, is written to standard output as one JSON line with the client address Envoy took, the host, the method, the path without its query string, the status, the duration and the bytes, and no field carries a query string or a client's own x-forwarded-for
+
+  Scenario: A route opts into a request rate limit with one component, at 300 requests a minute unless its ks.yaml says otherwise
+    Given the component kubernetes/components/ratelimit, every ks.yaml of the tree, every application the overlay enables built offline with the example cluster-config as Flux applies it, and the render of the tree with what its charts render
+    When the component's files, variables and header, the Kustomizations that take it and every BackendTrafficPolicy of the files, the builds and the render are read
+    Then the component is one BackendTrafficPolicy named after the route that targets that one HTTPRoute by targetRefs with one local rule without client selectors, 300 requests a minute unless the route's variables say otherwise, and no default for the route; kromgo and hello-sso take it at 300 a minute and hello-route at 5 a second, each built with an integer figure and a unit the definition allows, each waiting with its header's health expressions, the firewall's form; and no other BackendTrafficPolicy is under kubernetes/ or in the render, and none targets a Gateway or a ListenerSet or selects its targets
+
+  Scenario: A route keeps its sign-in and its firewall when it takes a rate limit, and the sign-in paths are not limited
+    Given the demo's routes built offline as Flux applies them, every application the overlay enables, and the public Gateway's EnvoyProxy
+    When the policies that target each route are read
+    Then hello-sso is the target of its SecurityPolicy and of its BackendTrafficPolicy, hello of its EnvoyExtensionPolicy and of its BackendTrafficPolicy, the sign-in route hello-sso-oauth2 of no policy, no route is the target of two policies of one kind, hello-sso is still probed for the redirect to sign-in, and the EnvoyProxy sets no filter order, so the controller's own order runs external authorisation and the Wasm filter before the rate limit
+
+  Scenario: The public listeners bound what one client connection may hold, within the edges' own limits
+    Given the public Gateway built offline with the example cluster-config, the edge routers' proxy configuration, and every application the overlay enables
+    When the Gateway's ClientTrafficPolicy, the edges' maxconn and timeouts, the edges the Gateway's DNS annotation names and the timeouts of every route and BackendTrafficPolicy are read
+    Then the policy keeps the PROXY protocol as optional and TLS 1.2 as they are and sets exactly a connection limit of the edges' maxconn times their number, a buffer limit of 32 KiB, 100 streams on one HTTP/2 connection, a 10 second header timeout, an idle timeout below the edges' timeout and a stream idle timeout no longer than it, and no route or BackendTrafficPolicy sets a request or idle timeout of its own
+
+  Scenario: A burst over hello's limit through each edge is answered 429 on one connection, and hello answers again once the limit's second has passed
+    Given a healthy cluster whose BackendTrafficPolicy demo/hello targets the route hello, is Accepted and limits it to 5 requests a second, and two edges that forward to it; then that policy absent, not Accepted, Accepted at an older generation or by one of two ancestors only, targeting by targetRef or targetSelectors as well, with a global rule, a rule with client selectors or two rules, of another unit, or of a figure outside 1 to 20 or not whole; then the demo answering 500; then a burst answered 200 alone, 429 alone, with another status as well or over two connections, or writing out fewer answers than requests, and the route still answering 429 after the wait or answering 200 with another page
+    When just gateway-check runs against fakes of kubectl, curl, sleep and the edge stack's outputs
+    Then the rate limit line passes, and through each edge one curl call sends 11 requests for hello over HTTP/2 in parallel on one connection, answered 200 and 429, then sleep waits 2 seconds and one request gets the demo's page with 200; each unhealthy case fails its own line, saying which, without an address, and the edge lines of the burst are skipped, saying why, while the policy's line does not pass or the demo does not answer 200 with its page

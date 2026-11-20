@@ -1,0 +1,156 @@
+#!/usr/bin/env bash
+# Starts one run of Robot Framework's suites on a cluster now, as the CronJob robot-suites runs them
+# every night, follows it and exits with its result: through the cluster's kubeconfig as
+# scripts/cluster-env finds it, it refuses while a job of the runner has a pod, creates the job
+# robot-run-<UTC time> from cronjob/robot-suites in the namespace robot, waits for its pod to leave
+# Pending, prints its log, Robot's console, as it comes, and then reads the job's condition and its
+# container's exit code, Robot's return code, the number of failed tests. It exits with that code,
+# or 1 when the job failed with none, as when its deadline ended it, and points at just robot for
+# the report. It reads no Secret and changes nothing but the job it creates, which it never deletes:
+# Ctrl-C, SIGTERM or SIGHUP stop the following and leave the job running, and say how to follow it
+# again. ROBOT_RUN_WAIT, 900 when unset, bounds in seconds both the wait for the pod and the wait for
+# the result. None of kubectl's own output is shown, as its errors can name the API server's
+# address; a failure names the step it happened in.
+# Usage: scripts/robot-run [cluster]
+set -euo pipefail
+
+here=$(dirname "$0")
+# shellcheck source=scripts/lib/cluster.sh
+. "$here/lib/cluster.sh"
+
+if (($# > 1)) || [[ ${1-} == -* ]]; then
+  infra_error "usage: robot-run [cluster]"
+  exit 2
+fi
+
+# shellcheck source=scripts/cluster-env
+. "$here/cluster-env" "${1-}"
+seconds=${ROBOT_RUN_WAIT:-900}
+complete=1
+require_kubeconfig || complete=0
+require_commands kubectl jq || complete=0
+if [[ ! $seconds =~ ^[1-9][0-9]{0,3}$ ]]; then
+  infra_error "ROBOT_RUN_WAIT is not a whole number of seconds from 1 to 9999"
+  complete=0
+fi
+((complete))
+
+job='' created='' reported='' follow_pid=''
+# end STATUS: stops kubectl while it still follows the log, then exits with STATUS. A failure names
+# the step it happened in, as in every cluster recipe; once the job exists and its result is not
+# read, it says that the job goes on and how to follow it.
+# shellcheck disable=SC2329 # It runs from the EXIT trap.
+end() {
+  local status=$1
+  if [[ -n $follow_pid ]]; then
+    kill "$follow_pid" 2> /dev/null || true
+    wait "$follow_pid" 2> /dev/null || true
+  fi
+  case $status in
+    129 | 130 | 143) echo "Stopped." ;;
+    *) [[ -n $reported ]] || failed_step "$status" ;;
+  esac
+  if [[ -n $created && -z $reported ]]; then
+    echo "The job $job goes on in the cluster; follow it with: KUBECONFIG=${KUBECONFIG#"$infra_root"/} kubectl --namespace robot logs --follow job/$job"
+  fi
+  exit "$status"
+}
+trap 'end $?' EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+# A second run while one runs would write the same claim from a second pod.
+step="listing the runner's jobs"
+jobs=$(kubectl get jobs --namespace robot --selector app.kubernetes.io/name=robot,app.kubernetes.io/component=runner --output json 2> /dev/null)
+active=$(jq -r '[.items[] | select((.status.active // 0) > 0) | .metadata.name] | join(", ")' <<< "$jobs")
+if [[ -n $active ]]; then
+  infra_error "a run is still going, the job $active in robot; wait for it to end"
+  exit 1
+fi
+
+job="robot-run-$(date -u +%Y%m%d-%H%M%S)"
+echo "Starting job $job from cronjob/robot-suites in robot."
+step="creating the job"
+# Exiting here rather than by set -e: bash would run the EXIT trap with this command's output still
+# sent to /dev/null, and the failed step would go unsaid.
+if ! kubectl create job --namespace robot --from=cronjob/robot-suites "$job" > /dev/null 2>&1; then
+  exit 1
+fi
+created=1
+
+# kubectl logs needs the container started; until the pod leaves Pending it is being scheduled, its
+# volume attached and its image pulled.
+step="waiting for the job's pod to start"
+deadline=$((SECONDS + seconds))
+while :; do
+  phase=$(kubectl get pods --namespace robot --selector "batch.kubernetes.io/job-name=$job" --output json 2> /dev/null |
+    jq -r '[.items[].status.phase] | first // ""')
+  if [[ -n $phase && $phase != Pending ]]; then
+    break
+  fi
+  if ((SECONDS >= deadline)); then
+    infra_error "the job's pod did not leave Pending within $seconds seconds"
+    exit 1
+  fi
+  sleep 1
+done
+
+# In the background, so that Ctrl-C ends the following at once; kubectl, run so, ignores the
+# Ctrl-C the terminal sends, and end stops it.
+step="following the job's log"
+(exec_tool kubectl logs --namespace robot --follow "job/$job" 2> /dev/null) &
+follow_pid=$!
+status=0
+wait "$follow_pid" || status=$?
+follow_pid=''
+if ((status != 0)); then
+  infra_error "kubectl logs stopped with status $status; the job's result follows"
+fi
+
+step="waiting for the job's result"
+deadline=$((SECONDS + seconds))
+while :; do
+  result=$(kubectl get job --namespace robot "$job" --output json 2> /dev/null |
+    jq -c '[.status.conditions // [] | .[] | select((.type == "Complete" or .type == "Failed") and .status == "True")] | first // empty')
+  if [[ -n $result ]]; then
+    break
+  fi
+  if ((SECONDS >= deadline)); then
+    infra_error "the job has neither completed nor failed within $seconds seconds"
+    exit 1
+  fi
+  sleep 1
+done
+
+step="reading the job's exit code"
+code=$(kubectl get pods --namespace robot --selector "batch.kubernetes.io/job-name=$job" --output json 2> /dev/null |
+  jq -r '[.items[].status.containerStatuses // [] | .[] | select(.name == "robot") | .state.terminated.exitCode // empty] | first // ""')
+reported=1
+status=1
+if [[ $(jq -r '.type' <<< "$result") == Complete ]]; then
+  echo "Every test passed."
+  status=0
+elif [[ $code =~ ^[0-9]+$ ]] && ((code > 0)); then
+  # Robot's return codes (doc/userguide/src/ExecutingTestCases/BasicUsage.rst of Robot Framework 7.5).
+  case $code in
+    1) echo "1 test failed, or run.sh failed after Robot passed every test: its last line above says which." ;;
+    250) echo "250 or more tests failed." ;;
+    251) echo "Robot Framework printed its help or version and ran no test (251)." ;;
+    252) echo "Robot Framework found invalid data or an invalid option (252)." ;;
+    253) echo "Robot Framework was stopped before the end (253)." ;;
+    255) echo "Robot Framework stopped on an unexpected internal error (255)." ;;
+    *)
+      if ((code < 250)); then
+        echo "$code tests failed."
+      else
+        echo "The run ended with status $code, which is no return code of Robot Framework's."
+      fi
+      ;;
+  esac
+  status=$code
+else
+  echo "The job failed with no exit code: $(jq -r '[.reason, .message] | map(select(. != null and . != "")) | join(": ")' <<< "$result")."
+fi
+echo "The report is the newest run of the index: just robot $cluster."
+exit "$status"

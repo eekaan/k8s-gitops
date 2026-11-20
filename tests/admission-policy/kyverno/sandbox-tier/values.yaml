@@ -1,0 +1,39 @@
+---
+# The labels of the namespaces the resources are in, which Kyverno's CLI cannot read from the
+# resources: the rule's namespaceSelector needs them, and its expressions read them as the namespace
+# object. A namespace of each tier, one without the label, one with a key that is not the rule's, and
+# one for each value that is no tier.
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Values
+namespaceSelector:
+  - name: sandbox-userns
+    labels:
+      pod-security.kubernetes.io/enforce: restricted
+      k8s-gitops/sandbox: userns
+  - name: sandbox-gvisor
+    labels:
+      pod-security.kubernetes.io/enforce: restricted
+      k8s-gitops/sandbox: gvisor
+  - name: sandbox-kata
+    labels:
+      pod-security.kubernetes.io/enforce: restricted
+      k8s-gitops/sandbox: kata
+  - name: unlabelled
+    labels:
+      pod-security.kubernetes.io/enforce: restricted
+  - name: unprefixed
+    labels:
+      pod-security.kubernetes.io/enforce: restricted
+      sandbox: gvisor
+  - name: unknown-value
+    labels:
+      pod-security.kubernetes.io/enforce: restricted
+      k8s-gitops/sandbox: firecracker
+  - name: unknown-case
+    labels:
+      pod-security.kubernetes.io/enforce: restricted
+      k8s-gitops/sandbox: Gvisor
+  - name: unknown-empty
+    labels:
+      pod-security.kubernetes.io/enforce: restricted
+      k8s-gitops/sandbox: ""

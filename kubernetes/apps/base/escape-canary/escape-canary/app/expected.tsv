@@ -1,0 +1,31 @@
+# The escape canary's table: every attempt of its two checks, with the result each gives while
+# Cilium audits network policy and once it enforces it, and what decides the two
+# (docs/kubernetes.md, The escape canary). The checks read it from the ConfigMap
+# escape-canary-expected at every run, and tests/escape-canary.bats from the tree. One row an
+# attempt, in the order the checks make them, eight fields separated by tabs:
+#   attempt  the attempt's role, unique, which names it in the checks' lines
+#   check    network or rights: the CronJob escape-canary-<check> whose pods make it
+#   target   the name asked, node for the node the pod runs on, the link-local metadata address,
+#            or - for an attempt of the rights check, which is a request to the API server
+#   port     the port and its protocol, or - for the rights check
+#   reach    the peer and port the policies decide the attempt by, once a Service's address is
+#            translated to a backend's, as scripts/network-policy-check --reach names them
+#   audit    the result while Cilium audits network policy
+#   enforce  the result once Cilium enforces it
+#   reason   what decides the two results
+# The results: open, the TCP handshake completed or the resolver answered with an address; refused;
+# blocked, no answer within the attempt's bound; unresolved; forbidden, the API server answered 403;
+# allowed, the API server answered the request.
+# The metadata address is one scripts/check-address-literals publishes as safe, so
+# .address-allowlist holds nothing for it. A change to what isolation allows, a deny of the
+# metadata address or Cilium's enforcement, changes this table in the same pull request, with its
+# reason.
+resolver	network	kubernetes.default.svc.cluster.local	53/udp	kube-system:k8s-app=kube-dns 53/udp	open	open	escape-canary-resolver lets every pod of the canary reach the cluster's resolver on 53, and kube-system, which is listed, takes every namespace there, so the name resolves in either mode
+metadata	network	169.254.169.254	80/tcp	@world 80/tcp	open	blocked	while Cilium audits it drops nothing a policy denies at layers 3 and 4, and the node masquerades the pod's connection to its own address, as Cilium's iptables masquerading excepts no link-local destination, so OpenStack's metadata service, which answers an instance at this address, takes it; once Cilium enforces, no policy of the canary lets it reach the world
+kubelet	network	node	10250/tcp	@host 10250/tcp	open	blocked	a pod reaches its own node by its pod address (ADR 0017), and the listener kubelet of talos/firewall.yaml admits pods, so the handshake completes while Cilium audits; once it enforces, no policy of the canary lets it reach the host
+talos-api	network	node	50000/tcp	@host 50000/tcp	blocked	blocked	the listener apid of talos/firewall.yaml admits operators, members, floating and cihost and not pods, and a node's ingress default action block drops whatever no rule admits, silently, so no answer comes while Cilium audits; once it enforces, no policy of the canary lets it reach the host either
+api-server	network	kubernetes.default.svc.cluster.local	443/tcp	@kube-apiserver 6443/tcp	open	blocked	the Service's 443 is translated to a control plane's 6443, which the listener kube-apiserver of talos/firewall.yaml admits from members and from pods, so the handshake completes while Cilium audits; once it enforces, no policy of the network pods lets them reach the API server
+hello	network	hello.demo.svc.cluster.local	80/tcp	demo/Deployment/hello 8080/tcp	open	blocked	the Service's 80 is translated to hello's pods on 8080, where they listen, so the handshake completes while Cilium audits; once it enforces, neither the canary's egress nor hello's ingress, the policy hello, lets it through
+secret-store	network	openbao.openbao.svc.cluster.local	8200/tcp	openbao/StatefulSet/openbao 8200/tcp	open	blocked	the Service's 8200 is translated to OpenBao's pods on 8200, where each listens sealed or not, as the Service publishes members that are not ready, so the handshake completes while Cilium audits; once it enforces, no policy of the canary lets it reach them
+read-secret	rights	-	-	@kube-apiserver 6443/tcp	forbidden	forbidden	escape-canary-rights-api-server lets the rights pods reach the API server in either mode, and its authorisation refuses get on a Secret of flux-system to an account that no binding of the tree names and that Kubernetes' own default bindings give no access to secrets
+list-pods	rights	-	-	@kube-apiserver 6443/tcp	forbidden	forbidden	escape-canary-rights-api-server lets the rights pods reach the API server in either mode, and its authorisation refuses list on pods of every namespace to an account that no binding of the tree names and that Kubernetes' own default bindings give no access to pods

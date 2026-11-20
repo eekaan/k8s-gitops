@@ -1,0 +1,48 @@
+---
+# Kyverno's own test of the sandbox-tier rule, run by tests/admission-policy.bats. Each resource is
+# named for what the rule must do with it: pass-, fail- or skip-, and a fail- case for what refuses
+# it, a tier (fail-<tier>-...) or a value that is no tier (fail-unknown-...), whose message the bats
+# test reads. A pod in a namespace without the label is not the rule's to judge, so the engine
+# excludes it, which the test reads as skip.
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: sandbox-tier
+policies:
+  - ../../../../kubernetes/apps/base/kyverno/kyverno-policies/app/sandbox-tier.yaml
+resources:
+  - resources.yaml
+variables: values.yaml
+results:
+  - policy: sandbox-tier
+    isValidatingPolicy: true
+    resources:
+      - pass-userns
+      - pass-gvisor
+      - pass-kata
+    result: pass
+  - policy: sandbox-tier
+    isValidatingPolicy: true
+    resources:
+      - fail-userns-unset
+      - fail-gvisor-unset
+      - fail-kata-unset
+      - fail-userns-true
+      - fail-gvisor-kata
+      - fail-kata-gvisor
+      - fail-gvisor-debug
+      - fail-kata-qemu
+      - fail-gvisor-userns
+      - fail-userns-gvisor
+      - fail-unknown-value
+      - fail-unknown-case
+      - fail-unknown-empty
+    result: fail
+  - policy: sandbox-tier
+    isValidatingPolicy: true
+    resources:
+      - skip-userns-unlabelled
+      - skip-gvisor-unlabelled
+      - skip-kata-unlabelled
+      - skip-unprefixed
+    result: skip

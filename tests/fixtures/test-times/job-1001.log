@@ -1,0 +1,59 @@
+﻿2026-11-19T08:15:28.9584339Z ##[group]Run just ci "$GROUP"
+2026-11-19T08:15:28.9584609Z [36;1mjust ci "$GROUP"[0m
+2026-11-19T08:15:28.9635933Z shell: /usr/bin/bash -e {0}
+2026-11-19T08:15:28.9636147Z env:
+2026-11-19T08:15:28.9636874Z   MISE_YES: 1
+2026-11-19T08:15:28.9637043Z   GROUP: tests-5
+2026-11-19T08:15:28.9637205Z ##[endgroup]
+2026-11-19T08:16:15.6336889Z [95m44  : [0m[90;2m┆ [0m[34mwithExec[0m bash -c 'exec 2>&1; just "$@"' bash test 5/6
+2026-11-19T08:16:15.6839431Z [95m45  : [0m[90;2m┆ [0mContainer.[1mstdout[0m[2m: String![0m
+2026-11-19T08:16:19.7343182Z [95m44  : [0m[90;2m┆ [0m[34mwithExec[0m bash -c 'exec 2>&1; just "$@"' bash test 5/6
+2026-11-19T08:16:19.7344042Z [95m44  : [0m[90;2m┆ [0m[90m[4.2s] [0m[90m|[0m 1..60
+2026-11-19T08:16:19.8840077Z [95m46  : [0m[90;2m┆ ┆ [0mtofu
+2026-11-19T08:16:19.8843544Z [95m46  : [0m[90;2m┆ ┆ [0mtofu[32m DONE[0m[90m [0.0s][0m
+2026-11-19T08:16:21.0339572Z [95m44  : [0m[90;2m┆ [0m[34mwithExec[0m bash -c 'exec 2>&1; just "$@"' bash test 5/6
+2026-11-19T08:16:21.0340441Z [95m44  : [0m[90;2m┆ [0m[90m[5.5s] [0m[90m|[0m ok 1 The age key is created once and never printed
+2026-11-19T08:16:21.0341824Z [95m44  : [0m[90;2m┆ [0m[90m[5.5s] [0m[90m|[0m ok 2 cluster-age-key refuses a key file inside the repository
+2026-11-19T08:16:21.0342957Z [95m44  : [0m[90;2m┆ [0m[90m[5.5s] [0m[90m|[0m ok 3 cluster-age-key leaves a talos/.sops.yaml naming another recipient alone
+2026-11-19T08:17:23.9844498Z [95m44  : [0m[90;2m┆ [0m[90m[1m8s] [0m[90m|[0m ok 59 With CI set, talman's output stays out of the log
+2026-11-19T08:17:43.0346016Z [95m44  : [0m[90;2m┆ [0m[90m[1m27s] [0m[90m|[0m ok 60 No cluster secret reaches a command line or the output
+2026-11-19T08:17:43.3112840Z [95m44  : [0m[90;2m┆ [0m[90m[1m28s] [0m[90m|[0m test: tests/cluster-recipes.bats took 83s
+2026-11-19T08:17:45.6929464Z [95m44  : [0m[90;2m┆ [0m[90m[1m30s] [0m[90m|[0m 1..9
+2026-11-19T08:17:48.8928856Z [95m44  : [0m[90;2m┆ [0m[90m[1m33s] [0m[90m|[0m ok 1 secret-rotate shows its plan and changes nothing until the path is typed back
+2026-11-19T08:17:52.0928007Z [95m44  : [0m[90;2m┆ [0m[90m[1m36s] [0m[90m|[0m ok 2 secret-rotate refuses a key that a new value would break, before it reaches the cluster
+2026-11-19T08:18:25.5403813Z [95m44  : [0m[90;2m┆ [0m[90m[2m10s] [0m[90m|[0m ok 3 secret-rotate refuses what it could not prove, before it writes anything
+2026-11-19T08:18:25.5404813Z [95m44  : [0m[90;2m┆ [0m[90m[2m10s] [0m[90m|[0m ok 4 secret-rotate writes a new value, has it refreshed, and proves that every pod is new and holds it
+2026-11-19T08:18:25.5405813Z [95m44  : [0m[90;2m┆ [0m[90m[2m10s] [0m[90m|[0m ok 5 secret-rotate prints neither the value nor a digest and puts neither on a command line
+2026-11-19T08:18:25.5406813Z [95m44  : [0m[90;2m┆ [0m[90m[2m10s] [0m[90m|[0m ok 6 A refresh that fails stops secret-rotate with the reason and with what the store now holds
+2026-11-19T08:18:25.5407813Z [95m44  : [0m[90;2m┆ [0m[90m[2m10s] [0m[90m|[0m ok 7 A restart that does not come, or a pod that holds another value, fails secret-rotate
+2026-11-19T08:18:25.5408813Z [95m44  : [0m[90;2m┆ [0m[90m[2m10s] [0m[90m|[0m ok 8 A second run of secret-rotate rotates again, also after a run that stopped half way
+2026-11-19T08:18:25.5409813Z [95m44  : [0m[90;2m┆ [0m[90m[2m10s] [0m[90m|[0m ok 9 secret-rotate takes its answer from a pipe whatever its tools read
+2026-11-19T08:18:26.0436944Z [95m44  : [0m[90;2m┆ [0m[90m[2m10s] [0m[90m|[0m test: tests/secret-rotate.bats took 43s
+2026-11-19T08:18:26.0910477Z [95m44  : [0m[90;2m┆ [0mContainer.[1mwithExec[0m[32m DONE[0m[90m [2m10s][0m
+2026-11-19T08:18:26.0926193Z [95m45  : [0m[90;2m┆ [0mContainer.[1mstdout[0m[32m DONE[0m[90m [0.0s, waited on bash -c exec 2>&1; just "$@" bash test 5/6][0m
+2026-11-19T08:18:26.0927319Z [95m15  : [0m[90;2m[0m[35mCi[0m.[1mchecks[0m[32m DONE[0m[90m [2m58s][0m
+2026-11-19T08:18:26.0927674Z 
+2026-11-19T08:18:26.0928473Z tools: built from the pins, as no tools image is given
+2026-11-19T08:18:26.0928866Z == tests-5: passed (test 5/6)
+2026-11-19T08:18:26.0929148Z 1..60
+2026-11-19T08:18:26.0929480Z ok 1 The age key is created once and never printed
+2026-11-19T08:18:26.0929529Z ok 2 cluster-age-key refuses a key file inside the repository
+2026-11-19T08:18:26.0929578Z ok 3 cluster-age-key leaves a talos/.sops.yaml naming another recipient alone
+2026-11-19T08:18:26.0929627Z ok 59 With CI set, talman's output stays out of the log
+2026-11-19T08:18:26.0929676Z ok 60 No cluster secret reaches a command line or the output
+2026-11-19T08:18:26.0929725Z test: tests/cluster-recipes.bats took 83s
+2026-11-19T08:18:26.0929774Z 1..9
+2026-11-19T08:18:26.0929823Z ok 1 secret-rotate shows its plan and changes nothing until the path is typed back
+2026-11-19T08:18:26.0929872Z ok 2 secret-rotate refuses a key that a new value would break, before it reaches the cluster
+2026-11-19T08:18:26.0929921Z ok 3 secret-rotate refuses what it could not prove, before it writes anything
+2026-11-19T08:18:26.0929970Z ok 4 secret-rotate writes a new value, has it refreshed, and proves that every pod is new and holds it
+2026-11-19T08:18:26.0930019Z ok 5 secret-rotate prints neither the value nor a digest and puts neither on a command line
+2026-11-19T08:18:26.0930068Z ok 6 A refresh that fails stops secret-rotate with the reason and with what the store now holds
+2026-11-19T08:18:26.0930117Z ok 7 A restart that does not come, or a pod that holds another value, fails secret-rotate
+2026-11-19T08:18:26.0930166Z ok 8 A second run of secret-rotate rotates again, also after a run that stopped half way
+2026-11-19T08:18:26.0930215Z ok 9 secret-rotate takes its answer from a pipe whatever its tools read
+2026-11-19T08:18:26.0930264Z test: tests/secret-rotate.bats took 43s
+2026-11-19T08:18:26.0930313Z 
+2026-11-19T08:18:26.0930362Z passed: tests-5
+2026-11-19T08:18:26.1301426Z Post job cleanup.
+2026-11-19T08:18:26.3006267Z Cleaning up orphan processes

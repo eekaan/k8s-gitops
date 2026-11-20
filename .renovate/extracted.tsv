@@ -36,7 +36,9 @@ infra/openstack/stacks/sto2/plumbing/versions.tf	terraform	hashicorp/terraform	-
 infra/openstack/stacks/sto2/plumbing/versions.tf	terraform	openstack	-
 infra/openstack/stacks/sto2/plumbing/versions.tf	terraform	talos	-
 justfile	regex	docker.io/timberio/vector	vector_image
+justfile	regex	ghcr.io/nvidia/openshell/sandbox	openshell_sandbox_image
 justfile	regex	ghcr.io/renovatebot/renovate	renovate_image
+justfile	regex	quay.io/cilium/cilium	cilium_agent_image
 justfile	regex	quay.io/prometheus/alertmanager	alertmanager_image
 kubernetes/apps/base/ai-system/n8n/app/ocirepository.yaml	flux	ghcr.io/bjw-s-labs/helm/app-template	tag
 kubernetes/apps/base/ai-system/n8n/app/ocirepository.yaml	regex	ghcr.io/bjw-s-labs/helm/app-template	tag
@@ -79,6 +81,8 @@ kubernetes/apps/base/envoy-gateway-system/envoy-gateway-crds/app/ocirepository.y
 kubernetes/apps/base/envoy-gateway-system/envoy-gateway-crds/app/ocirepository.yaml	regex	docker.io/envoyproxy/gateway-helm	tag
 kubernetes/apps/base/envoy-gateway-system/envoy-gateway/app/ocirepository.yaml	flux	docker.io/envoyproxy/gateway-helm	tag
 kubernetes/apps/base/envoy-gateway-system/envoy-gateway/app/ocirepository.yaml	regex	docker.io/envoyproxy/gateway-helm	tag
+kubernetes/apps/base/escape-canary/escape-canary/app/cronjob-network.yaml	kubernetes	docker.io/library/busybox	-
+kubernetes/apps/base/escape-canary/escape-canary/app/cronjob-rights.yaml	kubernetes	ghcr.io/fluxcd/flux-cli	-
 kubernetes/apps/base/etcd-snapshots/etcd-snapshots/app/cronjob.yaml	kubernetes	docker.io/rclone/rclone	-
 kubernetes/apps/base/etcd-snapshots/etcd-snapshots/app/cronjob.yaml	kubernetes	ghcr.io/siderolabs/talosctl	-
 kubernetes/apps/base/external-dns/external-dns/app/ocirepository.yaml	flux	ghcr.io/home-operations/charts-mirror/external-dns	tag
@@ -133,6 +137,8 @@ kubernetes/apps/base/monitoring/vector/app/ocirepository.yaml	flux	ghcr.io/vecto
 kubernetes/apps/base/monitoring/vector/app/ocirepository.yaml	regex	ghcr.io/vectordotdev/helm-charts/vector	tag
 kubernetes/apps/base/monitoring/victoria-logs/app/ocirepository.yaml	flux	ghcr.io/victoriametrics/helm-charts/victoria-logs-single	tag
 kubernetes/apps/base/monitoring/victoria-logs/app/ocirepository.yaml	regex	ghcr.io/victoriametrics/helm-charts/victoria-logs-single	tag
+kubernetes/apps/base/monitoring/vmauth/app/deployment.yaml	kubernetes	docker.io/victoriametrics/vmauth	-
+kubernetes/apps/base/monitoring/vmauth/app/deployment.yaml	regex	docker.io/victoriametrics/vmauth	image
 kubernetes/apps/base/open-feature-operator/open-feature-operator/app/ocirepository.yaml	flux	ghcr.io/open-feature/charts/open-feature-operator	tag
 kubernetes/apps/base/open-feature-operator/open-feature-operator/app/ocirepository.yaml	regex	ghcr.io/open-feature/charts/open-feature-operator	tag
 kubernetes/apps/base/open-feature-operator/open-feature-operator/app/values.yaml	regex	ghcr.io/open-feature/flagd	tag
@@ -146,6 +152,8 @@ kubernetes/apps/base/openbao/openbao/app/values.yaml	helm-values	ghcr.io/fluxcd/
 kubernetes/apps/base/openbao/openbao/app/values.yaml	regex	ghcr.io/fluxcd/flux-cli	image
 kubernetes/apps/base/piraeus-datastore/piraeus-operator/app/ocirepository.yaml	flux	ghcr.io/piraeusdatastore/piraeus-operator/piraeus	tag
 kubernetes/apps/base/piraeus-datastore/piraeus-operator/app/ocirepository.yaml	regex	ghcr.io/piraeusdatastore/piraeus-operator/piraeus	tag
+kubernetes/apps/base/robot/robot/app/cronjob.yaml	kubernetes	docker.io/marketsquare/robotframework-browser	-
+kubernetes/apps/base/robot/robot/app/deployment-reports.yaml	kubernetes	docker.io/library/busybox	-
 kubernetes/apps/base/security-system/falco/app/ocirepository.yaml	flux	ghcr.io/falcosecurity/charts/falco	tag
 kubernetes/apps/base/security-system/falco/app/ocirepository.yaml	regex	ghcr.io/falcosecurity/charts/falco	tag
 kubernetes/apps/base/security-system/falco/app/values.yaml	regex	docker.io/falcosecurity/falco	tag

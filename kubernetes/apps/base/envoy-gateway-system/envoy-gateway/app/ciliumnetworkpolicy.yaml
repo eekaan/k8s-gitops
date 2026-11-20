@@ -352,17 +352,29 @@ spec:
         - ports:
             - port: "8052"
               protocol: TCP
-    # VictoriaLogs' 9428 in monitoring, for the route logs to the store's interface and queries.
+    # vmauth's 8427 in monitoring, for the route logs to the store's interface and queries, which
+    # vmauth admits with the route's own credential and forwards to the store with the store's.
     # monitoring is listed and takes the proxies on every port, so this rule is what keeps them off
-    # Prometheus, Grafana, Alertmanager and every other pod and port there.
+    # vmauth's internal port, the store, Prometheus, Grafana, Alertmanager and every other pod and
+    # port there.
     - toEndpoints:
         - matchLabels:
             "k8s:io.kubernetes.pod.namespace": monitoring
             "k8s:io.cilium.k8s.namespace.labels.k8s-gitops/gateway": public
-            app: server
-            app.kubernetes.io/instance: victoria-logs
-            app.kubernetes.io/name: victoria-logs-single
+            app.kubernetes.io/name: vmauth
       toPorts:
         - ports:
-            - port: "9428"
+            - port: "8427"
+              protocol: TCP
+    # Locust's master's 8089 in locust, for the route locust to its interface: the master's pods
+    # alone, on the web port, not the port the workers connect to, and no worker.
+    - toEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": locust
+            "k8s:io.cilium.k8s.namespace.labels.k8s-gitops/gateway": public
+            app.kubernetes.io/name: locust
+            app.kubernetes.io/component: master
+      toPorts:
+        - ports:
+            - port: "8089"
               protocol: TCP

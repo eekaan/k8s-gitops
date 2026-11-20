@@ -18,5 +18,6 @@ spec:
   owner: group:default/operators
   system: storage
   dependsOn:
+    - component:default/cert-manager
     - component:default/piraeus-operator
     - component:default/snapshot-controller

@@ -374,7 +374,7 @@ real_render() {
   local workload
   for workload in kube-system/Deployment/descheduler kube-system/Deployment/reloader-reloader kube-system/Deployment/reflector \
     kube-system/Pod/vpa-test-crds-available kube-system/Pod/vpa-test-create-vpa kube-system/Pod/vpa-test-metrics-api-available \
-    monitoring/Deployment/grafana-operator monitoring/StatefulSet/victoria-logs \
+    monitoring/Deployment/grafana-operator monitoring/StatefulSet/victoria-logs monitoring/Deployment/vmauth \
     piraeus-datastore/Deployment/piraeus-operator-controller-manager; do
     [[ $output == *"$workload restricted"* ]] || { echo "$workload does not pass restricted"; return 1; }
   done
@@ -480,6 +480,162 @@ real_render() {
   done
   printf '%s\n' "${problems[@]}"
   [ "${#problems[@]}" -eq 0 ]
+}
+
+# isolate FILE ISOLATION: gives the pod template of the workload in FILE the isolation ISOLATION:
+# userns sets hostUsers to false, gvisor or kata sets that runtime class, hostUsers=true and
+# runtimeClassName=CLASS set those, and none takes both fields away.
+isolate() {
+  local spec
+  case "$(yq '.kind' "$1")" in
+    CronJob) spec=.spec.jobTemplate.spec.template.spec ;;
+    Pod) spec=.spec ;;
+    *) spec=.spec.template.spec ;;
+  esac
+  yq -i "del($spec.hostUsers, $spec.runtimeClassName)" "$1"
+  case $2 in
+    userns) yq -i "$spec.hostUsers = false" "$1" ;;
+    hostUsers=true) yq -i "$spec.hostUsers = true" "$1" ;;
+    gvisor | kata) yq -i "$spec.runtimeClassName = \"$2\"" "$1" ;;
+    runtimeClassName=*) C="${2#runtimeClassName=}" yq -i "$spec.runtimeClassName = strenv(C)" "$1" ;;
+    none) ;;
+    *) echo "isolate: no isolation $2"; return 1 ;;
+  esac
+}
+
+# sandbox NAME TIER: labels the namespace web of the tree NAME with the sandbox tier TIER, and every
+# workload in it gets the isolation TIER asks for.
+sandbox() {
+  local file
+  T="$2" yq -i '.metadata.labels["k8s-gitops/sandbox"] = strenv(T)' "$(object "$1" Namespace__web.yaml)"
+  for file in "$(dirname "$(object "$1" Namespace__web.yaml)")"/*.yaml; do
+    case "$(yq '.kind' "$file")" in
+      Pod | Deployment | StatefulSet | DaemonSet | ReplicaSet | ReplicationController | Job | CronJob) isolate "$file" "$2" ;;
+    esac
+  done
+}
+
+@test "A pod template in a sandbox namespace without its tier's isolation is refused" {
+  local tier entry file isolation workload want ns pool
+  # A runtime tier names its class exactly, so a class that only starts with its name is refused.
+  local -A cases=(
+    [userns]="CronJob.batch_web_nightly.yaml:none Deployment.apps_web_site.yaml:hostUsers=true ReplicaSet.apps_web_worker.yaml:gvisor
+      StatefulSet.apps_web_db.yaml:none Pod__web_bare.yaml:kata"
+    [gvisor]="CronJob.batch_web_nightly.yaml:none Deployment.apps_web_site.yaml:kata Job.batch_web_site-migrate.yaml:userns
+      ReplicaSet.apps_web_worker.yaml:runtimeClassName=gvisor-debug StatefulSet.apps_web_db.yaml:userns Pod__web_bare.yaml:none"
+    [kata]="CronJob.batch_web_nightly.yaml:none Deployment.apps_web_site.yaml:gvisor ReplicationController__web_pool.yaml:userns
+      Job.batch_web_site-migrate.yaml:runtimeClassName=kata-qemu StatefulSet.apps_web_db.yaml:gvisor Pod__web_bare.yaml:hostUsers=true"
+  )
+  for tier in userns gvisor kata; do
+    # Every workload of web meets the tier: the check passes, and only web's line names a tier.
+    rm -rf "$BATS_TEST_TMPDIR/tier"
+    tree tier
+    # web also gets a StatefulSet and a bare pod, of pool's template, so that every kind a pod comes
+    # from is among the cases.
+    pool="$(object tier ReplicationController__web_pool.yaml)"
+    yq '.apiVersion = "apps/v1" | .kind = "StatefulSet" | .metadata.name = "db" | .spec.serviceName = "db"
+      | .spec.selector = {"matchLabels": {"app": "db"}} | .spec.template.metadata.labels.app = "db"' "$pool" \
+      >"$(dirname "$pool")/StatefulSet.apps_web_db.yaml"
+    yq '{"apiVersion": "v1", "kind": "Pod", "metadata": {"name": "bare", "namespace": "web"}, "spec": .spec.template.spec}' "$pool" \
+      >"$(dirname "$pool")/Pod__web_bare.yaml"
+    sandbox tier "$tier"
+    check tier
+    echo "$output"
+    [ "$status" -eq 0 ]
+    grep -qx "web restricted 7 workloads, 0 listed, sandbox $tier" <<<"$output"
+    grep -qx 'legacy baseline 1 workloads, 1 listed' <<<"$output"
+    grep -qx 'agents privileged 2 workloads, 2 listed' <<<"$output"
+    [ "$(grep -c sandbox <<<"$output")" -eq 1 ]
+    want="runtimeClassName: $tier"
+    [ "$tier" != userns ] || want="hostUsers: false"
+    # One workload without the tier's isolation, or with another tier's, is refused by name, and no
+    # other workload is.
+    for entry in ${cases[$tier]}; do
+      file=${entry%%:*}
+      isolation=${entry#*:}
+      rm -rf "$BATS_TEST_TMPDIR/refused"
+      cp -R "$BATS_TEST_TMPDIR/tier" "$BATS_TEST_TMPDIR/refused"
+      isolate "$(object refused "$file")" "$isolation"
+      workload="$(yq '.kind + "/" + .metadata.name' "$(object refused "$file")")"
+      check refused
+      echo "$tier, $workload $isolation: $output"
+      [ "$status" -eq 1 ]
+      [[ $output == *"pod-security-check: namespace web is of the $tier sandbox tier, but $workload does not set $want"* ]]
+      [ "$(grep -c 'sandbox tier' <<<"$output")" -eq 1 ]
+    done
+    # The exceptions file lists levels, not tiers: in legacy and agents, labelled with the tier and
+    # their workloads left without it, the two the file lists are refused by name as the one it
+    # does not list is.
+    rm -rf "$BATS_TEST_TMPDIR/listed"
+    tree listed
+    for ns in legacy agents; do
+      T="$tier" yq -i '.metadata.labels["k8s-gitops/sandbox"] = strenv(T)' "$(object listed "Namespace__$ns.yaml")"
+    done
+    check listed
+    echo "$tier, legacy and agents: $output"
+    [ "$status" -eq 1 ]
+    for workload in "legacy Deployment/ledger" "agents DaemonSet/collector" "agents Deployment/console"; do
+      [[ $output == *"pod-security-check: namespace ${workload%% *} is of the $tier sandbox tier, but ${workload#* } does not set $want"* ]]
+    done
+    [ "$(grep -c '^pod-security-check: ' <<<"$output")" -eq 3 ]
+  done
+}
+
+@test "A sandbox namespace with an unknown tier is refused" {
+  local value shown
+  for value in firecracker Gvisor ""; do
+    rm -rf "$BATS_TEST_TMPDIR/unknown"
+    tree unknown
+    # web's workloads meet gvisor, and idle has no workload.
+    sandbox unknown gvisor
+    V="$value" yq -i '.metadata.labels["k8s-gitops/sandbox"] = strenv(V)' "$(object unknown Namespace__web.yaml)"
+    mkdir -p "$BATS_TEST_TMPDIR/unknown/render/lab/idle"
+    V="$value" yq -n '{"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": "idle",
+      "labels": {"pod-security.kubernetes.io/enforce": "restricted", "k8s-gitops/sandbox": strenv(V)}}}' \
+      >"$BATS_TEST_TMPDIR/unknown/render/lab/idle/Namespace__idle.yaml"
+    check unknown
+    echo "$output"
+    [ "$status" -eq 1 ]
+    shown=${value:-'""'}
+    [[ $output == *"pod-security-check: namespace web carries k8s-gitops/sandbox $shown, which is not userns, gvisor or kata"* ]]
+    [[ $output == *"pod-security-check: namespace idle carries k8s-gitops/sandbox $shown, which is not userns, gvisor or kata"* ]]
+    [ "$(grep -c '^pod-security-check: ' <<<"$output")" -eq 2 ]
+  done
+}
+
+@test "A sandbox namespace that holds a VolSync or CloudNativePG resource is refused" {
+  local dir
+  tree operators
+  sandbox operators kata
+  dir="$(dirname "$(object operators Namespace__web.yaml)")"
+  # The objects of components/volsync and components/cnpg-cluster that make an operator create pods.
+  yq -n '{"apiVersion": "volsync.backube/v1alpha1", "kind": "ReplicationSource", "metadata": {"name": "site", "namespace": "web"},
+    "spec": {"sourcePVC": "site", "restic": {"repository": "site-volsync"}}}' >"$dir/ReplicationSource.volsync.backube_web_site.yaml"
+  yq -n '{"apiVersion": "volsync.backube/v1alpha1", "kind": "ReplicationDestination", "metadata": {"name": "site-restore", "namespace": "web"},
+    "spec": {"trigger": {"manual": "restore"}, "restic": {"repository": "site-volsync"}}}' >"$dir/ReplicationDestination.volsync.backube_web_site-restore.yaml"
+  yq -n '{"apiVersion": "postgresql.cnpg.io/v1", "kind": "Cluster", "metadata": {"name": "site-db", "namespace": "web"},
+    "spec": {"instances": 1}}' >"$dir/Cluster.postgresql.cnpg.io_web_site-db.yaml"
+  # One a chart makes, with no namespace of its own: it is installed into its release's, which
+  # helm-controller's labels name through the HelmRelease.
+  yq -n '{"apiVersion": "helm.toolkit.fluxcd.io/v2", "kind": "HelmRelease", "metadata": {"name": "site", "namespace": "web"},
+    "spec": {"chartRef": {"kind": "OCIRepository", "name": "site"}}}' >"$dir/HelmRelease.helm.toolkit.fluxcd.io_web_site.yaml"
+  yq -n '{"apiVersion": "volsync.backube/v1alpha1", "kind": "ReplicationSource", "metadata": {"name": "chart-backup",
+      "labels": {"helm.toolkit.fluxcd.io/name": "site", "helm.toolkit.fluxcd.io/namespace": "web"}},
+    "spec": {"sourcePVC": "site", "restic": {"repository": "site-volsync"}}}' >"$dir/ReplicationSource.volsync.backube_chart-backup.yaml"
+  check operators
+  echo "$output"
+  [ "$status" -eq 1 ]
+  [[ $output == *"pod-security-check: namespace web is of the kata sandbox tier, but ReplicationSource/site makes pods its operator gives no tier (components/volsync)"* ]]
+  [[ $output == *"pod-security-check: namespace web is of the kata sandbox tier, but ReplicationDestination/site-restore makes pods its operator gives no tier (components/volsync)"* ]]
+  [[ $output == *"pod-security-check: namespace web is of the kata sandbox tier, but Cluster/site-db makes pods its operator gives no tier (components/cnpg-cluster)"* ]]
+  [[ $output == *"pod-security-check: namespace web is of the kata sandbox tier, but ReplicationSource/chart-backup makes pods its operator gives no tier (components/volsync)"* ]]
+  [ "$(grep -c '^pod-security-check: ' <<<"$output")" -eq 4 ]
+  # The same objects in a namespace of no tier are no concern of the tiers.
+  yq -i 'del(.metadata.labels["k8s-gitops/sandbox"])' "$(object operators Namespace__web.yaml)"
+  check operators
+  echo "$output"
+  [ "$status" -eq 0 ]
+  grep -qx 'web restricted 5 workloads, 0 listed' <<<"$output"
 }
 
 @test "The tree passes" {

@@ -1,10 +1,12 @@
 Feature: Storage
-  A PersistentVolumeClaim gets a volume from Git alone: LINSTOR, run by the Piraeus operator under Flux on the workers' data volumes, replicates it on two workers by default, keeps it on the pod's node on request, and takes snapshots of it.
+  A PersistentVolumeClaim gets a volume from Git alone: LINSTOR, run by the Piraeus operator under Flux on the workers' data volumes, replicates it on two workers by default, keeps it on the pod's node on request, and takes snapshots of it. LINSTOR's controller takes an API request only from a caller that presents a certificate the storage cluster's own API authority signed, which the operator issues to itself and to each of its components that calls the API, and keeps serving its metrics to the scrape. A satellite takes commands only from a holder of the controller's internal certificate, over TLS on 3367, where each side presents a certificate of the storage cluster's internal authority, which signs those two sides' certificates alone and is not the API's. The satellites run in their node's network namespace, so DRBD replicates between the nodes' own addresses, which every node's firewall admits, on connections that stay up while a satellite pod is replaced.
+
+  Two scenarios need a docker daemon, which the CI containers do not have: "The pinned LINSTOR controller refuses an API request without its authority's client certificate and keeps serving its metrics" and "The pinned LINSTOR satellite refuses a connection without a certificate from its own authority". Their proofs run the controller and a satellite from the image the pinned chart's image list names, without network, without a capability, as a user that is not root and on a read-only root, with the configuration the operator writes for each, and remove the container with what it made. The satellite's proves the TLS layer of its connector as the operator configures it: who completes a handshake on 3367, and that nothing answers on 3366. It does not prove LINSTOR's protocol over the link, the controller's own check of the satellite's certificate or the operator's registration of the node: "The LINSTOR controller and every satellite accept only each other's certificates" reads from the operator's source the authority the controller checks with and the registration, and a satellite shown Online at 3367 (SSL) on the cluster shows the rest. Both run with the other proofs of tests/storage.bats wherever a docker daemon answers, on a developer's machine or an agent's, and skip, saying why, where none does, as under just ci and in CI, which run every other proof.
 
   Scenario: The storage applications are enabled and wait for what they need
     Given the cluster's overlay
     When it is built as Flux applies it
-    Then it enables snapshot-controller, piraeus-operator and linstor-cluster, each builds with Flux's strict substitution, the first two are Ready only once what they install is, linstor-cluster waits for both and is Ready only once the operator reports the storage cluster Available and every satellite configuration Applied, and the namespace admits the satellites' privileged pods
+    Then it enables snapshot-controller, piraeus-operator and linstor-cluster, each builds with Flux's strict substitution, the first two are Ready only once what they install is, linstor-cluster waits for both and for cert-manager, whose issuers sign its certificates, and is Ready only once the operator reports the storage cluster Available and every satellite configuration Applied, and the namespace admits the satellites' privileged pods
 
   Scenario: The storage cluster's Kustomization waits long enough for a first install
     Given the cluster's overlay
@@ -15,6 +17,16 @@ Feature: Storage
     Given the operator's satellite DaemonSet at the version the pinned chart runs, and the nodes' machine configurations rendered offline
     When the satellite configuration is applied to it as the operator applies it
     Then no init container loads a kernel module or installs the shutdown guard, no systemd path is mounted, LVM's configuration comes from the ConfigMap that keeps backups and archives, written under /var/etc/lvm, and LINSTOR runs only on nodes without the control-plane role label, which Talos gives every control plane and no worker, without naming a node
+
+  Scenario: Satellites run in their node's network namespace and register the node's address
+    Given linstor-cluster as Flux applies it, and the operator's satellite DaemonSet and source at the version the pinned chart runs
+    When every satellite configuration is applied to the DaemonSet as the operator applies it
+    Then the satellite's pod is on the host network and keeps the default DNS policy, set by one configuration that selects every satellite and sets nothing else, no container of the pod names the controller's address or a cluster name, and the operator at that version registers each node's interface default-ipv4 from the ready pod's addresses, which on the host network are the node's own, modifying an existing interface of that name in place and deleting neither it nor the node
+
+  Scenario: Every node admits the satellites, DRBD's replication and the DRBD reactor from those who use them
+    Given the satellite's pod as the operator's DaemonSet at the version the pinned chart runs and every satellite configuration of linstor-cluster make it, the nodes' firewall inventory, and linstor-cluster as Flux applies it
+    When the ports the pod declares and LINSTOR's DRBD port range are read
+    Then each port the pod's containers and init containers declare, LINSTOR's satellite port 3367, over TLS, and the DRBD reactor's 9942, is admitted by exactly one rule of the inventory, a TCP rule every node has, over 3366-3367 for the satellite, as the operator registers a satellite on either, and over 9942 alone for the reactor, that accepts the nodes' own addresses and the pod range and nothing else; LINSTOR's default DRBD port range, 7000-7999, is the ports of exactly one rule, a TCP rule every node has that accepts the nodes' own addresses alone, and no other TCP rule admits a port of it; and no file under kubernetes/ sets TcpPortAutoRange or PrefNic, so nothing in the tree moves LINSTOR's range or its choice of interface
 
   Scenario: Each worker's data device is an LVM-thin storage pool
     Given the satellite configuration and the workers' machine configurations rendered offline
@@ -36,7 +48,32 @@ Feature: Storage
     When the source is built offline as its Kustomizations apply it
     Then it yields the snapshot.storage.k8s.io definitions and, once they are established, the snapshot controller in kube-system, and the one VolumeSnapshotClass, the default, names LINSTOR's driver and deletes a snapshot with its object
 
+  Scenario: No update of the Piraeus operator or the storage cluster merges itself
+    Given Renovate's rules of what merges itself and the record of what it extracts
+    When the rules after the auto-merge switch and the files Renovate reads the operator's chart from are read
+    Then one rule after the switch, so that it wins over it whatever the switch says, holds back every file under kubernetes/apps/base/piraeus-datastore/ and holds nothing that narrows what it matches, no rule after the switch turns merging on again, and every pin of the operator's chart that Renovate reads is in one of those files
+
   Scenario: The storage resource definitions are never deleted with their applications
     Given the pinned operator chart rendered with the repository's values, and the snapshot-controller application
     When their objects and Kustomizations are read
     Then no application applies a definition itself, Helm keeps every definition of the operator's release, and the snapshot definitions are neither pruned nor deleted with their Kustomization
+
+  Scenario: Only holders of a certificate from the storage cluster's API authority call LINSTOR's API
+    Given linstor-cluster as Flux applies it and the operator's source at the version the pinned chart runs
+    When the storage cluster's TLS settings and the issuers they name are read
+    Then apiTLS names by cert-manager an Issuer of the same build in the operator's namespace, of kind CA, signing from the Secret of an isCA Certificate that the build's self-signed Issuer issues, which signs authorities alone, with no Secret name or CA reference overridden, linstor-cluster names cert-manager in dependsOn, and every component of the operator that dials the controller, the operator itself and the CLI in the controller's pod included, gets a client certificate from that issuer and dials HTTPS at a name the API's certificate holds
+
+  Scenario: The pinned LINSTOR controller refuses an API request without its authority's client certificate and keeps serving its metrics
+    Given the controller image the pinned chart's image list names, and the HTTPS and client configuration the operator writes for apiTLS at the version the chart runs
+    When the controller runs offline as its pod runs it, with its certificates made as the build's issuers make them, and is called from inside its container
+    Then over HTTPS a request without a client certificate, or with one another authority of the same name signed, fails the handshake, and one with the API authority's answers the version; over plain HTTP a request for the API answers no version and is redirected to the HTTPS port, and one that would create a resource definition creates none, while the metrics answer with LINSTOR's series and the health check answers 200; and the CLI in the container reaches the API with the client configuration the operator writes
+
+  Scenario: The LINSTOR controller and every satellite accept only each other's certificates
+    Given linstor-cluster as Flux applies it and the operator's source at the version the pinned chart runs
+    When the storage cluster's internal TLS settings, the issuer they name and the operator's wiring of the controller and the satellites are read
+    Then the LinstorCluster and the one configuration that sets internalTLS, which selects every satellite, name by cert-manager the same Issuer of the build in the operator's namespace, of kind CA, signing from the Secret of an isCA Certificate the build's self-signed Issuer issues, which is not the API's authority; the operator at that version asks that issuer for the controller's client certificate and each satellite's server certificate, mounts each with its own Secret's authority as the truststore, configures the satellite's one connector as TLS on 3367 and registers each satellite as SSL on 3367; and no podTemplate or patch of the build writes over that wiring
+
+  Scenario: The pinned LINSTOR satellite refuses a connection without a certificate from its own authority
+    Given the satellite image the pinned chart's image list names and the configuration the operator writes for internalTLS at the version the chart runs
+    When the satellite runs offline as its pod runs it, with its certificates made as the build's issuers make them, and is called from inside its container
+    Then its truststore holds the internal authority alone; a TLS handshake on 3367 without a client certificate, with the API authority's client certificate, or with a controller's certificate another authority of the same name signed fails, and one with the controller's certificate from the internal authority completes and verifies the satellite's certificate against that authority; and nothing answers on 3366

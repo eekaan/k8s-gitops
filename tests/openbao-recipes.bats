@@ -25,6 +25,13 @@ setup() {
   REPO=$(cd "$BATS_TEST_TMPDIR/repo" && pwd)
   cp -R "$ROOT/scripts" "$REPO/scripts"
   cp "$ROOT/talos/.sops.yaml" "$REPO/talos/.sops.yaml"
+  # The values whose seal stanza names the seal keys' ids, which the recipes read from their
+  # checkout; the fake cluster's servers run the same stanza until a test makes them differ.
+  VALUES="$REPO/kubernetes/apps/base/openbao/openbao/app/values.yaml"
+  mkdir -p "${VALUES%/*}"
+  cp "$ROOT/kubernetes/apps/base/openbao/openbao/app/values.yaml" "$VALUES"
+  # The key the fake cluster's Secret openbao-seal-1 holds where no test wrote that Secret.
+  RUNNING_SEAL=5ea15ea15ea15ea15ea15ea15ea15ea15ea15ea15ea15ea15ea15ea15ea15ea1
   # The kubeconfig the recipes point kubectl at; the fake reads none.
   : >"$REPO/talos/lab-sto2/clusterconfig/kubeconfig"
   # The Talos age key, a throwaway one; its recipient is what talos/.sops.yaml names.
@@ -55,6 +62,7 @@ if [[ \$0 == *scripts/bao-* ]]; then
 fi
 EOF
   fake_cluster
+  running_config
 }
 
 teardown() {
@@ -200,6 +208,52 @@ custody_file() {
     age --encrypt --recipient "$RECIPIENT" --output "$CUSTODY"
 }
 
+# rotated_custody_file CURRENT PREVIOUS FILE: writes a custody file at FILE as bao-seal-keep writes it
+# after the rotation rotated makes: the five marker shares, the current key CURRENT of openbao-seal-2
+# as its seal and the previous key PREVIOUS of openbao-seal-1 as its previous_seal, encrypted to the
+# Talos age key.
+# shellcheck disable=SC2016 # $current and $previous are jq variables.
+rotated_custody_file() {
+  "$JQ" -n --arg current "$1" --arg previous "$2" '{cluster: "lab-sto2", created: "2026-11-19T00:00:00Z",
+    recovery: {shares: 5, threshold: 3, keys_base64: [range(5) | "marker-recovery-share-\(. + 1)" | @base64]},
+    seal: {secret: "openbao-seal-2", key_id: "openbao-seal-2", key: $current},
+    previous_seal: {secret: "openbao-seal-1", key_id: "openbao-seal-1", key: $previous}}' |
+    age --encrypt --recipient "$RECIPIENT" --output "$3"
+}
+
+# running_config [FILE]: the ConfigMap openbao-config of the fake cluster, holding the server
+# configuration of FILE, the copy's values.yaml as it is now by default, as the chart renders it there
+# for the servers to run.
+running_config() {
+  yq -o json '{"metadata": {"name": "openbao-config", "namespace": "openbao"},
+    "data": {"extraconfig-from-values.hcl": .server.ha.raft.config}}' "${1:-$VALUES}" >"$STATE/configmap"
+}
+
+# rotated: the copy's tree after the seal-key rotation docs/runbooks/openbao.md describes, which the
+# fake cluster's servers run too: extraVolumes mounts openbao-seal-2 beside openbao-seal-1, and the
+# seal stanza's current key is openbao-seal-2 and its previous key openbao-seal-1. The values from
+# before it are kept for servers_before_rotation.
+rotated() {
+  cp "$VALUES" "$BATS_TEST_TMPDIR/values-before-rotation.yaml"
+  yq -i '.server.ha.raft.config |= sub("seal \"static\" \\{[^}]*\\}"; "seal \"static\" {\n  current_key_id = \"openbao-seal-2\"\n  current_key = \"file:///openbao/userconfig/openbao-seal-2/key\"\n  previous_key_id = \"openbao-seal-1\"\n  previous_key = \"file:///openbao/userconfig/openbao-seal-1/key\"\n}")
+    | .server.extraVolumes = [{"type": "secret", "name": "openbao-seal-2"}] + .server.extraVolumes' "$VALUES"
+  grep -qx '  previous_key_id = "openbao-seal-1"' <(yq '.server.ha.raft.config' "$VALUES")
+  running_config
+}
+
+# servers_before_rotation: the fake cluster's servers run the stanza of the copy before rotated
+# changed it, openbao-seal-1 alone, as before the rotation's pull request is applied.
+servers_before_rotation() {
+  running_config "$BATS_TEST_TMPDIR/values-before-rotation.yaml"
+}
+
+# seal_state: the fake cluster's seal Secrets and what it created or deleted of them, and the custody
+# files, each by its name and digest, to compare a run's end with its start.
+seal_state() {
+  (cd "$STATE" && find . -maxdepth 1 -type f -name 'seal-*' -exec sha256sum {} + | sort -k2)
+  (cd "$BATS_TEST_TMPDIR/custody" && find . -type f -exec sha256sum {} + | sort -k2)
+}
+
 # absent TEXT FILE...: fails when any FILE holds TEXT.
 absent() {
   local text=$1
@@ -249,15 +303,30 @@ forwards_closed() {
 #   root-revoke-fails, orphan-revoke-fails
 #                     OpenBao fails to revoke the root token, or the orphan token
 #   events            what happened to the root and orphan tokens, and the command, in order
-#   seal-secret       the Secret openbao-seal-1 as JSON; absent when the file is
+#   seal-secret       the Secret openbao-seal-1 as JSON; absent when the file is, except to a read
+#                     without --ignore-not-found, as bao-recovery reads it from a running cluster,
+#                     which then finds it holding the key RUNNING_SEAL
+#   seal-secret.<id>  the Secret <id> of another seal key, as JSON; absent when the file is
+#   seal-created, seal-deleted, seal-created.<id>, seal-deleted.<id>
+#                     what kubectl created of the Secret openbao-seal-1 or <id>, and that it deleted it
+#   configmap         the ConfigMap openbao-config, whose server configuration the servers run, as
+#                     JSON; absent when the file is
 #   kv/<path>.json    the data of a secret at <path> in the key-value mount
 #   outfile           the custody file, which must exist when the rotation is verified
 # Every request is appended to $RECORD/requests as one JSON object: its method, path, body, the
 # token header and whether it reached OpenBao by its certificate's name and verified it against
 # OpenBao's CA.
 fake_cluster() {
-  fake_tool kubectl <<'EOF'
+  { printf 'RUNNING_SEAL=%q\n' "$RUNNING_SEAL"; cat; } <<'EOF' | fake_tool kubectl
 printf '%s\n' "kubectl $*" >> "$RECORD/argv"
+# seal_file ID WHAT: the state file of the seal Secret ID: WHAT is secret, created or deleted.
+seal_file() {
+  if [[ $1 == openbao-seal-1 ]]; then printf '%s' "$STATE/seal-$2"; else printf '%s' "$STATE/seal-$2.$1"; fi
+}
+# The name of a Secret the call names, after the verb and the kind.
+name=" $* "
+name=${name#* secret }
+name=${name%% *}
 case " $* " in
   *" port-forward "*)
     if [[ -e $STATE/no-forward ]]; then
@@ -281,21 +350,37 @@ case " $* " in
   *" get secret openbao-ca "*)
     printf -- '-----BEGIN CERTIFICATE-----\nmarker-ca\n-----END CERTIFICATE-----\n' | base64 -w0
     ;;
-  *" get secret openbao-seal-1 "*" --ignore-not-found "*)
-    cat "$STATE/seal-secret" 2> /dev/null || true
+  *" get configmap openbao-config "*)
+    if [[ -f $STATE/configmap ]]; then
+      cat "$STATE/configmap"
+    elif [[ " $* " != *" --ignore-not-found "* ]]; then
+      echo 'Error from server (NotFound): configmaps "openbao-config" not found' >&2
+      exit 1
+    fi
     ;;
-  *" get secret openbao-seal-1 "*)
-    "$JQ" -n --arg key "$(printf marker-seal-key | base64 -w0)" '{data: {key: $key}}'
+  *" get secret openbao-seal-"*)
+    if [[ -f $(seal_file "$name" secret) ]]; then
+      cat "$(seal_file "$name" secret)"
+    elif [[ " $* " == *" --ignore-not-found "* ]]; then
+      :
+    elif [[ $name == openbao-seal-1 ]]; then
+      "$JQ" -n --arg key "$(printf %s "$RUNNING_SEAL" | base64 -w0)" \
+        '{metadata: {name: "openbao-seal-1", namespace: "openbao"}, data: {key: $key}}'
+    else
+      echo "Error from server (NotFound): secrets \"$name\" not found" >&2
+      exit 1
+    fi
     ;;
-  *" delete secret openbao-seal-1 "*)
-    rm "$STATE/seal-secret"
-    : > "$STATE/seal-deleted"
+  *" delete secret openbao-seal-"*)
+    rm "$(seal_file "$name" secret)"
+    : > "$(seal_file "$name" deleted)"
     ;;
   *" create "*"--filename -"*)
     created=$(cat)
-    [[ ! -e $STATE/seal-secret ]] || { echo 'Error from server (AlreadyExists)' >&2; exit 1; }
-    printf '%s\n' "$created" > "$STATE/seal-secret"
-    printf '%s\n' "$created" > "$STATE/seal-created"
+    name=$("$JQ" -r '.metadata.name' <<< "$created")
+    [[ ! -e $(seal_file "$name" secret) ]] || { echo 'Error from server (AlreadyExists)' >&2; exit 1; }
+    printf '%s\n' "$created" > "$(seal_file "$name" secret)"
+    printf '%s\n' "$created" > "$(seal_file "$name" created)"
     ;;
   *)
     echo "fake kubectl: unexpected kubectl $*" >&2
@@ -713,14 +798,14 @@ no_controls() {
   [ "$("$JQ" -r '.recovery.keys_base64 | map(@base64d) | join(" ")' <<<"$plain")" = \
     'marker-recovery-share-1 marker-recovery-share-2 marker-recovery-share-3 marker-recovery-share-4 marker-recovery-share-5' ]
   [ "$("$JQ" -r '.recovery.threshold' <<<"$plain")" = 3 ]
-  [ "$("$JQ" -r '.seal.secret + " " + .seal.key' <<<"$plain")" = 'openbao-seal-1 marker-seal-key' ]
+  [ "$("$JQ" -r '.seal.secret + " " + .seal.key' <<<"$plain")" = "openbao-seal-1 $RUNNING_SEAL" ]
   [ "$(stat -c %a "$CUSTODY")" = 600 ]
   # Generated with verification, and committed only once the file was written.
   [ "$(requests_of POST sys/rotate/recovery/init | "$JQ" -r '.require_verification')" = true ]
   [ -e "$STATE/committed-after-write" ]
   [ "$(cat "$STATE/recovery-shares")" = 5 ]
   # Nothing of them is printed or on a command line.
-  for secret in marker-recovery-share- bWFya2VyLXJlY292ZXJ5 marker-seal-key bWFya2VyLXNlYWwta2V5 \
+  for secret in marker-recovery-share- bWFya2VyLXJlY292ZXJ5 "$RUNNING_SEAL" "$(printf %s "$RUNNING_SEAL" | base64 -w0)" \
     marker-service-account-jwt marker-bao-token marker-verification-nonce; do
     [[ $output != *"$secret"* ]] || { echo "$secret in the output"; return 1; }
     absent "$secret" "$RECORD/argv"
@@ -861,7 +946,7 @@ LN
   [ ! -e "$STATE/recovery-shares" ]
   [ ! -e "$CUSTODY" ]
   [ -e "$STATE/cancelled" ]
-  for secret in marker-recovery-share- bWFya2VyLXJlY292ZXJ5 marker-seal-key bWFya2VyLXNlYWwta2V5; do
+  for secret in marker-recovery-share- bWFya2VyLXJlY292ZXJ5 "$RUNNING_SEAL" "$(printf %s "$RUNNING_SEAL" | base64 -w0)"; do
     [[ $output != *"$secret"* ]] || { echo "$secret in the output"; return 1; }
     absent "$secret" "$RECORD/argv"
   done
@@ -1110,22 +1195,29 @@ LN
   done
 }
 
-# seal_secret KEY: the Secret openbao-seal-1 holding KEY, as External Secrets makes it.
-# shellcheck disable=SC2016 # $key is a jq variable.
+# seal_secret KEY [ID]: the Secret ID, openbao-seal-1 when not given, holding KEY, as External
+# Secrets makes it.
+# shellcheck disable=SC2016 # $key and $id are jq variables.
 seal_secret() {
-  "$JQ" -n --arg key "$1" '{kind: "Secret", metadata: {name: "openbao-seal-1", namespace: "openbao"}, immutable: true, data: {key: ($key | @base64)}}' >"$STATE/seal-secret"
+  local id=${2:-openbao-seal-1} file=$STATE/seal-secret
+  [ "$id" = openbao-seal-1 ] || file+=".$id"
+  "$JQ" -n --arg key "$1" --arg id "$id" '{kind: "Secret", metadata: {name: $id, namespace: "openbao"}, immutable: true, data: {key: ($key | @base64)}}' >"$file"
 }
 
+# The one read of the server ConfigMap that bao-seal-restore --check makes, and bao-recovery.
+CONFIGMAP_READ='kubectl get configmap openbao-config --namespace openbao --output json --ignore-not-found --request-timeout=30s'
+
 # wrote_nothing: no Secret was created or deleted, the Secret and the custody files are as they were
-# before the run, which seal-before and custody-before hold, and kubectl was asked for the Secret
-# alone.
+# before the run, which seal-before and custody-before hold, and kubectl was asked for the server
+# ConfigMap and the Secret alone.
 wrote_nothing() {
   [ ! -e "$STATE/seal-created" ]
   [ ! -e "$STATE/seal-deleted" ]
   if [ -e "$BATS_TEST_TMPDIR/seal-before" ]; then cmp "$STATE/seal-secret" "$BATS_TEST_TMPDIR/seal-before"; else [ ! -e "$STATE/seal-secret" ]; fi
   [ "$(find "$BATS_TEST_TMPDIR/custody" -mindepth 1 -printf '%P %s\n' | sort)" = "$(cat "$BATS_TEST_TMPDIR/custody-before")" ]
   echo "kubectl was asked: $(grep '^kubectl ' "$RECORD/argv" | sort -u | paste -sd'|' -)"
-  [ "$(grep '^kubectl ' "$RECORD/argv" | grep -cvxF 'kubectl get secret openbao-seal-1 --namespace openbao --output json --ignore-not-found')" -eq 0 ]
+  [ "$(grep '^kubectl ' "$RECORD/argv" | grep -cvxF -e 'kubectl get secret openbao-seal-1 --namespace openbao --output json --ignore-not-found' \
+    -e "$CONFIGMAP_READ")" -eq 0 ]
 }
 
 # next_run OUTPUT: keeps OUTPUT, the last run's, and its calls in outputs and calls, for a test to
@@ -1197,6 +1289,353 @@ error: recipe \`bao-seal-restore\` failed on line 19 with exit code 1" ]
   done
 }
 
+# older FILE: what bao-seal-restore says of FILE, a custody file of the key openbao-seal-1, once the
+# seal stanza's current key is openbao-seal-2.
+older() {
+  printf '%s' "bao-seal-restore: $1 holds the seal key openbao-seal-1, and the store's current seal key is openbao-seal-2: give the custody file just bao-seal-keep wrote after the rotation, or write it with just bao-seal-keep $1 <new file>"
+}
+
+# What a recipe says while the servers run the stanza from before the rotation that rotated makes.
+SERVERS_BEFORE='the servers run with the seal keys current openbao-seal-1 and no previous, and this checkout names current openbao-seal-2 and previous openbao-seal-1: run it from a checkout of main'
+
+@test "bao-seal-restore --check refuses a custody file older than the store's seal key, and says which file to give" {
+  local old=c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffee0001 new current before secret
+  new=${old%0001}0002
+  current=$BATS_TEST_TMPDIR/custody/openbao-2.age
+  # The custody file written before the rotation, one of the current key, and the cluster after the
+  # rotation: both Secrets, and the servers on the rotated stanza.
+  custody_file "$old"
+  rotated
+  rotated_custody_file "$new" "$old" "$current"
+  seal_secret "$old"
+  seal_secret "$new" openbao-seal-2
+  before=$(seal_state)
+  recipe bao-seal-restore "$CUSTODY" --check
+  echo "the older file: $output"
+  [ "$status" -ne 0 ]
+  [ "${lines[0]}" = "$(older "$CUSTODY")" ]
+  [[ $output != *"holds the key in"* && $output != *"holds another key"* ]]
+  # No Secret was compared: the ConfigMap alone was asked for, and nothing was written.
+  [ "$(grep '^kubectl ' "$RECORD/argv")" = "$CONFIGMAP_READ" ]
+  [ "$(seal_state)" = "$before" ]
+  # The servers still on the stanza from before the rotation: both mismatches, in one run.
+  next_run "$output"
+  servers_before_rotation
+  recipe bao-seal-restore "$CUSTODY" --check
+  echo "the older file, the servers before the rotation: $output"
+  [ "$status" -ne 0 ]
+  [ "${lines[0]}" = "bao-seal-restore: $SERVERS_BEFORE" ]
+  [ "${lines[1]}" = "$(older "$CUSTODY")" ]
+  [ "$(grep '^kubectl ' "$RECORD/argv")" = "$CONFIGMAP_READ" ]
+  [ "$(seal_state)" = "$before" ]
+  # A file of the current key: the servers' stanza alone is named, and still no Secret compared.
+  next_run "$output"
+  recipe bao-seal-restore "$current" --check
+  echo "the current file, the servers before the rotation: $output"
+  [ "$status" -ne 0 ]
+  [ "${lines[0]}" = "bao-seal-restore: $SERVERS_BEFORE" ]
+  [[ $output != *"holds the seal key"* && $output != *"holds the key in"* ]]
+  [ "$(grep '^kubectl ' "$RECORD/argv")" = "$CONFIGMAP_READ" ]
+  [ "$(seal_state)" = "$before" ]
+  # Servers whose stanza differs from the checkout's in its previous key alone, current
+  # openbao-seal-2 and no previous: named as well.
+  next_run "$output"
+  running_config
+  "$JQ" '.data["extraconfig-from-values.hcl"] |= gsub("\n[ \t]*previous_key[^\n]*"; "")' "$STATE/configmap" >"$BATS_TEST_TMPDIR/configmap"
+  mv "$BATS_TEST_TMPDIR/configmap" "$STATE/configmap"
+  [ "$("$JQ" -r '.data["extraconfig-from-values.hcl"]' "$STATE/configmap" | grep -c 'key_id')" -eq 1 ]
+  recipe bao-seal-restore "$current" --check
+  echo "the current file, the servers without the previous key: $output"
+  [ "$status" -ne 0 ]
+  [ "${lines[0]}" = "bao-seal-restore: the servers run with the seal keys current openbao-seal-2 and no previous, and this checkout names current openbao-seal-2 and previous openbao-seal-1: run it from a checkout of main" ]
+  [[ $output != *"holds the seal key"* && $output != *"holds the key in"* ]]
+  [ "$(grep '^kubectl ' "$RECORD/argv")" = "$CONFIGMAP_READ" ]
+  [ "$(seal_state)" = "$before" ]
+  # Without the ConfigMap the check fails, naming it.
+  next_run "$output"
+  rm "$STATE/configmap"
+  recipe bao-seal-restore "$current" --check
+  echo "no ConfigMap: $output"
+  [ "$status" -ne 0 ]
+  [ "${lines[0]}" = "bao-seal-restore: the ConfigMap openbao-config does not exist in openbao, so the seal keys the servers run with are not known" ]
+  [ "$(grep '^kubectl ' "$RECORD/argv")" = "$CONFIGMAP_READ" ]
+  [ "$(seal_state)" = "$before" ]
+  next_run "$output"
+  for secret in "$old" "$new" "$(printf %s "$old" | base64 -w0)" "$(printf %s "$new" | base64 -w0)"; do
+    absent "$secret" "$BATS_TEST_TMPDIR/outputs" "$BATS_TEST_TMPDIR/calls"
+  done
+}
+
+# shellcheck disable=SC2016 # $old, $new and $partial are jq's variables and the script's.
+@test "After a seal-key rotation, bao-seal-keep writes the custody file of the current and the previous key and checks it" {
+  local old=c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffee0001 new other kept another bare plain before secret targets
+  new=${old%0001}0002 other=${old%0001}0003
+  kept=$BATS_TEST_TMPDIR/custody/openbao-2.age
+  another=$BATS_TEST_TMPDIR/custody/openbao-3.age
+  bare=$BATS_TEST_TMPDIR/custody/bare.age
+  custody_file "$old"
+  # Before the rotation the stanza names no previous key: refused before anything is read.
+  recipe bao-seal-keep "$CUSTODY" "$kept"
+  echo "no rotation: $output"
+  refused_before_reaching "seal stanza names no previous key"
+  [ "$(grep -c '^age ' "$RECORD/argv")" -eq 0 ]
+  [ ! -e "$kept" ]
+  next_run "$output"
+  # After it: the Secrets of the current and the previous key, the servers on the rotated stanza.
+  rotated
+  seal_secret "$old"
+  seal_secret "$new" openbao-seal-2
+  cp -p "$CUSTODY" "$BATS_TEST_TMPDIR/custody-before.age"
+  recipe bao-seal-keep "$CUSTODY" "$kept"
+  echo "after the rotation: $output"
+  [ "$status" -eq 0 ]
+  # The new file opens with the Talos age key to the old file's recovery keys, the current key's
+  # Secret as its seal and the old file's seal as its previous_seal, and nothing else.
+  plain=$(age -d -i "$BATS_TEST_TMPDIR/keys/talos.agekey" "$kept")
+  [ "$("$JQ" -cS 'del(.created)' <<<"$plain")" = "$("$JQ" -ncS --arg old "$old" --arg new "$new" '{cluster: "lab-sto2",
+    recovery: {shares: 5, threshold: 3, keys_base64: [range(5) | "marker-recovery-share-\(. + 1)" | @base64]},
+    seal: {secret: "openbao-seal-2", key_id: "openbao-seal-2", key: $new},
+    previous_seal: {secret: "openbao-seal-1", key_id: "openbao-seal-1", key: $old}}')" ]
+  [[ $("$JQ" -r '.created' <<<"$plain") =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]
+  [ "$(stat -c %a "$kept")" = 600 ]
+  # The old file is as it was, and nothing else is left beside the two.
+  cmp "$CUSTODY" "$BATS_TEST_TMPDIR/custody-before.age"
+  [ "$(find "$BATS_TEST_TMPDIR/custody" -mindepth 1 -printf '%P\n' | sort | paste -sd' ' -)" = "openbao-2.age openbao.age" ]
+  # It ends with bao-seal-restore's check of the new file.
+  [ "${lines[${#lines[@]} - 2]}" = "bao-seal-restore: the Secret openbao-seal-2 holds the key in $kept" ]
+  [ "${lines[${#lines[@]} - 1]}" = "bao-seal-restore: the Secret openbao-seal-1 holds the key in $kept" ]
+  # kubectl read the two Secrets and the ConfigMap, and nothing else.
+  [ "$(grep '^kubectl ' "$RECORD/argv" | sort -u)" = "$(printf '%s\n' "$CONFIGMAP_READ" \
+    'kubectl get secret openbao-seal-1 --namespace openbao --output json --ignore-not-found' \
+    'kubectl get secret openbao-seal-2 --namespace openbao --output json --ignore-not-found' | sort)" ]
+  # No key is printed, passed on a command line or written unencrypted, and the one script run by
+  # its path is the check's.
+  held_nowhere "$output" "$old" "$new"
+  for secret in "$(printf %s "$old" | base64 -w0)" "$(printf %s "$new" | base64 -w0)"; do
+    [[ $output != *"$secret"* ]] || { echo "a key in the output"; return 1; }
+    absent "$secret" "$RECORD/argv"
+  done
+  next_run "$output"
+  run by_name
+  [ "$output" = "run by a path or as a shell: scripts/bao-seal-restore" ]
+  # What a run writes and overwrites in place is not searched once it is gone, so the script is read
+  # for it: every output redirection goes to /dev/null or a file descriptor, and the one file it has
+  # a tool write is age's --output, the partial file, which age writes encrypted. Placeholders such as
+  # <new file> in messages, and >=, are no redirections.
+  targets=$(cd "$ROOT" && grep -vE '^[[:space:]]*#' scripts/bao-seal-keep | sed -E 's/<[A-Za-z ]+>//g; s/[<>]=//g' |
+    grep -oE '(^|[^<>&0-9-])[0-9]*(&>>|&>|>>|>\||>)[[:space:]]*("[^"]*"|&[0-9-]+|[^[:space:];|&)]+)' |
+    sed -E 's/^.*(&>>|&>|>>|>\||>)[[:space:]]*//' | grep -vxE '/dev/null|&[0-9]+|&-' | sort -u) || true
+  echo "written elsewhere: ${targets:-nothing}"
+  [ -z "$targets" ]
+  [ "$(cd "$ROOT" && grep -ohE -- 'age [^|]*--output [^ ]+' scripts/bao-seal-keep | grep -oE -- '--output [^ ]+' | sort -u)" = \
+    '--output "$partial"' ]
+
+  # Each refusal names why, and writes nothing.
+  before=$(seal_state)
+  # Never over a file: the one it wrote.
+  recipe bao-seal-keep "$CUSTODY" "$kept"
+  echo "over a file: $output"
+  refused_before_reaching "$kept exists"
+  [ "$(seal_state)" = "$before" ]
+  # Never into the repository.
+  recipe bao-seal-keep "$CUSTODY" "$REPO/openbao-2.age"
+  echo "into the repository: $output"
+  refused_before_reaching "$REPO/openbao-2.age lies inside the repository"
+  [ ! -e "$REPO/openbao-2.age" ]
+  # A file whose seal key is not the previous key: here the new file, of the current key.
+  next_run "$output"
+  recipe bao-seal-keep "$kept" "$another"
+  echo "a file of the current key: $output"
+  [ "$status" -ne 0 ]
+  [ "${lines[0]}" = "bao-seal-keep: $kept holds the seal key openbao-seal-2, and the stanza's previous seal key is openbao-seal-1: give the custody file written before the rotation, whose seal key that is" ]
+  [ "$(grep -c '^kubectl ' "$RECORD/argv")" -eq 0 ]
+  [ "$(seal_state)" = "$before" ]
+  # A file of the previous key that holds no recovery keys.
+  next_run "$output"
+  age -d -i "$BATS_TEST_TMPDIR/keys/talos.agekey" "$CUSTODY" | "$JQ" -c 'del(.recovery)' |
+    age --encrypt --recipient "$RECIPIENT" --output "$bare"
+  before=$(seal_state)
+  recipe bao-seal-keep "$bare" "$another"
+  echo "no recovery keys: $output"
+  [ "$status" -ne 0 ]
+  [ "${lines[0]}" = "bao-seal-keep: $bare holds no recovery keys; give the custody file bao-recovery or bao-seal-keep wrote" ]
+  [ "$(grep -c '^kubectl ' "$RECORD/argv")" -eq 0 ]
+  [ "$(seal_state)" = "$before" ]
+  # The previous key's Secret holding another key than the file.
+  next_run "$output"
+  seal_secret "$other"
+  before=$(seal_state)
+  recipe bao-seal-keep "$CUSTODY" "$another"
+  echo "the previous Secret another key: $output"
+  [ "$status" -ne 0 ]
+  [ "${lines[0]}" = "bao-seal-keep: the Secret openbao-seal-1 holds another key than $CUSTODY" ]
+  [ "$(seal_state)" = "$before" ]
+  seal_secret "$old"
+  # The current key's Secret missing, or holding no key of 64 hexadecimal digits.
+  next_run "$output"
+  rm "$STATE/seal-secret.openbao-seal-2"
+  before=$(seal_state)
+  recipe bao-seal-keep "$CUSTODY" "$another"
+  echo "no current Secret: $output"
+  [ "$status" -ne 0 ]
+  [ "${lines[0]}" = "bao-seal-keep: the Secret openbao-seal-2 does not exist in openbao; External Secrets writes it once the rotation's pull request is applied" ]
+  [ "$(seal_state)" = "$before" ]
+  next_run "$output"
+  seal_secret "${new:1}" openbao-seal-2
+  before=$(seal_state)
+  recipe bao-seal-keep "$CUSTODY" "$another"
+  echo "a malformed current key: $output"
+  [ "$status" -ne 0 ]
+  [ "${lines[0]}" = "bao-seal-keep: the Secret openbao-seal-2 holds no key of 64 hexadecimal digits" ]
+  [ "$(seal_state)" = "$before" ]
+  seal_secret "$new" openbao-seal-2
+  # The servers still on the stanza from before the rotation: the file is written, and its check
+  # fails the run, naming why; the file stays, as a recipe deletes no custody file.
+  next_run "$output"
+  servers_before_rotation
+  recipe bao-seal-keep "$CUSTODY" "$another"
+  echo "the servers before the rotation: $output"
+  [ "$status" -ne 0 ]
+  grep -qxF "bao-seal-restore: $SERVERS_BEFORE" <<<"$output"
+  grep -qxF "bao-seal-keep: $another is written and does not pass bao-seal-restore's check above; it is kept, as a recipe deletes no custody file: put right what the check names, then run just bao-seal-restore $another --check" <<<"$output"
+  [ "$(age -d -i "$BATS_TEST_TMPDIR/keys/talos.agekey" "$another" | "$JQ" -r '.seal.key_id + " " + .previous_seal.key_id')" = "openbao-seal-2 openbao-seal-1" ]
+  cmp "$CUSTODY" "$BATS_TEST_TMPDIR/custody-before.age"
+  next_run "$output"
+  for secret in "$old" "$new" "$other" "$(printf %s "$old" | base64 -w0)" "$(printf %s "$new" | base64 -w0)" \
+    "$(printf %s "$other" | base64 -w0)"; do
+    absent "$secret" "$BATS_TEST_TMPDIR/outputs" "$BATS_TEST_TMPDIR/calls"
+  done
+}
+
+# shellcheck disable=SC2016 # $key is a jq variable.
+@test "After a seal-key rotation, bao-seal-restore, bao-recovery and bao-root work with the store's current and previous keys" {
+  local old=c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffee0001 new kept recovered again plain before read asked secret
+  local edit unpaired count=0
+  new=${old%0001}0002
+  kept=$BATS_TEST_TMPDIR/custody/openbao-2.age
+  recovered=$BATS_TEST_TMPDIR/custody/recovered.age
+  again=$BATS_TEST_TMPDIR/custody/again.age
+  custody_file "$old"
+  rotated
+  rotated_custody_file "$new" "$old" "$kept"
+  # A rebuilt cluster, which holds neither Secret: both are made, immutable, from the new file.
+  recipe bao-seal-restore "$kept"
+  echo "rebuilt: $output"
+  [ "$status" -eq 0 ]
+  [ "$("$JQ" -cS '{kind, name: .metadata.name, namespace: .metadata.namespace, immutable, key: (.data.key | @base64d)}' "$STATE/seal-created.openbao-seal-2")" = \
+    "$("$JQ" -ncS --arg key "$new" '{kind: "Secret", name: "openbao-seal-2", namespace: "openbao", immutable: true, key: $key}')" ]
+  [ "$("$JQ" -cS '{kind, name: .metadata.name, namespace: .metadata.namespace, immutable, key: (.data.key | @base64d)}' "$STATE/seal-created")" = \
+    "$("$JQ" -ncS --arg key "$old" '{kind: "Secret", name: "openbao-seal-1", namespace: "openbao", immutable: true, key: $key}')" ]
+  [ ! -e "$STATE/seal-deleted" ] && [ ! -e "$STATE/seal-deleted.openbao-seal-2" ]
+  next_run "$output"
+  # The rotated cluster, which holds both: they are left alone, and the check passes.
+  rm "$STATE/seal-created" "$STATE/seal-created.openbao-seal-2"
+  recipe bao-seal-restore "$kept"
+  echo "rotated: $output"
+  [ "$status" -eq 0 ]
+  [ ! -e "$STATE/seal-created" ] && [ ! -e "$STATE/seal-created.openbao-seal-2" ]
+  [ ! -e "$STATE/seal-deleted" ] && [ ! -e "$STATE/seal-deleted.openbao-seal-2" ]
+  next_run "$output"
+  recipe bao-seal-restore "$kept" --check
+  echo "checked: $output"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf '%s\n' "bao-seal-restore: the Secret openbao-seal-2 holds the key in $kept" \
+    "bao-seal-restore: the Secret openbao-seal-1 holds the key in $kept")" ]
+  # The file from before the rotation is refused, saying which file to give, and nothing is written
+  # or read.
+  next_run "$output"
+  before=$(seal_state)
+  recipe bao-seal-restore "$CUSTODY"
+  echo "the older file: $output"
+  [ "$status" -ne 0 ]
+  [ "${lines[0]}" = "$(older "$CUSTODY")" ]
+  [ "$(grep -c '^kubectl ' "$RECORD/argv")" -eq 0 ]
+  [ "$(seal_state)" = "$before" ]
+  next_run "$output"
+  # So is a file of the current key whose previous_seal is missing or of another key, naming the
+  # previous key's Secret, and nothing is written or read.
+  for edit in 'del(.previous_seal)' '.previous_seal |= (.secret = "openbao-seal-0" | .key_id = "openbao-seal-0")'; do
+    unpaired=$BATS_TEST_TMPDIR/custody/unpaired-$((++count)).age
+    age -d -i "$BATS_TEST_TMPDIR/keys/talos.agekey" "$kept" | "$JQ" -c "$edit" |
+      age --encrypt --recipient "$RECIPIENT" --output "$unpaired"
+    before=$(seal_state)
+    recipe bao-seal-restore "$unpaired"
+    echo "$edit: $output"
+    [ "$status" -ne 0 ]
+    [ "${lines[0]}" = "bao-seal-restore: $unpaired holds no seal key for the Secret openbao-seal-1, the store's previous seal key: give the custody file just bao-seal-keep wrote after the rotation" ]
+    [ "$(grep -c '^kubectl ' "$RECORD/argv")" -eq 0 ]
+    [ "$(seal_state)" = "$before" ]
+    next_run "$output"
+  done
+
+  # bao-recovery writes the keys of both Secrets the servers mount, read before it asks OpenBao for
+  # shares.
+  echo "$recovered" >"$STATE/outfile"
+  recipe bao-recovery "$recovered"
+  echo "recovery: $output"
+  [ "$status" -eq 0 ]
+  plain=$(age -d -i "$BATS_TEST_TMPDIR/keys/talos.agekey" "$recovered")
+  [ "$("$JQ" -cS '{seal, previous_seal}' <<<"$plain")" = "$("$JQ" -ncS --arg old "$old" --arg new "$new" '{
+    seal: {secret: "openbao-seal-2", key_id: "openbao-seal-2", key: $new},
+    previous_seal: {secret: "openbao-seal-1", key_id: "openbao-seal-1", key: $old}}')" ]
+  [ "$("$JQ" -r '.recovery.keys_base64 | length' <<<"$plain")" = 5 ]
+  [ "$(grep -cxF "$CONFIGMAP_READ" "$RECORD/argv")" -eq 1 ]
+  [ "$(grep -cxE 'kubectl get secret openbao-seal-[12] --namespace openbao --output json' "$RECORD/argv")" -eq 2 ]
+  read=$(grep -nxE "kubectl get secret openbao-seal-[12] --namespace openbao --output json|$CONFIGMAP_READ" "$RECORD/argv" | tail -n 1 | cut -d: -f1)
+  asked=$(grep -nE '^curl .*/v1/sys/rotate/recovery/init$' "$RECORD/argv" | head -n 1 | cut -d: -f1)
+  echo "the last seal read is call $read, the first request of the rotation call $asked"
+  [ -n "$read" ] && [ -n "$asked" ] && ((read < asked))
+  next_run "$output"
+  # Without the current key's Secret, with a key in it that is not 64 hexadecimal digits, or with the
+  # servers on the stanza from before the rotation, it sends no request of the recovery keys'
+  # rotation and writes no file.
+  rm "$STATE/recovery-shares"
+  rm "$STATE/seal-secret.openbao-seal-2"
+  : >"$RECORD/requests"
+  echo "$again" >"$STATE/outfile"
+  recipe bao-recovery "$again"
+  echo "no current Secret: $output"
+  [ "$status" -ne 0 ]
+  grep -qxF "bao-recovery: the Secret openbao-seal-2 cannot be read in openbao; the servers mount it, and its key goes into $again" <<<"$output"
+  [ -z "$("$JQ" -r 'select(.path | startswith("sys/rotate/recovery/")) | .path' "$RECORD/requests")" ]
+  [ ! -e "$again" ]
+  next_run "$output"
+  seal_secret "${new:1}" openbao-seal-2
+  recipe bao-recovery "$again"
+  echo "a malformed current key: $output"
+  [ "$status" -ne 0 ]
+  grep -qxF "bao-recovery: the Secret openbao-seal-2 holds no key of 64 hexadecimal digits" <<<"$output"
+  [ -z "$("$JQ" -r 'select(.path | startswith("sys/rotate/recovery/")) | .path' "$RECORD/requests")" ]
+  [ ! -e "$again" ]
+  next_run "$output"
+  seal_secret "$new" openbao-seal-2
+  servers_before_rotation
+  recipe bao-recovery "$again"
+  echo "the servers before the rotation: $output"
+  [ "$status" -ne 0 ]
+  grep -qxF "bao-recovery: $SERVERS_BEFORE" <<<"$output"
+  [ -z "$("$JQ" -r 'select(.path | startswith("sys/rotate/recovery/")) | .path' "$RECORD/requests")" ]
+  [ "$(grep -c '^kubectl get secret ' "$RECORD/argv")" -eq 0 ]
+  [ ! -e "$again" ]
+  next_run "$output"
+
+  # bao-root runs a command with a token made from the new file's recovery keys.
+  running_config
+  echo 5 >"$STATE/recovery-shares"
+  fake report-env <<<': > "'"$STATE"'/command-ran"'
+  recipe bao-root "$kept" report-env
+  echo "bao-root: $output"
+  [ "$status" -eq 0 ]
+  [ -e "$STATE/command-ran" ]
+  [ "$("$JQ" -r 'select(.path == "sys/generate-root-token/update") | .body | fromjson | .key | @base64d' "$RECORD/requests" | paste -sd' ' -)" = \
+    'marker-recovery-share-1 marker-recovery-share-2 marker-recovery-share-3' ]
+  next_run "$output"
+  for secret in "$old" "$new" "${new:1}" "$(printf %s "$old" | base64 -w0)" "$(printf %s "$new" | base64 -w0)" \
+    "$(printf %s "${new:1}" | base64 -w0)"; do
+    absent "$secret" "$BATS_TEST_TMPDIR/outputs" "$BATS_TEST_TMPDIR/calls"
+  done
+}
+
 # seed_env [ID [SECRET]]: the repository's .env, as an operator fills it in: the backup prefix, the
 # state key and its passphrase, the cloud credential, and the cluster's S3 key, which differs from
 # the state key. The cluster key is what the volsync recipes put in the store. The object storage's
@@ -1230,9 +1669,15 @@ stored() {
 # of the scripts, what the fake command wrote down, and the operator's own .env. The files searched
 # include what the recipes removed or replaced, as the recorders of rm and mv kept it.
 leaked() {
+  by_name
+  held_nowhere "$@"
+}
+
+# held_nowhere OUTPUT TEXT...: leaked's searches without by_name, for a recipe that runs another
+# recipe's script by its path, as bao-seal-keep runs bao-seal-restore's check; its test says which.
+held_nowhere() {
   local printed=$1 text
   shift
-  by_name
   for text; do
     [[ $printed != *"$text"* ]] || { echo "$text in the output"; return 1; }
     absent "$text" "$RECORD/argv"
@@ -1893,6 +2338,21 @@ EOF
   echo "bao-seal-restore: $output"
   refused_before_reaching "$CUSTODY is writable by its group or others"
   [ ! -e "$STATE/seal-created" ]
+  # bao-seal-keep, after the rotation it serves, reads the file so too, and writes its new file only
+  # where it would be read later.
+  rotated
+  recipe bao-seal-keep "$CUSTODY" "$dir/openbao-2.age"
+  echo "bao-seal-keep: $output"
+  refused_before_reaching "$CUSTODY is writable by its group or others"
+  recipe bao-seal-keep "$BATS_TEST_TMPDIR/link.age" "$dir/openbao-2.age"
+  echo "bao-seal-keep, a link: $output"
+  refused_before_reaching "$BATS_TEST_TMPDIR/link.age is a symbolic link"
+  [ ! -e "$dir/openbao-2.age" ]
+  chmod 600 "$CUSTODY"
+  recipe bao-seal-keep "$CUSTODY" "$BATS_TEST_TMPDIR/shared/openbao-2.age"
+  echo "bao-seal-keep, a new file in a shared directory: $output"
+  refused_before_reaching "$BATS_TEST_TMPDIR/shared is writable by its group or others"
+  [ -z "$(ls -A "$BATS_TEST_TMPDIR/shared")" ]
   leaked "$output" "$master" marker-cluster-id marker-cluster-secret
 }
 
@@ -1931,7 +2391,8 @@ EOF
   }
   cd "$REPO"
   for recipe in "bao-put demo/hello greeting" "bao-recovery $BATS_TEST_TMPDIR/custody/recovery.age" \
-    "bao-root $CUSTODY report-env" "bao-seal-restore $CUSTODY" "bao-seed-volsync $VOLSYNC_CUSTODY" \
+    "bao-root $CUSTODY report-env" "bao-seal-restore $CUSTODY" "bao-seal-keep $CUSTODY $BATS_TEST_TMPDIR/custody/openbao-2.age" \
+    "bao-seed-volsync $VOLSYNC_CUSTODY" \
     "bao-volsync-password $VOLSYNC_CUSTODY volsync-demo report-env" "bao-seed-postgres $BATS_TEST_TMPDIR/custody/postgres.age" \
     "secret-rotate demo/hello greeting"; do
     for how in shellopts named bash-env bash-x; do
@@ -1947,6 +2408,7 @@ EOF
       [ "$(grep -c -E '^age ' "$RECORD/argv")" -eq 0 ]
       [ ! -e "$STATE/command-ran" ]
       [ ! -e "$BATS_TEST_TMPDIR/custody/recovery.age" ]
+      [ ! -e "$BATS_TEST_TMPDIR/custody/openbao-2.age" ]
     done
   done
   # The tests' own tracing, into a file of theirs, still lets a recipe run.

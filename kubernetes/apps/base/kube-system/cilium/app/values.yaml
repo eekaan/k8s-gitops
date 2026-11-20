@@ -98,9 +98,19 @@ hubble:
     dashboards:
       enabled: false
 
-# Pod traffic between nodes stays on the project's private node network and is not encrypted.
+# Every agent encrypts with WireGuard: it makes its own key pair, publishes the public key on its
+# node's CiliumNode and keeps a WireGuard device, cilium_wg0, with a peer for every other node, and
+# in tunnel mode every packet the overlay carries between two nodes passes through that device,
+# encrypted, to UDP 51871, which the nodes' firewall admits from the nodes alone. The type is named,
+# as the chart's default is ipsec. Node-to-node encryption, which would also take traffic from and
+# to the nodes' own addresses, stays off: it is beta at this version, the control planes opt out of
+# it, and it would route a pod's connection to a node through the tunnel, so that it reaches the
+# node from the pod's address instead of its node's, on which the node firewall's sources rest
+# (docs/cluster.md, Sources). docs/kubernetes.md, Encryption between nodes, says what is encrypted.
 encryption:
-  enabled: false
+  enabled: true
+  type: wireguard
+  nodeEncryption: false
 
 # Services of type LoadBalancer take their addresses from the pool of the cilium-bgp application,
 # and the workers advertise them over BGP to the edge routers, which that application configures

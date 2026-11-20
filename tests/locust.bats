@@ -407,11 +407,12 @@ kubectl_gone() {
 
 @test "Locust is selected by overlay entries and builds nothing when it is not" {
   local ks
-  # The overlay selects it with two entries, the namespace directory and the application's ks.yaml.
+  # The overlay selects it with two entries, the namespace directory and the application's ks.yaml,
+  # beside the entry of its route, an application of its own in the namespace's directory.
   [ "$(yq '.resources[] | select(test("/locust(/|$)"))' "$OVERLAY_DIR/kustomization.yaml" | LC_ALL=C sort | paste -sd' ' -)" \
-    = "../../base/locust ../../base/locust/locust/ks.yaml" ]
+    = "../../base/locust ../../base/locust/locust-route/ks.yaml ../../base/locust/locust/ks.yaml" ]
   overlay
-  [ "$(of_namespace "$OVERLAY")" = ConfigMap/locust/app-template-defaults,Kustomization/flux-system/locust,Namespace/-/locust,NetworkPolicy/locust/default-deny ]
+  [ "$(of_namespace "$OVERLAY")" = ConfigMap/locust/app-template-defaults,Kustomization/flux-system/locust,Kustomization/flux-system/locust-route,Namespace/-/locust,NetworkPolicy/locust/default-deny ]
   # The namespace directory holds what every namespace directory does: its namespace, its default
   # deny and the common component.
   [ "$(yq -o json -I0 '{"namespace": .namespace, "components": .components, "resources": .resources}' "$REPO/kubernetes/apps/base/locust/kustomization.yaml")" \
@@ -428,8 +429,8 @@ kubectl_gone() {
   echo "$output"
   [ "$status" -eq 0 ]
   # With only the namespace directory's entry, the cluster builds the namespace, its defaults and
-  # its default deny, and nothing of Locust.
-  tree_without '/locust/locust/ks.yaml$'
+  # its default deny, and nothing of Locust or of its route.
+  tree_without '/locust/locust(-route)?/ks.yaml$'
   run "$REPO/scripts/kubernetes-check" "$TREE"
   echo "$output"
   [ "$status" -eq 0 ]
@@ -499,9 +500,10 @@ kubectl_gone() {
   built
   overlay
   # The namespace, as the overlay builds it, enforces restricted, keeps what runs in it when it
-  # leaves the tree, and no workload of it is excepted.
+  # leaves the tree, and no workload of it is excepted. Its one other label lets its route attach to
+  # the public Gateway.
   ns="$(object "$OVERLAY" Namespace "$NAMESPACE" | yq -o json -I0 '.metadata')"
-  [ "$(jq -cS '.labels' <<<"$ns")" = '{"pod-security.kubernetes.io/enforce":"restricted"}' ]
+  [ "$(jq -cS '.labels' <<<"$ns")" = '{"k8s-gitops/gateway":"public","pod-security.kubernetes.io/enforce":"restricted"}' ]
   [ "$(jq -r '.annotations["kustomize.toolkit.fluxcd.io/prune"]' <<<"$ns")" = disabled ]
   [ "$(NS="$NAMESPACE" yq '[.exceptions[] | select(.namespace == strenv(NS))] | length' "$REPO/pod-security-exceptions.yaml")" -eq 0 ]
   cm="$(yq -N 'select(.kind == "ConfigMap" and (.metadata.name | test("^locust-locustfile-"))) | .metadata.name' "$BUILT")"
@@ -556,12 +558,14 @@ kubectl_gone() {
   deny="$(rendered NetworkPolicy.networking.k8s.io_locust_default-deny.yaml)"
   [ "$(yq -o json -I0 '[.metadata.name, .spec]' "$deny" | jq -cS .)" = '["default-deny",{"podSelector":{},"policyTypes":["Ingress","Egress"]}]' ]
   [ "$(NS="$NAMESPACE" yq '[.exceptions[] | select(.namespace == strenv(NS))] | length' "$REPO/network-policy-exceptions.yaml")" -eq 0 ]
-  # The policies of the namespace are the default deny and Locust's two, nothing else.
+  # The policies of the namespace are the default deny and Locust's two, nothing else, beside the
+  # sign-in's SecurityPolicy of its route, which is no network policy.
   [ "$(cd "$REAL" && find . -type f -name '*Policy*_locust_*' -printf '%f\n' | LC_ALL=C sort | paste -sd' ' -)" \
-    = "CiliumNetworkPolicy.cilium.io_locust_locust-master.yaml CiliumNetworkPolicy.cilium.io_locust_locust-worker.yaml NetworkPolicy.networking.k8s.io_locust_default-deny.yaml" ]
-  # Every rule of the two and of hello's, exactly: the master takes the workers and the kubelet's
-  # probe and sends nothing; the workers take nothing and reach the master, the resolver and hello's
-  # pods; hello takes the workers beside the proxies and the kubelet.
+    = "CiliumNetworkPolicy.cilium.io_locust_locust-master.yaml CiliumNetworkPolicy.cilium.io_locust_locust-worker.yaml NetworkPolicy.networking.k8s.io_locust_default-deny.yaml SecurityPolicy.gateway.envoyproxy.io_locust_locust.yaml" ]
+  # Every rule of the two and of hello's, exactly: the master takes the workers, the public Gateway's
+  # proxies and the kubelet's probe and sends nothing; the workers take nothing and reach the master,
+  # the resolver and hello's pods; hello takes the workers beside the proxies, the kubelet and Robot
+  # Framework's runner.
   policies=("$(rendered CiliumNetworkPolicy.cilium.io_locust_locust-master.yaml)" "$(rendered CiliumNetworkPolicy.cilium.io_locust_locust-worker.yaml)"
     "$(rendered CiliumNetworkPolicy.cilium.io_demo_hello.yaml)")
   allows "${policies[@]}"
@@ -569,12 +573,21 @@ kubectl_gone() {
     "hello [app.kubernetes.io/name=hello] takes @host on 8080/TCP" \
     "hello [app.kubernetes.io/name=hello] takes app.kubernetes.io/component=proxy,app.kubernetes.io/managed-by=envoy-gateway,app.kubernetes.io/name=envoy,gateway.envoyproxy.io/owning-gateway-name=public,gateway.envoyproxy.io/owning-gateway-namespace=envoy-gateway-system,io.kubernetes.pod.namespace=envoy-gateway-system on 8080/TCP" \
     "hello [app.kubernetes.io/name=hello] takes app.kubernetes.io/component=worker,app.kubernetes.io/name=locust,io.kubernetes.pod.namespace=locust on 8080/TCP" \
+    "hello [app.kubernetes.io/name=hello] takes app.kubernetes.io/component=runner,app.kubernetes.io/name=robot,io.kubernetes.pod.namespace=robot on 8080/TCP" \
     "locust-master [app.kubernetes.io/component=master,app.kubernetes.io/name=locust] takes @host on 8089/TCP" \
+    "locust-master [app.kubernetes.io/component=master,app.kubernetes.io/name=locust] takes app.kubernetes.io/component=proxy,app.kubernetes.io/managed-by=envoy-gateway,app.kubernetes.io/name=envoy,gateway.envoyproxy.io/owning-gateway-name=public,gateway.envoyproxy.io/owning-gateway-namespace=envoy-gateway-system,io.kubernetes.pod.namespace=envoy-gateway-system on 8089/TCP" \
     "locust-master [app.kubernetes.io/component=master,app.kubernetes.io/name=locust] takes app.kubernetes.io/component=worker,app.kubernetes.io/name=locust,io.kubernetes.pod.namespace=locust on 5557/TCP" \
     "locust-worker [app.kubernetes.io/component=worker,app.kubernetes.io/name=locust] sends to app.kubernetes.io/component=master,app.kubernetes.io/name=locust,io.kubernetes.pod.namespace=locust on 5557/TCP" \
     "locust-worker [app.kubernetes.io/component=worker,app.kubernetes.io/name=locust] sends to app.kubernetes.io/name=hello,io.kubernetes.pod.namespace=demo on 8080/TCP" \
     "locust-worker [app.kubernetes.io/component=worker,app.kubernetes.io/name=locust] sends to io.kubernetes.pod.namespace=kube-system,k8s-app=kube-dns on 53/TCP+53/UDP" |
     LC_ALL=C sort)" ]
+  # The proxies' egress to locust is one rule, whole: the master's pods, in locust while it carries
+  # the label the Gateway takes routes by, on the web port alone.
+  [ "$(yq -o json -I0 '.spec.egress[]' "$(rendered CiliumNetworkPolicy.cilium.io_envoy-gateway-system_public-proxy.yaml)" |
+    jq -cS 'select(any(.toEndpoints[]?; .matchLabels["k8s:io.kubernetes.pod.namespace"] == "locust"))')" = "$(jq -cnS '{
+      toEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": "locust", "k8s:io.cilium.k8s.namespace.labels.k8s-gitops/gateway": "public",
+        "app.kubernetes.io/name": "locust", "app.kubernetes.io/component": "master"}}],
+      toPorts: [{ports: [{port: "8089", protocol: "TCP"}]}]}')" ]
   # The port the kubelet probes the master on, read from the render.
   probe="$(probed "$(rendered Deployment.apps_locust_locust-master.yaml)")"
   [ "$probe" = 8089 ]
@@ -612,13 +625,24 @@ kubectl_gone() {
     "refused --reach-egress $MASTER @world 80/tcp"
     "refused --reach-egress $MASTER @kube-apiserver 6443/tcp"
     "refused --reach-egress $MASTER $OTHER_APP 8080/tcp"
-    # The master takes the workers on its port and the kubelet's probe, and no one else.
+    # The master takes the workers on its port, and the public Gateway's proxies and the kubelet's
+    # probe on the web port, and no one else: not the proxies on the workers' port, nor the Gateway's
+    # controller or a pod of its namespace with one of the proxies' labels on the web port.
     "reaches --reach @host $MASTER $probe/tcp"
+    "reaches --reach $PROXY $MASTER 8089/tcp"
     "refused --reach @world $MASTER 8089/tcp"
     "refused --reach @world $MASTER 5557/tcp"
     "refused --reach @remote-node $MASTER 8089/tcp"
-    "refused --reach $PROXY $MASTER 8089/tcp"
     "refused --reach $PROXY $MASTER 5557/tcp"
+    "refused --reach-ingress $PROXY $MASTER 5557/tcp"
+    "refused --reach envoy-gateway-system/Deployment/envoy-gateway $MASTER 8089/tcp"
+    "refused --reach-ingress envoy-gateway-system/Deployment/envoy-gateway $MASTER 8089/tcp"
+    "refused --reach-ingress envoy-gateway-system:app.kubernetes.io/name=envoy $MASTER 8089/tcp"
+    # The proxies reach no worker and no other pod of locust, whatever its port.
+    "refused --reach $PROXY $WORKER 8089/tcp"
+    "refused --reach-egress $PROXY $WORKER 8089/tcp"
+    "refused --reach-egress $PROXY $WORKER 5557/tcp"
+    "refused --reach-egress $PROXY $STRAY 8089/tcp"
     "refused --reach $OTHER_APP $MASTER 8089/tcp"
     "refused --reach $OTHER_APP $MASTER 5557/tcp"
     "refused --reach $HELLO $MASTER 8089/tcp"
@@ -789,31 +813,553 @@ kubectl_gone() {
   [ "$(yq -N 'select(.spec.template != null) | .spec.template.spec.enableServiceLinks' "$BUILT" | LC_ALL=C sort -u)" = false ]
 }
 
-@test "Nothing routes to Locust or scrapes it" {
-  local named
-  built
+ROUTE_DIR=kubernetes/apps/base/locust/locust-route
+ROUTE_FILE=$ROUTE_DIR/app/httproute.yaml
+
+# build_app NAME [VARS]: the application NAME as Flux applies it on lab-sto2, built as built() builds
+# Locust, from the root's Kustomization of it, with the key lists of the file VARS, the example's by
+# default, under its own substitutions. Writes the build to $BATS_TEST_TMPDIR/NAME-app.yaml and sets
+# APP_BUILT to it and APP_KS to the Kustomization.
+build_app() {
+  local root="$CLUSTER/ks.yaml" path
+  path="$(yq '.spec.path' "$root")"
+  (cd "$REPO" && flux build kustomization "$(yq '.metadata.name' "$root")" \
+    --path "./kubernetes/${path#./}" --kustomization-file "$root" --dry-run --in-memory-build) >"$BATS_TEST_TMPDIR/root.yaml"
+  APP_KS="$BATS_TEST_TMPDIR/$1-app-ks.yaml"
+  VARS="${2:-$VARS}" with_vars "$1" "$BATS_TEST_TMPDIR/root.yaml" >"$APP_KS"
+  [ -s "$APP_KS" ] || { echo "the lab-sto2 overlay does not enable $1"; return 1; }
+  APP_BUILT="$BATS_TEST_TMPDIR/$1-app.yaml"
+  flux_build "$1" "$APP_KS" >"$APP_BUILT"
+}
+
+# other_vars: a copy of the example key lists with another domain, in $OTHER, so a test can build
+# again and see that what it read came from the variable, not from a literal that happens to equal
+# the example.
+other_vars() {
+  OTHER="$BATS_TEST_TMPDIR/other-vars.yaml"
+  CLUSTER_DOMAIN=other.example.org yq '.CLUSTER_DOMAIN = strenv(CLUSTER_DOMAIN)' "$VARS" >"$OTHER"
+}
+
+# route_admits METHOD TARGET [NAME=VALUE...]: succeeds when the route in $BATS_TEST_TMPDIR/route.yaml
+# sends the request, with the headers NAME=VALUE, to a backend, as Gateway API matches an HTTPRoute
+# (gateway-api apis/v1/httproute_types.go), as tests/backstage.bats's route_admits does, and with
+# header matches: a rule without matches matches every request, and a match without a path is a
+# prefix of "/"; a method matches exactly; an Exact path is the request's path, without its query,
+# byte for byte; a PathPrefix matches the path whole or up to a "/", a trailing "/" of the prefix
+# aside; a header match of type Exact, the default, holds when the request has the header, its name
+# compared without regard to case, with exactly the value. Of the matches the request meets, an Exact
+# path wins, then the longest prefix, then one with a method, then the most header matches, then the
+# earlier rule; the request is sent on when that match's rule has a backend. Exits 0 when it is sent
+# on and 1 when not; a match of any other type or field exits otherwise, as one this test cannot
+# evaluate.
+route_admits() {
+  local headers='{}' header
+  for header in "${@:3}"; do
+    headers="$(jq -c --arg name "${header%%=*}" --arg value "${header#*=}" '. + {($name | ascii_downcase): $value}' <<<"$headers")"
+  done
+  yq -o json '.' "$BATS_TEST_TMPDIR/route.yaml" | jq -e --arg method "$1" --arg target "$2" --argjson headers "$headers" '
+    ($target | split("?")[0]) as $path
+    | def path_of: .path // {"type": "PathPrefix", "value": "/"};
+      def path_matches:
+        path_of as $p
+        | if $p.type == "Exact" then $path == $p.value
+          elif $p.type == "PathPrefix" then ($p.value | sub("/+$"; "")) as $v | $v == "" or $path == $v or ($path | startswith($v + "/"))
+          else error("a path match of type \($p.type), which this test does not evaluate") end;
+      def headers_match:
+        all((.headers // [])[]; (.type // "Exact") as $t
+          | if $t != "Exact" then error("a header match of type \($t), which this test does not evaluate")
+            else $headers[.name | ascii_downcase] == .value end);
+      def request_matches:
+        if (keys - ["method", "path", "headers"] | length) > 0 then error("a match by \(keys - ["method", "path", "headers"] | join(", ")), which this test does not evaluate")
+        else ((.method // $method) == $method) and path_matches and headers_match end;
+    [ .spec.rules | to_entries[] | .key as $rule | ((.value.backendRefs // []) | length > 0) as $backend
+      | (.value.matches // [{}])[] | select(request_matches)
+      | {exact: (if path_of.type == "Exact" then 1 else 0 end), length: (path_of.value | length),
+         method: (if .method then 1 else 0 end), headers: ((.headers // []) | length), rule: (0 - $rule), $backend} ]
+    | if length == 0 then false else (sort_by(.exact, .length, .method, .headers, .rule) | last | .backend) end' >/dev/null
+}
+
+# interface_reach FILE...: one line for each way, in the objects of the files, that Locust's master
+# is reached from the public Gateway other than through the route locust behind the cluster's
+# sign-in, naming what does it: a route other than locust of locust whose rules send to the Service
+# locust-master of locust, as a backend, a backend's mirror or a rule's mirror, whatever namespace
+# the reference names or leaves out, or that route sending to it on another port than 8089; a route
+# of locust on the public Gateway that no SecurityPolicy of locust asking oauth2-proxy of sso-system,
+# without failing open, targets by name and that is not such a route's sign-in route <name>-oauth2
+# sending to oauth2-proxy of sso-system alone; an object other than that policy that targets the
+# route locust, by reference, or a route of locust, by selector; a route other than locust and
+# locust-oauth2 of locust that lists the host of the route locust; and a ReferenceGrant of locust
+# that lets another namespace refer to its Services, as a route there could then reach the master's
+# pods through any Service of locust that selects them. Prints nothing when none does.
+interface_reach() {
+  # shellcheck disable=SC2016 # $all, $own, $r, $p, $to, $protected and $hosts are jq variables.
+  yq -N -o json -I0 'select(. != null)' "$@" | jq -rs '
+    [.[] | objects] as $all
+    | def on_public: .metadata.namespace as $own | any(.spec.parentRefs[]?; .name == "public"
+        and (.kind // "Gateway") == "Gateway" and (.namespace // $own) == "envoy-gateway-system");
+      def refs: .metadata.namespace as $own
+        | (.spec.rules[]? | (.backendRefs[]? | ., (.filters[]?.requestMirror.backendRef // empty)),
+            (.filters[]?.requestMirror.backendRef // empty))
+        | select((.kind // "Service") == "Service" and (.group // "") == "") | {name, namespace: (.namespace // $own), port};
+      def asks_sign_in: .kind == "SecurityPolicy" and .spec.extAuth != null
+        and (.spec.extAuth.failOpen // false) == false
+        and ([.spec.extAuth.http.backendRefs[]? | [(.kind // "Service"), .name, .namespace]] == [["Service", "oauth2-proxy", "sso-system"]]);
+      def the_route: .kind == "HTTPRoute" and .metadata.namespace == "locust" and .metadata.name == "locust";
+    [$all[] | select(.metadata.namespace == "locust" and asks_sign_in) | .spec.targetRefs[]?
+      | select((.group // "") == "gateway.networking.k8s.io" and .kind == "HTTPRoute") | .name] as $protected
+    | ([$all[] | select(the_route) | .spec.hostnames[]?]) as $hosts
+    | ($all[] | select(.kind | tostring | endswith("Route")) | . as $r
+        | [refs | select(.name == "locust-master" and .namespace == "locust")] as $to
+        | select($to | length > 0)
+        | if ($r | the_route) then ($to[] | select(.port != 8089) | "HTTPRoute/locust/locust sends to the Service locust-master of locust on \(.port)")
+          else "\($r.kind)/\($r.metadata.namespace)/\($r.metadata.name) sends to the Service locust-master of locust" end),
+      ($all[] | select(.kind | tostring | endswith("Route")) | select(.metadata.namespace == "locust" and on_public) | . as $r
+        | select(($protected | index($r.metadata.name)) == null)
+        | select(($r.metadata.name | endswith("-oauth2")) and ($protected | index($r.metadata.name | sub("-oauth2$"; ""))) != null
+            and ([$r | refs | [.name, .namespace]] | unique == [["oauth2-proxy", "sso-system"]]) | not)
+        | "\($r.kind)/locust/\($r.metadata.name) is on the public Gateway and no policy that asks oauth2-proxy targets it"),
+      ($all[] | . as $p | ($p.metadata.namespace // "") as $own | select(($p.spec | type) == "object")
+        | select(any(([$p.spec.targetRef // empty] + ($p.spec.targetRefs // []))[];
+              (.kind // "") == "HTTPRoute" and .name == "locust" and $own == "locust")
+            or ($own == "locust" and any($p.spec.targetSelectors[]?; (.kind // "") == "HTTPRoute")))
+        | select(($p.kind == "SecurityPolicy" and $p.metadata.name == "locust" and ($p | asks_sign_in)) | not)
+        | "\($p.kind)/\($own)/\($p.metadata.name) targets the route locust"),
+      ($all[] | select(.kind | tostring | endswith("Route")) | . as $r
+        | select(any(.spec.hostnames[]?; . as $h | $hosts | index($h) != null))
+        | select(($r.metadata.namespace == "locust" and ($r.metadata.name == "locust" or $r.metadata.name == "locust-oauth2")) | not)
+        | "\($r.kind)/\($r.metadata.namespace)/\($r.metadata.name) lists the host of the route locust"),
+      ($all[] | select(.kind == "ReferenceGrant" and .metadata.namespace == "locust")
+        | select(any(.spec.to[]?; (.group // "") == "" and .kind == "Service"))
+        | "ReferenceGrant/locust/\(.metadata.name) lets another namespace refer to the Services of locust")'
+}
+
+# paths_record FILE VERSION: fails, saying what to read again and what to set, unless the header of
+# the route in FILE records, once, that its matches were read from the Locust release VERSION,
+# beside one Source line that names locust/web.py at that release's tag.
+paths_record() {
+  local file=$1 version=$2 record source
+  record="$(grep -E '^#[[:blank:]]*locust-paths:' "$file" || true)"
+  source="$(grep -E '^#[[:blank:]]*Source:[[:blank:]]*https://' "$file" | sed -E 's/^#[[:blank:]]*Source:[[:blank:]]*//' || true)"
+  echo "record: ${record:-none}; source: ${source:-none}; the master runs Locust $version"
+  [ "$(grep -c . <<<"$record")" -eq 1 ] && [ "$(grep -c . <<<"$source")" -eq 1 ] ||
+    { echo "$file needs one '# locust-paths: <release>' line and one '# Source:' line"; return 1; }
+  record="$(sed -E 's/^#[[:blank:]]*locust-paths:[[:blank:]]*//; s/[[:blank:]]*$//' <<<"$record")"
+  if [ "$record" != "$version" ] || [ "$source" != "https://github.com/locustio/locust/blob/$version/locust/web.py" ]; then
+    echo "the route's matches were read from Locust $record, and the master runs $version:" \
+      "read locust/web.py, locust/argument_parser.py and locust/env.py and the interface's page and bundle in" \
+      "locust/webui/dist/ at $version again, change the route's matches and the requests tests/locust.bats sends" \
+      "through them to what the interface asks, and set the record to $version and the Source line to" \
+      "https://github.com/locustio/locust/blob/$version/locust/web.py"
+    return 1
+  fi
+}
+
+@test "Locust's interface answers at locust under the cluster's domain on the public Gateway, behind the cluster's sign-in" {
+  local ks domain objects route policy signin grant
+  domain="$(yq -e '.CLUSTER_DOMAIN' "$VARS")"
+  ks="$REPO/$ROUTE_DIR/ks.yaml"
+  # The application beside Locust, in its namespace, as the overlay applies it: shaped as the log
+  # store's route, with the component, the route's and the host's names, waiting, after the Gateway,
+  # Locust, the sign-in and the exporter that answers its Probe. No patch of the overlay changes it.
   overlay
+  [ "$(yq -o json -I0 '.spec | sort_keys(..)' "$ks")" \
+    = "$(yq -N -o json -I0 'select(.kind == "Kustomization" and .metadata.name == "locust-route") | .spec | sort_keys(..)' "$OVERLAY")" ]
+  echo "the Kustomization: $(yq -o json -I0 '.spec' "$ks")"
+  [ "$(yq '.metadata.name + " " + .metadata.namespace' "$ks")" = "locust-route flux-system" ]
+  [ "$(yq '.spec.path' "$ks")" = "./apps/base/locust/locust-route/app" ]
+  [ "$(yq '.spec.targetNamespace' "$ks")" = "$NAMESPACE" ]
+  [ "$(yq -o json -I0 '.spec.components' "$ks")" = '["../../../../../components/sso"]' ]
+  [ "$(yq -o json -I0 '.spec.postBuild.substitute | sort_keys(.)' "$ks")" = '{"SSO_HOSTNAME":"locust","SSO_ROUTE":"locust"}' ]
+  [ "$(yq '.spec.dependsOn | map(.name) | sort | join(" ")' "$ks")" = "blackbox-exporter gateway-public locust oauth2-proxy" ]
+  [ "$(yq '.spec.wait' "$ks")" = true ]
+  [ "$(yq -o json -I0 '.spec.sourceRef' "$ks")" = '{"kind":"ExternalArtifact","name":"locust-route"}' ]
+  # Locust waits, so the route is applied once the master answers its readiness probe.
+  [ "$(object "$OVERLAY" Kustomization locust | yq '.spec.wait')" = true ]
+  # The namespace's routes may attach to the public Gateway's https listener.
+  [ "$(object "$OVERLAY" Namespace "$NAMESPACE" | yq '.metadata.labels["k8s-gitops/gateway"]')" = public ]
+  # app/ holds the one HTTPRoute and its Probe; the component adds the policy and the sign-in route,
+  # all in locust.
+  [ "$(cd "$REPO/$ROUTE_DIR" && find . -type f | LC_ALL=C sort | paste -sd' ' -)" = "./app/httproute.yaml ./app/kustomization.yaml ./app/probe.yaml ./ks.yaml" ]
+  # shellcheck disable=SC2016 # The files hold a ${NAME} reference, not for the shell to expand.
+  [ "$(yq -N 'select(.kind != "Kustomization") | .kind + "/" + .metadata.name' "$REPO/$ROUTE_DIR"/app/*.yaml | paste -sd' ' -)" \
+    = 'HTTPRoute/${SSO_ROUTE} Probe/${SSO_ROUTE}' ]
+  [ "$(yq -o json -I0 '.resources' "$REPO/$ROUTE_DIR/app/kustomization.yaml")" = '["httproute.yaml","probe.yaml"]' ]
+  build_app locust-route
+  objects="$(yq -N 'select(.kind != null) | .kind + "/" + .metadata.namespace + "/" + .metadata.name' "$APP_BUILT" | LC_ALL=C sort | paste -sd' ' -)"
+  echo "built: $objects"
+  [ "$objects" = "HTTPRoute/locust/locust HTTPRoute/locust/locust-oauth2 Probe/locust/locust SecurityPolicy/locust/locust" ]
+  # The route: on the public Gateway's https listener, for locust under the cluster's domain, with
+  # one backend, the master's Service on its web port.
+  route="$(yq -N -o json -I0 'select(.kind == "HTTPRoute" and .metadata.name == "locust")' "$APP_BUILT")"
+  [ "$(jq -cS '.spec.parentRefs' <<<"$route")" = '[{"name":"public","namespace":"envoy-gateway-system","sectionName":"https"}]' ]
+  [ "$(jq -cS '.spec.hostnames' <<<"$route")" = "[\"locust.$domain\"]" ]
+  [ "$(jq -cS '[.spec.rules[] | (.backendRefs // [])[]]' <<<"$route")" = '[{"name":"locust-master","port":8089}]' ]
+  # Its one policy targets it alone, asks oauth2-proxy's Service at the root with the route's host
+  # to return to, sends it the cookie and nothing else of the request's headers, and does not fail
+  # open: the whole spec, so that no field added to it goes unseen.
+  policy="$(yq -N -o json -I0 'select(.kind == "SecurityPolicy")' "$APP_BUILT")"
+  echo "the policy: $(jq -cS '.spec' <<<"$policy")"
+  [ "$(jq -cS '.spec' <<<"$policy")" = "$(jq -cnS --arg domain "$domain" '{
+    targetRefs: [{group: "gateway.networking.k8s.io", kind: "HTTPRoute", name: "locust"}],
+    extAuth: {headersToExtAuth: ["cookie"],
+      http: {backendRefs: [{name: "oauth2-proxy", namespace: "sso-system", port: 80}],
+        pathOverride: "/?rd=https://locust.\($domain)/", headersToBackend: ["x-auth-request-user", "x-auth-request-email"]}}}')" ]
+  # The sign-in route: /oauth2/ on the same host, to oauth2-proxy.
+  signin="$(yq -N -o json -I0 'select(.kind == "HTTPRoute" and .metadata.name == "locust-oauth2")' "$APP_BUILT")"
+  [ "$(jq -cS '.spec.parentRefs' <<<"$signin")" = '[{"name":"public","namespace":"envoy-gateway-system","sectionName":"https"}]' ]
+  [ "$(jq -cS '.spec.hostnames' <<<"$signin")" = "[\"locust.$domain\"]" ]
+  [ "$(jq -cS '.spec.rules' <<<"$signin")" = "$(jq -cnS '[{matches: [{path: {type: "PathPrefix", value: "/oauth2/"}}],
+    backendRefs: [{name: "oauth2-proxy", namespace: "sso-system", port: 80}]}]')" ]
+  # oauth2-proxy's grant, as its application applies it in sso-system, lets locust's policy and
+  # sign-in route refer to the Service, and the Service alone.
+  build_app oauth2-proxy
+  grant="$(yq -N -o json -I0 'select(.kind == "ReferenceGrant" and .metadata.name == "oauth2-proxy")' "$APP_BUILT")"
+  [ "$(jq -r '.metadata.namespace' <<<"$grant")" = sso-system ]
+  [ "$(jq -cS '.spec.to' <<<"$grant")" = '[{"group":"","kind":"Service","name":"oauth2-proxy"}]' ]
+  [ "$(jq -r '[.spec.from[] | select(.namespace == "locust") | .group + "/" + .kind] | sort | join(",")' <<<"$grant")" \
+    = "gateway.envoyproxy.io/SecurityPolicy,gateway.networking.k8s.io/HTTPRoute" ]
+  # The host, the return address and the hostname the Probe sends on follow the domain.
+  other_vars
+  build_app locust-route "$OTHER"
+  [ "$(yq -N 'select(.kind == "HTTPRoute") | .metadata.name + " " + (.spec.hostnames | join(","))' "$APP_BUILT" | LC_ALL=C sort | paste -sd, -)" \
+    = "locust locust.other.example.org,locust-oauth2 locust.other.example.org" ]
+  [ "$(yq -N 'select(.kind == "SecurityPolicy") | .spec.extAuth.http.pathOverride' "$APP_BUILT")" = "/?rd=https://locust.other.example.org/" ]
+  [ "$(yq -N 'select(.kind == "Probe") | .spec.targets.staticConfig.labels.hostname' "$APP_BUILT")" = locust.other.example.org ]
+}
+
+@test "Only the interface's reads and its own page's posts are routed to Locust's master" {
+  local domain origin service request method target header
+  domain="$(yq -e '.CLUSTER_DOMAIN' "$VARS")"
+  origin="https://locust.$domain"
+  build_app locust-route
+  yq -N 'select(.kind == "HTTPRoute" and .metadata.name == "locust")' "$APP_BUILT" >"$BATS_TEST_TMPDIR/route.yaml"
+  [ "$(yq '.metadata.namespace' "$BATS_TEST_TMPDIR/route.yaml")" = "$NAMESPACE" ]
+  echo "rules: $(yq -o json -I0 '.spec.rules' "$BATS_TEST_TMPDIR/route.yaml")"
+  # One rule in full, its matches in order, with no filter and one backend: GET and HEAD of any path,
+  # which serve the interface's page, its files, its polled reads, the report and the CSVs; and POST
+  # of the three paths the interface posts to, each only with the Origin of the route's own host,
+  # which a browser sends with every POST and a page of another origin cannot set.
+  [ "$(yq -o json -I0 '.spec.rules' "$BATS_TEST_TMPDIR/route.yaml" | jq -cS .)" = "$(jq -cnS --arg origin "$origin" '[{
+    matches: [
+      {method: "GET", path: {type: "PathPrefix", value: "/"}},
+      {method: "HEAD", path: {type: "PathPrefix", value: "/"}},
+      {method: "POST", path: {type: "Exact", value: "/swarm"}, headers: [{type: "Exact", name: "Origin", value: $origin}]},
+      {method: "POST", path: {type: "Exact", value: "/stop"}, headers: [{type: "Exact", name: "Origin", value: $origin}]},
+      {method: "POST", path: {type: "Exact", value: "/stats/reset"}, headers: [{type: "Exact", name: "Origin", value: $origin}]}],
+    backendRefs: [{name: "locust-master", port: 8089}]}]')" ]
+  # The backend's port is the Service's web port, which targets the master's web port, 8089, and not
+  # the port the workers connect to.
+  build_app locust
+  service="$(object "$APP_BUILT" Service locust-master | yq -o json -I0 '.spec.ports[] | select(.port == 8089)')"
+  [ "$(jq -c '[.name, .targetPort]' <<<"$service")" = '["web","web"]' ]
+  [ "$(object "$APP_BUILT" Deployment locust-master | yq '.spec.template.spec.containers[0].ports[] | select(.name == "web") | .containerPort')" = 8089 ]
+  # What reaches the master, by Gateway API's matching of the rule: the page and the files it loads
+  # (locust/webui/dist/index.html of 2.47.0), the reads its bundle polls (its RTK Query endpoints,
+  # relative to the page), the report and the CSVs it links, as GET and HEAD, and its three posts
+  # with the route's own Origin.
+  local admitted=(
+    "GET /"
+    "HEAD /"
+    "GET /assets/src-Cl6CiemE.js"
+    "GET /assets/favicon-light.png"
+    "GET /assets/favicon-dark.png"
+    "HEAD /assets/src-Cl6CiemE.js"
+    "GET /stats/requests"
+    "GET /tasks"
+    "GET /exceptions"
+    "GET /logs"
+    "GET /worker-count"
+    "GET /stats/report?theme=dark"
+    "GET /stats/requests/csv"
+    "GET /stats/requests_full_history/csv"
+    "GET /stats/failures/csv"
+    "GET /exceptions/csv"
+    "POST /swarm Origin=$origin"
+    "POST /stop Origin=$origin"
+    "POST /stats/reset Origin=$origin"
+    "POST /swarm origin=$origin"
+  )
+  # What does not: the posts without the Origin, with a null one, from the route's host over http,
+  # from another host under the domain, which the session cookie's SameSite=Lax would reach, or in
+  # another spelling; the user-class post and the posts' paths changed by a trailing slash or a
+  # letter's case; and every other method.
+  local refused=(
+    "POST /swarm"
+    "POST /stop"
+    "POST /stats/reset"
+    "POST /swarm Origin=null"
+    "POST /stop Origin=null"
+    "POST /swarm Origin=http://locust.$domain"
+    "POST /swarm Origin=https://hello-sso.$domain"
+    "POST /stop Origin=https://logs.$domain"
+    "POST /stats/reset Origin=https://other.$domain"
+    "POST /swarm Origin=https://locust.$domain:443"
+    "POST /swarm Origin=https://LOCUST.$domain"
+    "POST /swarm Origin=$origin/"
+    "POST /swarm Referer=$origin/"
+    "POST /user Origin=$origin"
+    "POST /swarm/ Origin=$origin"
+    "POST /Swarm Origin=$origin"
+    "POST /stop/ Origin=$origin"
+    "POST /stats/reset/ Origin=$origin"
+    "POST / Origin=$origin"
+    "POST /stats/requests Origin=$origin"
+    "PUT /swarm Origin=$origin"
+    "PUT / Origin=$origin"
+    "DELETE /swarm Origin=$origin"
+    "DELETE / Origin=$origin"
+    "PATCH /swarm Origin=$origin"
+    "PATCH /user Origin=$origin"
+    "OPTIONS /swarm Origin=$origin"
+    "OPTIONS / Origin=$origin"
+    "TRACE / Origin=$origin"
+  )
+  for request in "${admitted[@]}"; do
+    read -r method target header <<<"$request"
+    run route_admits "$method" "$target" ${header:+"$header"}
+    [ "$status" -eq 0 ] || { echo "the route does not send $request to the master: $output"; return 1; }
+  done
+  for request in "${refused[@]}"; do
+    read -r method target header <<<"$request"
+    run route_admits "$method" "$target" ${header:+"$header"}
+    [ "$status" -eq 1 ] || { echo "the route sends $request to the master: $output"; return 1; }
+  done
+}
+
+@test "The paths routed to Locust were read from the Locust release the master runs" {
+  local image version pin
+  built
+  deployment locust-master
+  image="$(yq '.image' "$CONTAINER")"
+  [[ $image =~ ^docker\.io/locustio/locust:([0-9]+\.[0-9]+\.[0-9]+)@sha256:[0-9a-f]{64}$ ]]
+  version="${BASH_REMATCH[1]}"
+  echo "the master runs $image"
+  paths_record "$REPO/$ROUTE_FILE" "$version"
+  # Renovate moves none of it: the pin check holds the record as moved by hand.
+  pin="$(awk -F'\t' -v file="$ROUTE_FILE" '$1 == file && $2 == "locust-paths"' "$REPO/.renovate/by-hand.tsv")"
+  [ -n "$pin" ] || { echo "no row of .renovate/by-hand.tsv for locust-paths in $ROUTE_FILE"; return 1; }
+  # A record of another release than the master's fails, saying what to read and what to set.
+  sed -E 's/^(#[[:blank:]]*locust-paths:[[:blank:]]*).*/\12.0.0/' "$REPO/$ROUTE_FILE" >"$BATS_TEST_TMPDIR/moved.yaml"
+  run paths_record "$BATS_TEST_TMPDIR/moved.yaml" "$version"
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"read locust/web.py, locust/argument_parser.py and locust/env.py and the interface's page and bundle in locust/webui/dist/ at $version again"* ]]
+  [[ $output == *"set the record to $version and the Source line to https://github.com/locustio/locust/blob/$version/locust/web.py"* ]]
+  # So does a Source line of another release beside the right record.
+  sed -E 's#^(\#[[:blank:]]*Source:.*/blob/)[^/]+(/.*)$#\12.0.0\2#' "$REPO/$ROUTE_FILE" >"$BATS_TEST_TMPDIR/source.yaml"
+  run paths_record "$BATS_TEST_TMPDIR/source.yaml" "$version"
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"set the record to $version and the Source line to"* ]]
+}
+
+@test "Locust's route is probed for the sign-in redirect at the interface's page" {
+  local domain probe hello target path
+  domain="$(yq -e '.CLUSTER_DOMAIN' "$VARS")"
+  build_app locust-route
+  probe="$(yq -N -o json -I0 'select(.kind == "Probe")' "$APP_BUILT")"
+  echo "the Probe: $probe"
+  [ "$(jq -r '.metadata.namespace + "/" + .metadata.name' <<<"$probe")" = locust/locust ]
+  # hello-sso's Probe, but for the hostname it sends on: the job the alerts read, the module that
+  # expects the redirect to sign-in, the exporter as its prober and the proxies' Service at / as its
+  # one target.
+  build_app hello-sso
+  hello="$(yq -N -o json -I0 'select(.kind == "Probe")' "$APP_BUILT")"
+  [ "$(jq -cS '.spec | .targets.staticConfig.labels.hostname = "-"' <<<"$probe")" = "$(jq -cS '.spec | .targets.staticConfig.labels.hostname = "-"' <<<"$hello")" ]
+  [ "$(jq -r '.spec.targets.staticConfig.labels.hostname' <<<"$probe")" = "locust.$domain" ]
+  [ "$(jq -r '.spec.jobName + " " + .spec.module + " " + .spec.prober.url' <<<"$probe")" \
+    = "public-endpoints public_https_signin blackbox-exporter.monitoring.svc.cluster.local:9115" ]
+  target="$(jq -r '.spec.targets.staticConfig.static | if length == 1 then .[0] else error("not one target") end' <<<"$probe")"
+  [[ $target =~ ^https://envoy-envoy-gateway-system-public-[0-9a-f]{8}\.envoy-gateway-system\.svc\.cluster\.local(/.*)$ ]]
+  path="${BASH_REMATCH[1]}"
+  [ "$path" = / ]
+  # That path is the interface's page, which the master's readiness probe asks on its web port, and
+  # which no sign-in of Locust's guards: the master runs no --web-login (forbidden, above). So the
+  # day the policy is lost the probe meets Locust's 200, and only the redirect passes it.
+  built
+  deployment locust-master
+  [ "$(yq -o json -I0 '.readinessProbe.httpGet' "$CONTAINER" | jq -cS .)" = "{\"path\":\"$path\",\"port\":\"web\"}" ]
+  [ -z "$(forbidden "$BUILT")" ]
+}
+
+@test "Locust's route is selected by an overlay entry, builds nothing when it is not, and is refused without Locust, the Gateway, the sign-in or the exporter" {
+  local with without dependency
+  # One entry of the overlay, which builds the Kustomization.
+  [ "$(yq '.resources[] | select(test("/locust-route/"))' "$OVERLAY_DIR/kustomization.yaml")" = ../../base/locust/locust-route/ks.yaml ]
+  overlay
+  [ "$(object "$OVERLAY" Kustomization locust-route | yq '.spec.path')" = ./apps/base/locust/locust-route/app ]
+  with="$(yq -N '.kind + "/" + (.metadata.namespace // "-") + "/" + .metadata.name' "$OVERLAY" | LC_ALL=C sort)"
+  # Without it, the overlay builds what it built but that Kustomization, and the tree passes.
+  tree_without '/locust/locust-route/ks.yaml$'
+  overlay "$TREE/kubernetes/apps/overlays/lab-sto2"
+  without="$(yq -N '.kind + "/" + (.metadata.namespace // "-") + "/" + .metadata.name' "$OVERLAY" | LC_ALL=C sort)"
+  echo "only with the entry: $(comm -23 <(echo "$with") <(echo "$without") | paste -sd' ' -); only without: $(comm -13 <(echo "$with") <(echo "$without") | paste -sd' ' -)"
+  [ "$(comm -23 <(echo "$with") <(echo "$without"))" = Kustomization/flux-system/locust-route ]
+  [ -z "$(comm -13 <(echo "$with") <(echo "$without"))" ]
+  run "$REPO/scripts/kubernetes-check" "$TREE"
+  echo "$output"
+  [ "$status" -eq 0 ]
+  # Each application it names, left out, is refused, naming both.
+  for dependency in locust gateway-public oauth2-proxy blackbox-exporter; do
+    tree_without "/$dependency/ks.yaml\$"
+    run "$REPO/scripts/kubernetes-check" "$TREE"
+    echo "without $dependency: status $status"
+    [ "$status" -ne 0 ]
+    [[ $output == *"kubernetes/apps/base/locust/locust-route/ks.yaml: Kustomization locust-route names $dependency in dependsOn"* ]] ||
+      { echo "$output"; return 1; }
+  done
+}
+
+@test "Only Locust's route behind the cluster's sign-in reaches its interface, and nothing scrapes it" {
+  local found named domain
+  domain="$(yq -e '.CLUSTER_DOMAIN' "$VARS")"
+  built
   real_render
-  # What it applies is its workloads, their Service, its locustfile and its policies, and no route,
-  # probe, monitor, rule or dashboard, nothing of the Gateway API or Envoy Gateway's.
+  # What the application applies is its workloads, their Service, its locustfile and its policies,
+  # and no route, probe, monitor, rule or dashboard, nothing of the Gateway API or Envoy Gateway's:
+  # its route is an application of its own.
   [ "$(yq -N 'select(. != null) | .kind' "$BUILT" | LC_ALL=C sort -u | paste -sd' ' -)" = "CiliumNetworkPolicy ConfigMap Deployment Service" ]
   [ -z "$(yq -N 'select(.kind | test("^(HTTPRoute|GRPCRoute|TLSRoute|TCPRoute|UDPRoute|Probe|ServiceMonitor|PodMonitor|PrometheusRule|GrafanaDashboard)$")) | .kind' "$BUILT")" ]
   [ -z "$(yq -N 'select(.apiVersion | test("^gateway\\.(networking\\.k8s\\.io|envoyproxy\\.io)/")) | .kind' "$BUILT")" ]
-  # The namespace carries no Gateway label, so no route of it may attach to the public Gateway, and
-  # the Service is of the cluster alone, with no external address and no label that would announce
+  # The Service is of the cluster alone, with no external address and no label that would announce
   # it.
-  [ "$(object "$OVERLAY" Namespace "$NAMESPACE" | yq '.metadata.labels | has("k8s-gitops/gateway")')" = false ]
   [ "$(object "$BUILT" Service locust-master | yq -o json -I0 '.' | jq -c '[.spec.type // "ClusterIP", (.spec.externalIPs // [] | length),
     (.metadata.labels // {} | has("k8s-gitops/announce")), (.metadata.annotations // {} | keys | map(select(startswith("lbipam.cilium.io/"))))]')" \
     = '["ClusterIP",0,false,[]]' ]
   # Its pods ask for no scrape: Locust serves no metrics.
   [ -z "$(yq -o json -I0 'select(. != null)' "$BUILT" | jq -r 'select(.spec.template != null) | .spec.template.metadata.annotations // {} | keys[]')" ]
-  # No route, grant or monitor of the whole render names Locust, wherever it is.
+  # In the whole render, the route locust, behind its policy, is the one way from the Gateway to the
+  # master: no other route sends there, it sends nowhere else, nothing else attaches to it or to its
+  # host, and no grant opens locust's Services to another namespace.
+  [ -f "$(rendered HTTPRoute.gateway.networking.k8s.io_locust_locust.yaml)" ]
+  [ -f "$(rendered SecurityPolicy.gateway.envoyproxy.io_locust_locust.yaml)" ]
+  found="$(interface_reach "$REAL"/*/*/*.yaml)"
+  echo "ways to the master past the sign-in: ${found:-none}"
+  [ -z "$found" ]
+  # The only route, grant, Gateway or Envoy Gateway object, probe or monitor of the render that names
+  # Locust is the route, its sign-in route, its policy, its Probe and oauth2-proxy's grant.
   named="$(cd "$REAL" && find . -type f \( -name 'HTTPRoute.*' -o -name 'GRPCRoute.*' -o -name 'TLSRoute.*' -o -name 'TCPRoute.*' \
-    -o -name 'UDPRoute.*' -o -name 'ReferenceGrant.*' -o -name 'ServiceMonitor.*' -o -name 'PodMonitor.*' -o -name 'Probe.*' \
-    -o -name 'ScrapeConfig.*' -o -name 'PrometheusRule.*' -o -name 'GrafanaDashboard.*' \) -exec grep -l 'locust' {} + || true)"
-  [ -z "$named" ] || { echo "these name Locust: $named"; return 1; }
-  [ -z "$(cd "$REAL" && find . -type f -name '*_locust_*' ! -name '*Policy*' ! -name 'Deployment.apps_*' ! -name 'Service_*' ! -name 'ConfigMap_*' -printf '%f\n')" ]
+    -o -name 'UDPRoute.*' -o -name 'ReferenceGrant.*' -o -name '*.gateway.envoyproxy.io_*' -o -name 'ServiceMonitor.*' -o -name 'PodMonitor.*' \
+    -o -name 'Probe.*' -o -name 'ScrapeConfig.*' -o -name 'PrometheusRule.*' -o -name 'GrafanaDashboard.*' \) -exec grep -l 'locust' {} + |
+    sed 's#.*/##' | LC_ALL=C sort | paste -sd' ' -)"
+  echo "what names Locust: $named"
+  [ "$named" = "HTTPRoute.gateway.networking.k8s.io_locust_locust-oauth2.yaml HTTPRoute.gateway.networking.k8s.io_locust_locust.yaml Probe.monitoring.coreos.com_locust_locust.yaml ReferenceGrant.gateway.networking.k8s.io_sso-system_oauth2-proxy.yaml SecurityPolicy.gateway.envoyproxy.io_locust_locust.yaml" ]
+  # The one Probe of the host is the route's.
+  [ "$(yq -N 'select(.kind == "Probe") | select(.spec.targets.staticConfig.labels.hostname == "locust.'"$domain"'") | .metadata.namespace + "/" + .metadata.name' \
+    "$REAL"/*/*/Probe.monitoring.coreos.com_*.yaml)" = locust/locust ]
+  # And locust holds nothing else but its workloads, their Service and ConfigMaps and its policies.
+  [ "$(cd "$REAL" && find . -type f -name '*_locust_*' ! -name '*Policy*' ! -name 'Deployment.apps_*' ! -name 'Service_*' ! -name 'ConfigMap_*' -printf '%f\n' | LC_ALL=C sort | paste -sd' ' -)" \
+    = "HTTPRoute.gateway.networking.k8s.io_locust_locust-oauth2.yaml HTTPRoute.gateway.networking.k8s.io_locust_locust.yaml Probe.monitoring.coreos.com_locust_locust.yaml" ]
+  # Each way past the sign-in is named: a second route to the master's Service from another
+  # namespace; a route of locust that no policy covers; the route to the master's other port; the
+  # policy failing open; another object on the route; another route on its host; and a grant that
+  # opens locust's Services to another namespace.
+  awk 'FNR == 1 { print "---" } { print }' "$REAL"/*/*/*.yaml >"$BATS_TEST_TMPDIR/all.yaml"
+  cp "$BATS_TEST_TMPDIR/all.yaml" "$BATS_TEST_TMPDIR/second.yaml"
+  cat >>"$BATS_TEST_TMPDIR/second.yaml" <<'YAML'
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: locust-open
+  namespace: demo
+spec:
+  parentRefs:
+    - name: public
+      namespace: envoy-gateway-system
+      sectionName: https
+  hostnames:
+    - locust-open.example.org
+  rules:
+    - backendRefs:
+        - name: hello
+          port: 80
+          filters:
+            - type: RequestMirror
+              requestMirror:
+                backendRef:
+                  name: locust-master
+                  namespace: locust
+                  port: 8089
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: locust-bare
+  namespace: locust
+spec:
+  parentRefs:
+    - name: public
+      namespace: envoy-gateway-system
+      sectionName: https
+  hostnames:
+    - locust-bare.example.org
+  rules:
+    - backendRefs:
+        - name: locust-master
+          port: 8089
+YAML
+  found="$(interface_reach "$BATS_TEST_TMPDIR/second.yaml")"
+  echo "with a second route and a mirror: $found"
+  [ "$(LC_ALL=C sort <<<"$found" | paste -sd'|' -)" = "HTTPRoute/demo/locust-open sends to the Service locust-master of locust|HTTPRoute/locust/locust-bare is on the public Gateway and no policy that asks oauth2-proxy targets it|HTTPRoute/locust/locust-bare sends to the Service locust-master of locust" ]
+  yq '(select(.kind == "HTTPRoute" and .metadata.namespace == "locust" and .metadata.name == "locust") | .spec.rules[0].backendRefs[0].port) = 5557' \
+    "$BATS_TEST_TMPDIR/all.yaml" >"$BATS_TEST_TMPDIR/port.yaml"
+  found="$(interface_reach "$BATS_TEST_TMPDIR/port.yaml")"
+  echo "with the route to the workers' port: $found"
+  [ "$found" = "HTTPRoute/locust/locust sends to the Service locust-master of locust on 5557" ]
+  yq '(select(.kind == "SecurityPolicy" and .metadata.namespace == "locust") | .spec.extAuth.failOpen) = true' \
+    "$BATS_TEST_TMPDIR/all.yaml" >"$BATS_TEST_TMPDIR/open.yaml"
+  found="$(interface_reach "$BATS_TEST_TMPDIR/open.yaml")"
+  echo "with the policy failing open: $found"
+  [ "$(LC_ALL=C sort <<<"$found" | paste -sd'|' -)" = "HTTPRoute/locust/locust is on the public Gateway and no policy that asks oauth2-proxy targets it|HTTPRoute/locust/locust-oauth2 is on the public Gateway and no policy that asks oauth2-proxy targets it|SecurityPolicy/locust/locust targets the route locust" ]
+  cp "$BATS_TEST_TMPDIR/all.yaml" "$BATS_TEST_TMPDIR/host.yaml"
+  cat >>"$BATS_TEST_TMPDIR/host.yaml" <<YAML
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: hello-locust
+  namespace: demo
+spec:
+  parentRefs:
+    - name: public
+      namespace: envoy-gateway-system
+      sectionName: https
+  hostnames:
+    - locust.$domain
+  rules:
+    - backendRefs:
+        - name: hello
+          port: 80
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyExtensionPolicy
+metadata:
+  name: locust
+  namespace: locust
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: locust
+---
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: locust-open
+  namespace: locust
+spec:
+  from:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      namespace: demo
+  to:
+    - group: ""
+      kind: Service
+YAML
+  found="$(interface_reach "$BATS_TEST_TMPDIR/host.yaml")"
+  echo "with another route on the host, a second object on the route and a grant: $found"
+  [ "$(LC_ALL=C sort <<<"$found" | paste -sd'|' -)" = "EnvoyExtensionPolicy/locust/locust targets the route locust|HTTPRoute/demo/hello-locust lists the host of the route locust|ReferenceGrant/locust/locust-open lets another namespace refer to the Services of locust" ]
 }
 
 @test "just locust forwards a local port to Locust's master" {

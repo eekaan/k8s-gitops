@@ -9,9 +9,15 @@ spec:
   path: ./apps/base/monitoring/vector/app
   targetNamespace: monitoring
   # The chart creates a PodMonitor, whose kind exists once prometheus-operator-crds is Ready. The
-  # collector does not wait for the store: it holds what it gathers until the store answers.
+  # collector sends to the store through vmauth, so it waits for vmauth. A request vmauth refuses is
+  # dropped, not retried, and what keeps vmauth from refusing the collector is the Secret
+  # vmauth-vector rather than this order: this file reaches Flux through the Kustomization cluster
+  # and the collector's values through an artifact of their own, so a change to both can apply
+  # either first. The collector's pods do not start without that Secret, and vmauth reads the same
+  # value, written once; a request that finds no vmauth or no store is held and tried again.
   dependsOn:
     - name: prometheus-operator-crds
+    - name: vmauth
   sourceRef:
     kind: ExternalArtifact
     name: vector

@@ -6,3 +6,4 @@ resources:
   - image-pinned.yaml
   - restricted-security-context.yaml
   - namespace-pod-security-level.yaml
+  - sandbox-tier.yaml

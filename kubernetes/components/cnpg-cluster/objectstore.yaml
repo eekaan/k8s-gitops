@@ -1,16 +1,18 @@
 ---
 # Where this cluster's WAL archive and base backups go, for the Barman Cloud plugin. The directory
-# the plugin writes is the destination below and, under it, the cluster's name (serverName in the
-# Cluster's plugin entry): s3://<prefix>-postgres/<cluster>/<namespace>/<name>, in the postgres bucket
-# of the object storage, so no two databases of a cluster share a path and two clusters that share a
-# bucket do not either. The bucket's prefix, the endpoint and the Kubernetes cluster's name come from
+# the plugin writes is the destination below and, under it, the server name (serverName in the
+# Cluster's plugin entry), the cluster's name while it runs PostgreSQL 18:
+# s3://<prefix>-postgres/<cluster>/<namespace>/<server name>, in the postgres bucket of the object
+# storage, so no two databases of a cluster share a path and two clusters that share a bucket do not
+# either. The bucket's prefix, the endpoint and the Kubernetes cluster's name come from
 # cluster-config, the namespace and the name from the application.
 #
 # Retention: base backups and WAL are kept for a recovery window of 30 days, so the database can be
 # restored to any moment of the last 30 days. After each base backup the plugin deletes what falls
-# outside the window, the backups before the newest one that ends before it and the WAL before that
-# one, with the delete right of the key it holds, the cluster's S3 key. That key reaches every bucket
-# of the project, so a workload that holds it can delete the archive as well (ADR 0008).
+# outside the window under the current server name, the backups before the newest one that ends
+# before it and the WAL before that one, with the delete right of the key it holds, the cluster's S3
+# key. That key reaches every bucket of the project, so a workload that holds it can delete the
+# archive as well (ADR 0008).
 #
 # Every object is encrypted at the provider with a customer key (SSE-C, ADR 0008): sseCustomerKey
 # names the Secret key that holds the base64 of 256 bits, which the provider uses on each request and

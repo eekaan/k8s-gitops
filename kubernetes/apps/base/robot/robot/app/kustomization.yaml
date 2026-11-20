@@ -1,0 +1,29 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/kustomization
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ciliumnetworkpolicy.yaml
+  - cronjob.yaml
+  - deployment-reports.yaml
+  - persistentvolumeclaim.yaml
+  - service.yaml
+
+# The suites and the script, each under a name that carries the hash of its content, so a change
+# gives the CronJob a new ConfigMap and the next run reads it. Flux's substitution leaves them alone:
+# Robot's ${...} and bash's are its syntax, and strict substitution would fail the build.
+configMapGenerator:
+  - name: robot-suites
+    files:
+      - suites/common.resource
+      - suites/hello-http.robot
+      - suites/hello-ui.robot
+    options:
+      annotations:
+        kustomize.toolkit.fluxcd.io/substitute: disabled
+  - name: robot-scripts
+    files:
+      - run.sh
+    options:
+      annotations:
+        kustomize.toolkit.fluxcd.io/substitute: disabled

@@ -93,7 +93,9 @@ extensions:
   ([Kata Containers](https://github.com/kata-containers/kata-containers/blob/main/docs/install/README.md)).
   On a node without it, a pod that selects `kata` does not start.
 
-No workload selects either runtime class. `infra-check` refuses the QEMU guest agent extension
+No workload of the tree selects either runtime class; `just runtime-check` runs pods under the one
+it is given while it checks whether a pod under it could host a sandbox
+([kubernetes.md](kubernetes.md#runtime-classes)). `infra-check` refuses the QEMU guest agent extension
 ([runbooks/image-replacement.md](runbooks/image-replacement.md)).
 
 ## Upgrades
@@ -405,13 +407,17 @@ reads:
 - A port that a process on the host network opens without declaring it in its pod: Cilium's health
   checks on TCP 4240, which the agent serves on its node's address
   ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/pkg/health/server/server.go#L436-L465)),
-  Envoy's health listener on TCP 9878 and the kernel's VXLAN port, UDP 8472. No rule admits such a
-  port unless the inventory names it, so one that a client off the node needs and that has no rule
-  shows as a path that does not work, as the health checks and the overlay would without theirs.
-  Their rules are entries under `no-pod`, which say in prose what listens there.
-- A pod that an operator creates at run time, which no render holds. LINSTOR's CSI node plugin is
-  such a pod on the host network, and its ports are accounted for in prose, under
-  [What gets no rule](#what-gets-no-rule), from the operator's template. Pod Security refuses the
+  Envoy's health listener on TCP 9878, the kernel's VXLAN port, UDP 8472, Cilium's WireGuard
+  device on UDP 51871, and DRBD's replication, which the kernel serves on a TCP port of 7000-7999
+  for each volume a node holds. No rule admits such a port unless the inventory names it, so one
+  that a client off the node needs and that has no rule shows as a path that does not work, as the
+  health checks, the overlay, its encryption and DRBD's replication would without theirs. Their
+  rules are entries under `no-pod`, which say in prose what listens there.
+- A pod that an operator creates at run time, which no render holds. LINSTOR's CSI node plugin and
+  its satellites are such pods on the host network, from the operator's templates: the plugin's
+  ports are accounted for in prose, under [What gets no rule](#what-gets-no-rule), and the
+  satellites' ports, LINSTOR's and their DRBD reactor's, have rules of their own
+  ([What each node admits](#what-each-node-admits)), named under `no-pod`. Pod Security refuses the
   host network and host ports below the privileged level
   ([kubernetes.md](kubernetes.md#pod-security)), so only a namespace that enforces that level,
   `kube-system`, `monitoring`, `piraeus-datastore` or `security-system`, can hold another. A
@@ -478,10 +484,14 @@ BGP sessions to it, and ICMP at up to five packets a second.
 | `kube-scheduler` | TCP 10259 | control planes | `members`, `pods` | The scheduler's secure port, which Prometheus scrapes. |
 | `kubelet` | TCP 10250 | all | `members`, `pods` | The kubelet: the API server, for logs, exec and port forwarding, and metrics-server and Prometheus, for metrics. metrics-server serves the API's metrics, so a node it cannot reach makes that API unavailable, which breaks API discovery and the deletion of namespaces. |
 | `cilium-vxlan` | UDP 8472 | all | `members` | Cilium's overlay, which carries pod traffic between nodes in VXLAN on Linux's default port ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/Documentation/operations/system_requirements.rst#firewall-rules)). Cilium trusts the identity a VXLAN packet carries, so only the nodes may send it. |
+| `cilium-wireguard` | UDP 51871 | all | `members` | Cilium's WireGuard device, which each agent makes in the kernel and which the overlay's packets to another node pass through, encrypted, while Cilium's values turn WireGuard on: a peer's endpoint is the address its node is registered with, on this port ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/Documentation/operations/system_requirements.rst#firewall-rules), [kubernetes.md](kubernetes.md#encryption-between-nodes)). Only the agents send to it. |
 | `cilium-health` | TCP 4240 | all | `members` | Cilium's health checks between nodes; the ICMP echo they send as well is admitted by Talos itself. |
 | `hubble` | TCP 4244 | all | `members`, `pods` | The Hubble server in each node's Cilium agent, from which Hubble Relay reads the node's flows. |
 | `node-exporter` | TCP 9100 | all | `members`, `pods` | node-exporter, on the host network, which Prometheus scrapes. |
 | `cilium-agent-metrics` | TCP 9962 | all | `members`, `pods` | The Cilium agent's metrics, on the host network, which Prometheus scrapes: the workers' BGP sessions among them ([kubernetes.md](kubernetes.md#monitoring)). |
+| `linstor-satellite` | TCP 3366-3367 | all | `members`, `pods` | LINSTOR's satellites, on the host network of the workers: the LINSTOR controller, a pod, connects to each over TLS on 3367, the port the operator registers it with ([Piraeus](https://github.com/piraeusdatastore/piraeus-operator/blob/v2.12.1/internal/controller/linstorsatellite_controller.go#L460-L465), [kubernetes.md](kubernetes.md#who-may-call-linstor)). |
+| `drbd` | TCP 7000-7999 | all | `members` | DRBD's replication, between the workers' kernels: a volume's resource listens at the node's own address on a port of LINSTOR's range, 7000-7999 by default ([LINSTOR](https://github.com/LINBIT/linstor-server/blob/v1.35.3/server/src/main/java/com/linbit/linstor/core/objects/Node.java#L89-L90)), on each node that holds it, and its peers connect from theirs. |
+| `drbd-reactor` | TCP 9942 | all | `members`, `pods` | The DRBD reactor beside each satellite, on the host network, whose metrics Prometheus scrapes ([kubernetes.md](kubernetes.md#storage-monitoring)). |
 
 ### What gets no rule
 
@@ -527,14 +537,6 @@ BGP sessions to it, and ICMP at up to five packets a second.
   `cilium-bgp` sets `localPort`
   ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/pkg/bgp/manager/manager.go#L961-L966)).
   What an edge router sends on a session is a reply to the worker's connection, which Talos admits.
-- LINSTOR's satellites, which the controller reaches on TCP 3366-3367, and DRBD's replication, on a
-  TCP port per volume that LINSTOR takes from its `TcpPortAutoRange`, 7000-7999 unless the controller
-  is told otherwise ([LINBIT](https://kb.linbit.com/linstor/linstor-change-tcp-port-range-for-drbd-resources/)),
-  run on the pod network: the Piraeus operator gives the satellites, and DRBD with them, the host
-  network only when asked
-  ([Piraeus](https://github.com/piraeusdatastore/piraeus-operator/blob/v2.12.1/docs/how-to/drbd-host-networking.md)),
-  which `linstor-cluster` does not. Cilium carries that traffic between pods, where the firewall does
-  not look.
 
 ### What the firewall does not see
 
@@ -644,8 +646,9 @@ machine, each of these must pass, in this order:
    never answered, as it does not when the firewall drops it, which of its checks were still
    failing, or that it stopped answering at its own address once ready.
 8. `just cluster-check` passes: the Kubernetes API through the load balancer, every node Ready, the
-   pods of `kube-system` running, a pod's logs fetched through its kubelet and no scrape target of
-   the cluster's own components down.
+   pods of `kube-system` running, a pod's logs fetched through its kubelet, no scrape target of
+   the cluster's own components down, and, while Cilium's configuration turns WireGuard on, every
+   node's Cilium agent encrypting with a peer for every other node.
 9. The node's Talos API still reports the configuration in effect. Talos reverts a tried
    configuration once and for all, so one still in effect was in effect throughout the checks.
 
@@ -677,31 +680,54 @@ tried node, the checks open fresh connections on these paths:
 These are reached in the window as well, but on a connection that may be older than the try, so
 they are not proved there: the kubelet, TCP 10250, which the API server may reach on a connection it
 keeps (checks 3 and 8); Cilium's health port, TCP 4240, which Cilium probes on connections it keeps
-(check 4). And these are not reached in the window at all: etcd's peer and client ports, TCP
-2379-2380, whose members hold their streams open; etcd's metrics, the controller manager's and the
-scheduler's ports, TCP 2381, 10257 and 10259, and node-exporter's and the kubelet's from Prometheus,
-which keeps its scrape connections; the Cilium agents' metrics, TCP 9962, which Prometheus scrapes
-on a connection it keeps as well, and which no check asks for: their job, `cilium-agent`, is none of
-those `cluster-check` reads ([kubernetes.md](kubernetes.md#ciliums-metrics)); Hubble, TCP 4244,
-which Hubble Relay keeps; any path from a pod on the node itself, from the pod range; trustd, TCP
-50001, which a worker reaches when it joins; the CI host; and the nodes' floating addresses.
-`tests/node-firewall.bats` pins their rules offline.
+(check 4); Cilium's WireGuard port, UDP 51871, which carries the overlay's packets to another node
+while Cilium's values turn WireGuard on, on a connection each pair of devices keeps, as each sends
+to its peer from that port to that port (check 4, and item 7 below). And these
+are not reached in the window at all: etcd's peer and client ports, TCP 2379-2380, whose members
+hold their streams open; etcd's metrics, the controller manager's and the scheduler's ports, TCP
+2381, 10257 and 10259, and node-exporter's and the kubelet's from Prometheus, which keeps its scrape
+connections; the Cilium agents' metrics, TCP 9962, which Prometheus scrapes on a connection it keeps
+as well, and which no check asks for: their job, `cilium-agent`, is none of those `cluster-check`
+reads ([kubernetes.md](kubernetes.md#ciliums-metrics)); Hubble, TCP 4244, which Hubble Relay keeps;
+LINSTOR's satellites, TCP 3366-3367, to each of which the LINSTOR controller keeps its connection;
+DRBD's replication, TCP 7000-7999, whose peers keep theirs; the DRBD reactors' metrics, TCP 9942,
+which Prometheus scrapes on connections it keeps, and which no check asks for either; any path from
+a pod on the node itself, from the pod range; trustd, TCP 50001, which a worker reaches when it
+joins; the CI host; and the nodes' floating addresses. `tests/node-firewall.bats` pins their rules
+offline.
 
 After the rollout, each of these is proved once its client opens a new connection, which a restart
 makes it do. Until each has been, watch:
 
 1. Prometheus, restarted once: two scrape intervals later, `up` is 1 for every target of the
-   kubelet, node-exporter and `cilium-agent` jobs, a target on every node, and of the etcd,
-   controller manager and scheduler jobs, a target on every control plane. `just cluster-check`
-   reads the targets of each of those jobs but `cilium-agent`, whose targets, the proof of the rule
-   for TCP 9962, are read in Prometheus itself.
+   kubelet, node-exporter and `cilium-agent` jobs, a target on every node, of the etcd, controller
+   manager and scheduler jobs, a target on every control plane, and of the `linstor-satellite` job,
+   a target on every worker. `just cluster-check` reads the targets of each of those jobs but
+   `cilium-agent` and `linstor-satellite`, whose targets, the proof of the rules for TCP 9962 and
+   9942, are read in Prometheus itself.
 2. metrics-server, restarted once: `kubectl top nodes` answers for every node.
 3. Hubble Relay, restarted once: it reports every node connected.
 4. Cilium's agents, restarted one node at a time: `cilium-health status` reports every node
    reachable on the health port and through the overlay.
 5. One control plane, rebooted with `just cluster-reboot`: once it is back, `etcd status` from every
    control plane shows the same leader and no error, as its peers have opened their streams again.
-6. trustd and the CI host stay unproved until a worker joins and the CI host connects; the paths
+6. A worker's satellite pod, replaced: once its new pod is ready, `linstor node list` shows the node
+   Online, which the controller reaches on a new connection to TCP 3367. A volume made afterwards:
+   `linstor resource list` shows its resource Connected between the nodes that hold it, whose
+   kernels connect to each other afresh on its port of 7000-7999
+   ([kubernetes.md](kubernetes.md#storage)).
+7. Cilium's WireGuard, while Cilium's values turn it on and every agent has restarted into them
+   ([kubernetes.md](kubernetes.md#encryption-between-nodes)):
+   in each agent's `cilium-dbg debuginfo --output json`, every peer of `cilium_wg0` has a recent
+   `last-handshake-time`, and `cilium-health status` reports every node reachable through the
+   overlay, which then runs through the device. The handshakes do not prove the rule on every
+   node: the device sends from UDP 51871 to a peer's UDP 51871
+   ([Linux](https://github.com/gregkh/linux/blob/v6.18.63/drivers/net/wireguard/socket.c#L20-L95),
+   [the endpoint](https://github.com/cilium/cilium/blob/v1.20.4/pkg/wireguard/agent/agent.go#L575-L584)),
+   so a node's packets to a peer and the peer's to it are one connection to the firewall, and what
+   reaches a node from a peer it has sent to is a reply, which Talos admits whatever the rules say.
+   The rule is what admits a peer's packets that arrive before the node has sent that peer anything.
+8. trustd and the CI host stay unproved until a worker joins and the CI host connects; the paths
    from pods on a node to the node itself, until a pod there, such as Prometheus on a control
    plane, uses one.
 
@@ -1115,8 +1141,18 @@ take one now, `kubectl --namespace etcd-snapshots create job --from=cronjob/etcd
   as before `just cluster-config` has run, the check of its pods is skipped, and its line and the
   last line say so. The scrape check is skipped, saying why, while Prometheus's Service does not
   exist, as before the monitoring application is installed, and when it cannot be asked or does not
-  answer; its silence is never a pass. It runs `kubectl get` and `kubectl logs` only. It needs the
-  cluster's `talman.yaml` and kubeconfig.
+  answer; its silence is never a pass. While the ConfigMap `cilium-config` in `kube-system` turns
+  WireGuard on (`enable-wireguard: "true"`), the Running Cilium agent on every node the API lists
+  is asked `cilium-dbg encrypt status --output json` through `kubectl exec`, each call stopped
+  after 20 seconds, and must report the mode `Wireguard`, no message, which is where the agent's
+  and the kernel's states of the device disagreeing show, the one device `cilium_wg0` and as many
+  peers as there are other nodes, which it counts without matching them to the nodes; an answer
+  that is not one JSON object is no answer. A FAIL names each node and why, never a public key
+  ([kubernetes.md](kubernetes.md#encryption-between-nodes)). The check is skipped, saying so, while
+  `cilium-config` does not turn WireGuard on, and fails when it cannot be read. It runs
+  `kubectl get` and `kubectl logs`, and that one `kubectl exec`, so the kubeconfig then needs exec
+  on the agents' pods in `kube-system`, as `just network-drops` does. It needs the cluster's
+  `talman.yaml` and kubeconfig.
 - `just gateway-check [cluster]` says, reading only, whether the cluster's public Gateway serves:
   its objects through the kubeconfig, then requests through each edge router's floating address
   with `curl --resolve`, verified against the cluster CA's certificate, then the DNS records of the
@@ -1141,13 +1177,39 @@ take one now, `kubectl --namespace etcd-snapshots create job --from=cronjob/etcd
   reporting the forward within `LOCUST_WAIT` seconds, kubectl stopping, or a failure, each but an
   interruption naming its cause. It reads no Secret, changes nothing on the cluster and needs the
   cluster's kubeconfig.
+- `just robot [cluster]` forwards a local port to Robot Framework's report server through the
+  cluster's kubeconfig until Ctrl-C ([kubernetes.md](kubernetes.md#robot-framework)): `kubectl
+  port-forward`, listening on 127.0.0.1 only, from `ROBOT_PORT` to port 8080 of the Service
+  `robot-reports` in `robot`. Once kubectl reports the forward it prints the local URL and that the
+  reports hold screenshots and whatever the suites print, and are served to anything on this
+  machine while the forward runs. It ends the forward on every way out: Ctrl-C, SIGTERM or SIGHUP,
+  kubectl not reporting the forward within `ROBOT_WAIT` seconds, kubectl stopping, or a failure,
+  each but an interruption naming its cause. It reads no Secret, changes nothing on the cluster and
+  needs the cluster's kubeconfig.
+- `just robot-run [cluster]` runs Robot Framework's suites on the cluster now, through its
+  kubeconfig ([kubernetes.md](kubernetes.md#robot-framework)): it refuses, naming the job, while a
+  job of the runner in `robot` has a pod; makes the job `robot-run-<UTC time>` from
+  `cronjob/robot-suites`; waits up to `ROBOT_RUN_WAIT` seconds for its pod to leave `Pending`;
+  prints the job's log, Robot's console, as it comes; and exits with the container's exit code,
+  Robot's return code, the number of failed tests, printing `Every test passed.`, `<n> tests
+  failed.`, what a code of 250 and above means, or, with status 1, the job's reason when it failed
+  with no code, as at its deadline; then it points at `just robot` for the report. Ctrl-C, SIGTERM
+  or SIGHUP stop the following with status 130, 143 or 129 and leave the job running, saying how to
+  follow it again; it deletes nothing. It reads no Secret, changes nothing on the cluster but the
+  job it creates, and needs the cluster's kubeconfig.
 - `just logs '<query>' [--since <duration>] [--limit <n>] [cluster]` prints the records a LogsQL
   query matches, one line each, the oldest first, from the last 15 minutes and at most 200 unless
-  told otherwise ([kubernetes.md](kubernetes.md#logs)): `kubectl get --raw` through the Kubernetes
-  API's service proxy to VictoriaLogs, so no port is forwarded. It prints the records and, when it
-  fails, the message of the error the API server or the store answered with, the store's own for a
-  query it refuses, or that the API did not answer, without an address and none of kubectl's other
-  output. It changes nothing on the cluster and needs the cluster's kubeconfig.
+  told otherwise ([kubernetes.md](kubernetes.md#logs)): through vmauth as its user `operator`
+  ([kubernetes.md](kubernetes.md#who-may-call-the-log-store)), with that user's credential, which
+  one `kubectl get secret` reads from the Secret `vmauth-operator` in `monitoring` into a variable,
+  through a `kubectl port-forward` on 127.0.0.1 to the Service `vmauth`, which it stops on every
+  exit, and curl, which gets the credential as a header through a file descriptor; the credential is
+  never printed, written to a file or an argument. It prints the records and, when it fails, the
+  store's own message for a query it refuses, that vmauth refused the credential, vmauth's status
+  and message for any other answer, or why the Secret could not be read, the forward did not start,
+  or vmauth or the API did not answer, without an address and none of kubectl's or curl's other
+  output. It changes nothing on the cluster and needs the cluster's kubeconfig, which must be able
+  to read that Secret and forward a port in `monitoring`.
 - `just cluster-reboot <node> [cluster] [--yes] [--tolerate <seconds>] [--no-bgp-wait]` reboots one
   node, named by its hostname in the cluster's `talman.yaml`, while it watches the Kubernetes API
   through its load balancer; for a control plane, that is the check that the API does not go away
@@ -1279,12 +1341,16 @@ take one now, `kubectl --namespace etcd-snapshots create job --from=cronjob/etcd
 - `just cluster-last-copies <openbao file> <volsync file> <postgres file> [cluster] [--check]` takes
   and checks, before the cluster is taken down, a last copy of everything the rebuild restores from
   ([runbooks/rebuild.md](runbooks/rebuild.md#taking-it-down)). The files are the custody files of
-  `bao-recovery`, `bao-seed-volsync` and `bao-seed-postgres`. First, before anything runs, it names
+  `bao-recovery` (after a rotation of the seal key, the newest one `bao-seal-keep` wrote),
+  `bao-seed-volsync` and `bao-seed-postgres`. First, before anything runs, it names
   each thing it needs that is missing: the kubeconfig, the Talos age key, the Flux age key, what
   `openbao-snapshot-check`, `postgres-dump-check` and `bao-volsync-password` need, and each file there
   and where only this user can have written it, each file named by its role. Then, reading only, it
-  compares: each age key with the recipient its `.sops.yaml` names; the seal key in the OpenBao file
-  with the Secret `openbao-seal-1` (`bao-seal-restore <file> --check`); for every ReplicationSource,
+  compares: each age key with the recipient its `.sops.yaml` names; the seal keys in the OpenBao file
+  with the Secrets of the keys the checkout's seal stanza names, the current one and after a rotation
+  the previous one, `openbao-seal-1` today (`bao-seal-restore <file> --check`, which also checks
+  that the servers run that stanza, and refuses a file older than the current key with its reason on
+  the lines above the recipe's own); for every ReplicationSource,
   the password the volume backups' file derives for its application with its Secret's
   (`bao-volsync-password`), by the hashes of the two; and the customer key in the PostgreSQL file
   with every database's backup Secret, by digest. It also needs every Cluster's primary, archiver
@@ -1309,8 +1375,8 @@ take one now, `kubectl --namespace etcd-snapshots create job --from=cronjob/etcd
   ahead of the cluster's by more than a Job takes to start and name its copy fails every run, on the
   snapshot, as not taken by this run. Every wait is bounded by `LAST_COPIES_TIMEOUT` seconds, five
   between two reads, and every kubectl call the run makes itself but `exec` by 30 seconds; a `psql`
-  in a pod is bounded by neither, as kubectl gives the stream of an exec no deadline, nor is the read
-  of the seal Secret that `bao-seal-restore --check` makes. A copy that fails, fails its check, is
+  in a pod is bounded by neither, as kubectl gives the stream of an exec no deadline, nor are the
+  reads of the seal Secrets that `bao-seal-restore --check` makes. A copy that fails, fails its check, is
   older than the run or outlasts the wait fails the run, naming the copy and why, and no later copy
   is taken. Every run uploads a snapshot and a dump of each database it reaches, a run that fails
   later included, and the buckets keep the newest 56 snapshots and 14 dumps of each database, so
@@ -1322,6 +1388,58 @@ take one now, `kubectl --namespace etcd-snapshots create job --from=cronjob/etcd
   flux CLI's output it shows only their errors, through the filter of
   [What the recipes print](#what-the-recipes-print). It runs on lab-sto2 alone, as
   `bao-seal-restore` and `bao-volsync-password` compare with that cluster only.
+- `just cluster-dns-remove [cluster] [--check] [--yes]` takes the cluster's DNS records out of the
+  zone before the cluster and the edge stack are taken down
+  ([runbooks/rebuild.md](runbooks/rebuild.md#taking-it-down)), by external-dns's own rules: a sync
+  against the source `empty`, which asks for no record, deletes every record whose TXT registry
+  entry names the cluster's owner id, and that entry, and leaves another owner's records and those
+  made by hand ([kubernetes.md](kubernetes.md#dns-records)). A cluster without the Kustomization
+  `flux-system/external-dns` does not select external-dns, and the run says so and ends. It reads
+  `CLUSTER_DOMAIN` from `flux-system/cluster-config`, and refuses, naming why and changing nothing,
+  a Deployment `external-dns/external-dns` whose container `external-dns` does not run with
+  `--policy=sync`, `--registry=txt`, `--provider=cloudflare` and one `--txt-owner-id` other than the
+  base's placeholder; it prints the owner id. Then the plan: a Job in `external-dns`, named
+  `external-dns-remove-<start in Unix seconds>-plan` (the deleting one ends in `-delete`, the
+  second plan in `-verify`), made from the Deployment's pod template, its
+  image, service account, security contexts, resources and environment, the token by its
+  reference to the Secret, and its arguments without the sources, the Gateway's, the namespace, the
+  event and interval settings and the log format, and with `--source=empty`, `--once`,
+  `--log-format=json` and `--dry-run`; no probe, no port, no service account token mounted,
+  `restartPolicy: Never`, `backoffLimit: 0`, `DNS_REMOVE_TIMEOUT` as its `activeDeadlineSeconds`,
+  and the label `app.kubernetes.io/name: external-dns-remove`, which the chart's Service and
+  ServiceMonitor do not select. Its log, read as JSON lines, gives each record the sync would
+  delete, printed as `delete <type> <name under the domain>`, one line per record at the provider,
+  which holds an A record for each address of a name; a change other than a deletion, a record
+  outside the domain or a line that is not JSON and names a change stops the run. The Job is
+  deleted once read. `--check` stops there, having changed nothing but that Job; so does a plan
+  that deletes nothing, without asking, as a second run does. Otherwise, once the cluster's name is
+  typed back, or with `--yes`, it suspends the Kustomization `external-dns` and the HelmRelease
+  `external-dns/external-dns` with the flux CLI and reads each back, stopping unless it is
+  suspended, as the pinned CLI prints a failure to suspend and still exits 0; scales the Deployment
+  to 0 and waits until no pod of it runs; runs the same Job without `--dry-run`, which ends complete
+  only when its one pass succeeded, and prints its deletions; and plans again, failing, naming
+  each, while a record of the owner is left. external-dns stays stopped, and the two suspended, and
+  the run ends with how to start it again: `flux resume kustomization external-dns`, then
+  `flux resume helmrelease external-dns --namespace external-dns`, after which helm-controller's
+  drift detection scales the Deployment back to its one replica and external-dns makes the records
+  again at its first sync. Those commands are run before the edge stack's destroy, or after it only
+  once the edges are built again, `just cluster-config` has written their addresses to the cluster
+  and `flux reconcile kustomization gateway-public` has applied them to the Gateway, whose
+  annotation external-dns reads them from, and ended Ready
+  ([runbooks/edge.md](runbooks/edge.md#the-way-back)). A Job that fails, or whose log the run does
+  not read as external-dns', is kept, and the run names it with the `kubectl logs` command that
+  reads its log, of which it prints nothing. A Job that does not end within the wait, or that its
+  own deadline stops, is kept and named too; as that deadline is the wait's length, a deleting Job
+  the run stopped waiting for can still be at work until it passes, when the Job controller deletes
+  its pod, and the log with it, and `just cluster-dns-remove --check`, run after that, lists what is
+  left. external-dns does not fail at once when it cannot reach the provider's API, so on a cluster
+  that cannot reach it a run, `--check` included, can take the whole wait before it fails, naming
+  the Job. Every exit after a suspension names last what is left suspended, or may be, as an object
+  that cannot be read back, or scaled, and how to undo it. Every wait is bounded by
+  `DNS_REMOVE_TIMEOUT` seconds, and every kubectl call by 30 seconds. It reads no Secret, passes
+  nothing of the token on a command line, and prints nothing of the token, the zone's identifier,
+  the domain, a name under it or an address; kubectl's and the flux CLI's errors pass through the
+  filter of [What the recipes print](#what-the-recipes-print).
 - `just cluster-destroy [cluster] [--yes] [--unreachable]` destroys the cluster stack,
   `sto2/cluster`, as `just infra-destroy sto2/cluster` does
   ([infrastructure.md](infrastructure.md#recipes)): it shows the plan's summary, destroys once the
@@ -1387,8 +1505,9 @@ naming the place. With `CI` set nothing of rclone's words is shown: they go to
 `clusterconfig/<recipe>.errors.log` in the cluster's directory, which git ignores, started afresh by
 each run, and only that file's path is printed, as for talman's output. kubectl's and helm's output
 passes through, naming the objects they apply, except in `cluster-check`, `gateway-check`,
-`cluster-reboot`, `cluster-destroy`, `grafana`, `locust` and `logs`: they print node and object
-names only, and `logs` the records, and none of what kubectl prints, as the objects it reads and its
+`cluster-reboot`, `cluster-destroy`, `grafana`, `locust`, `robot`, `robot-run` and `logs`: they
+print node and object names only, `logs` the records and `robot-run` the job's log, Robot's
+console, and none of what kubectl prints, as the objects it reads and its
 errors hold the API server's, the nodes' and the pods' addresses, but for the message of an error
 the API server or the store answered with, which `logs` shows without an address; only
 `kubectl drain`'s passes through in `cluster-reboot`, as in `cluster-upgrade`, naming the pods it
@@ -1458,7 +1577,11 @@ to hand it to kubectl and age-keygen on standard input.
   at most nine digits, refused otherwise before anything runs.
 - `CLUSTER_DOMAIN`: the domain the cluster's applications are published under, a lower-case DNS
   name, which becomes `CLUSTER_DOMAIN` in `cluster-config`; `cluster-bootstrap`, `cluster-config`
-  and `cluster-flux` need it.
+  and `cluster-flux` need it, and so does `just infra-destroy sto2/edge`, which looks the routes'
+  names up under it ([infrastructure.md](infrastructure.md#recipes)).
+- `DNS_REMOVE_TIMEOUT`: how many seconds each wait of `cluster-dns-remove` may take, for a Job or
+  for external-dns' pod to go, and each of its Jobs may run, 300 when unset; a whole number from 1
+  of at most nine digits, refused otherwise before anything runs.
 - `CLUSTER_DNS_ZONE`: the zone at the DNS provider that holds `CLUSTER_DOMAIN`, a lower-case DNS
   name that is the domain or one it is under, which becomes `CLUSTER_DNS_ZONE` in `cluster-config`
   ([kubernetes.md](kubernetes.md#dns-records)); the domain itself when unset. Set it when the
@@ -1469,6 +1592,10 @@ to hand it to kubectl and age-keygen on standard input.
   many seconds it waits for kubectl to report the forward, 20 when unset.
 - `LOCUST_PORT` and `LOCUST_WAIT`: the local port `locust` forwards from, 8089 when unset, and how
   many seconds it waits for kubectl to report the forward, 20 when unset.
+- `ROBOT_PORT` and `ROBOT_WAIT`: the local port `robot` forwards from, 8090 when unset, and how
+  many seconds it waits for kubectl to report the forward, 20 when unset.
+- `ROBOT_RUN_WAIT`: how many seconds `robot-run` waits for its job's pod to leave `Pending`, and
+  again for the job's result once its log ends, a whole number from 1 to 9999, 900 when unset.
 - `CI`: when set, talman's output goes to a file instead of the output; see
   [What the recipes print](#what-the-recipes-print).
 

@@ -68,6 +68,11 @@ echo "unexpected call: $tool \$*" >&2
 exit 1
 EOF
   done
+  # The wait after a burst over the demo's rate limit: recorded with the calls, so their order
+  # shows, and over at once.
+  fake sleep << EOF
+printf '%s\n' "sleep \$*" >> "$RECORD/argv"
+EOF
   ENVIRONMENT=(
     TF_STATE_BUCKET=fixture-state-bucket
     AWS_ACCESS_KEY_ID=marker-access-key-id
@@ -80,8 +85,8 @@ EOF
     TMPDIR="$WORK"
   )
   CLUSTER_LINES=(cluster-config Gateway 'Gateway address' 'proxy Service' 'proxy Service address' proxies
-    certificate 'certificate lifetime' 'cluster CA' routes 'http listener')
-  EDGE_LINES=(http TLS 'certificate names' hello 'unrouted host')
+    certificate 'certificate lifetime' 'cluster CA' routes 'http listener' 'rate limit')
+  EDGE_LINES=(http TLS 'certificate names' hello 'unrouted host' 'rate limit' 'after the limit')
   LINES=("${CLUSTER_LINES[@]}")
   for edge in lab-edge-1 lab-edge-2; do
     for line in "${EDGE_LINES[@]}"; do
@@ -164,10 +169,10 @@ calls() {
   [ "$(calls '^kubectl get ' | grep -vE ' (services|pods|certificates\.cert-manager\.io|namespaces|httproutes\.gateway\.networking\.k8s\.io) ' | grep -vc ' -- [a-z]')" -eq 0 ]
   # Every request through an edge's address, with no configuration file, proxy or redirect followed,
   # bounded in time; every HTTPS one verifies against the CA's certificate.
-  # Six of them through an edge's address, one to the public resolver for the name's records and
-  # one by the name alone.
-  [ "$(calls '^curl ' | wc -l)" -eq 8 ]
-  [ "$(calls '^curl .* --resolve ' | wc -l)" -eq 6 ]
+  # Ten of them through an edge's address, five each, the burst over the demo's rate limit one
+  # call; one to the public resolver for the name's records and one by the name alone.
+  [ "$(calls '^curl ' | wc -l)" -eq 12 ]
+  [ "$(calls '^curl .* --resolve ' | wc -l)" -eq 10 ]
   [ "$(calls '^curl ' | grep -vcE '^curl --disable .* --connect-timeout [0-9]+ --max-time [0-9]+ ')" -eq 0 ]
   [ "$(calls '^curl ' | grep -vcF -- ' --noproxy * ')" -eq 0 ]
   [ "$(calls '^curl ' | grep -cE -- ' (-k|--insecure|-L|--location)( |$)')" -eq 0 ]
@@ -176,7 +181,9 @@ calls() {
   [ "$(calls '^curl .*https://' | grep -v 'https://dns\.google/' | grep -vcE -- ' --cacert [^ ]+ --capath [^ ]+ ')" -eq 0 ]
   for edge in 203.0.113.51 203.0.113.52; do
     [ "$(calls "^curl .* --resolve hello\.example\.com:80:$edge .* http://hello\.example\.com/gateway-check$" | wc -l)" -eq 1 ]
-    [ "$(calls "^curl .* --resolve hello\.example\.com:443:$edge .* https://hello\.example\.com/$" | wc -l)" -eq 1 ]
+    # The demo's page twice, before the burst and after it, and the burst.
+    [ "$(calls "^curl .* --resolve hello\.example\.com:443:$edge .* https://hello\.example\.com/$" | grep -vc -- ' --parallel ')" -eq 2 ]
+    [ "$(calls "^curl .* --resolve hello\.example\.com:443:$edge .* https://hello\.example\.com/$" | grep -c -- ' --parallel ')" -eq 1 ]
     [ "$(calls "^curl .* --resolve [a-z0-9-]+\.example\.com:443:$edge .* https://[a-z0-9-]+\.example\.com/$" | grep -vc 'hello\.')" -eq 1 ]
   done
   # The edge stack is read, never planned or applied, and no edge is reached over SSH.
@@ -216,6 +223,13 @@ calls() {
     'no-page||all|lab-edge-1 hello,lab-edge-2 hello'
     'unrouted-status|200|all|lab-edge-1 unrouted host,lab-edge-2 unrouted host'
     'edge-down.203.0.113.52||all|lab-edge-2 http,lab-edge-2 TLS'
+    'ratelimit-absent||all|rate limit'
+    'ratelimit-not-accepted||all|rate limit'
+    'ratelimit-unit|Minute|all|rate limit'
+    'ratelimit-requests|21|all|rate limit'
+    'no-rate-limit||all|lab-edge-1 rate limit,lab-edge-2 rate limit'
+    'two-connections||all|lab-edge-1 rate limit,lab-edge-2 rate limit'
+    'still-limited||all|lab-edge-1 after the limit,lab-edge-2 after the limit'
   )
   for condition in "${conditions[@]}"; do
     IFS='|' read -r file content printed expected <<< "$condition"
@@ -556,7 +570,7 @@ calls() {
   [[ $(line_of 'DNS records') == "skip  DNS records: "*"external-dns"*"not selected"* ]]
   [ -z "$(line_of 'DNS hello')" ]
   [ -z "$(calls 'dns\.google/')" ]
-  [ "$(calls '^curl ' | wc -l)" -eq 6 ]
+  [ "$(calls '^curl ' | wc -l)" -eq 10 ]
   [[ ${output##*$'\n'} == "gateway-check: every check of the public Gateway of lab-sto2 passes; skipped: DNS records" ]]
   nothing_secret
 
@@ -621,9 +635,10 @@ https_calls() {
     [ "$(line_of "$edge TLS")" = "pass  $edge TLS: HTTPS for hello verifies against the system's public trust store" ]
   done
   # No Secret is read, and curl is given no authority of its own and is never told to skip the check:
-  # two requests through each edge and the one by the demo's name alone.
+  # four calls through each edge, the burst over the demo's rate limit one of them, and the one by
+  # the demo's name alone.
   [ -z "$(calls ' secret ')" ]
-  [ "$(https_calls | wc -l)" -eq 5 ]
+  [ "$(https_calls | wc -l)" -eq 9 ]
   [ "$(https_calls | grep -cE -- ' (--cacert|--capath|-k|--insecure)( |$)')" -eq 0 ]
   nothing_secret
 
@@ -773,4 +788,111 @@ https_calls() {
   echo '1000 1160' > "$STATE/validity"
   recipe
   [ "$(line_of 'certificate lifetime')" = "pass  certificate lifetime: 1160 of 2160 hours remain" ]
+}
+
+# limit_sequence: the requests for the demo's page through the edges, the bursts and the waits, in
+# the order the recipe made them, one a line: "page ADDRESS", "burst ADDRESS" or "sleep ARG...".
+limit_sequence() {
+  local line
+  while IFS= read -r line; do
+    if [[ $line == 'sleep '* ]]; then
+      echo "$line"
+    elif [[ $line =~ ^curl\ .*--resolve\ hello\.example\.com:443:([0-9.]+)\ .*\ https://hello\.example\.com/$ ]]; then
+      if [[ $line == *' --parallel '* ]]; then echo "burst ${BASH_REMATCH[1]}"; else echo "page ${BASH_REMATCH[1]}"; fi
+    fi
+  done < "$RECORD/argv"
+}
+
+@test "A burst over hello's limit through each edge is answered 429 on one connection, and hello answers again once the limit's second has passed" {
+  local edge burst condition file content check why
+  recipe
+
+  echo "$output"
+  [ "$status" -eq 0 ]
+  # The demo's policy is read by its name after --, bounded as every read is, and its figure is the
+  # cluster's: 5 a second, Accepted.
+  [ "$(calls '^kubectl get .*backendtrafficpolicies')" = 'kubectl get --output=json --request-timeout=10s backendtrafficpolicies.gateway.envoyproxy.io --namespace=demo -- hello' ]
+  [ "$(line_of 'rate limit')" = "pass  rate limit: demo/hello limits the route hello to 5 requests a second on each proxy, Accepted by every ancestor at its generation" ]
+  for edge in 203.0.113.51 203.0.113.52; do
+    # One curl call through the edge's address: twice the figure and one more, 11 requests for the
+    # demo's page, over HTTP/2 and all at once, which curl keeps to one connection when it may
+    # multiplex them, each body discarded, each writing out its status and the connections it made.
+    burst="$(calls "^curl .* --resolve hello\.example\.com:443:$edge " | grep -- ' --parallel ' || true)"
+    echo "the burst through $edge: $burst"
+    [ "$(grep -c . <<< "$burst")" -eq 1 ]
+    [[ $burst == *' --http2 --parallel --parallel-max 11 '* ]]
+    [[ $burst != *'--parallel-immediate'* ]]
+    [[ $burst == *' --write-out %{http_code} %{num_connects}\n '* ]]
+    [ "$(grep -o ' --output /dev/null https://hello\.example\.com/' <<< "$burst" | wc -l)" -eq 11 ]
+    [ "$(grep -o 'https://' <<< "$burst" | wc -l)" -eq 11 ]
+  done
+  for edge in lab-edge-1 lab-edge-2; do
+    [ "$(line_of "$edge rate limit")" = "pass  $edge rate limit: 11 requests on one connection, so to one proxy: 5 answered 200 and 6 answered 429, over hello's 5 a second" ]
+    [ "$(line_of "$edge after the limit")" = "pass  $edge after the limit: two seconds after the burst hello answers 200 with its page again" ]
+  done
+  # Through each edge in turn: the page, the burst, a wait of twice the unit, and the page again.
+  [ "$(limit_sequence | paste -sd, -)" = "page 203.0.113.51,burst 203.0.113.51,sleep 2,page 203.0.113.51,page 203.0.113.52,burst 203.0.113.52,sleep 2,page 203.0.113.52" ]
+  nothing_secret
+
+  # Each way the limit can fail to hold fails its own line, saying which, without an address: the
+  # state file, its content, the line and what its reason says. While the policy's line does not
+  # pass, or the demo does not answer with its page, no burst is sent and nothing waits, and the
+  # edges' lines of the limit say why they skip.
+  local -a conditions=(
+    'ratelimit-absent||rate limit|kubectl could not read the BackendTrafficPolicy demo/hello'
+    'ratelimit-not-accepted||rate limit|is not Accepted by every ancestor at its generation'
+    'ratelimit-stale||rate limit|is not Accepted by every ancestor at its generation'
+    'ratelimit-second-ancestor||rate limit|is not Accepted by every ancestor at its generation'
+    'ratelimit-target|targetRef|rate limit|it does not target the HTTPRoute hello alone'
+    'ratelimit-target|targetSelectors|rate limit|it does not target the HTTPRoute hello alone'
+    'ratelimit-global||rate limit|its limit is not one local rule without client selectors'
+    'ratelimit-client-selectors||rate limit|its limit is not one local rule without client selectors'
+    'ratelimit-two-rules||rate limit|its limit is not one local rule without client selectors'
+    'ratelimit-unit|Minute|rate limit|its limit is per Minute, not per Second'
+    'ratelimit-requests|0|rate limit|its figure, 0, is not from 1 to 20'
+    'ratelimit-requests|21|rate limit|its figure, 21, is not from 1 to 20'
+    'ratelimit-requests|5.5|rate limit|its figure is not a whole number'
+    'hello-status|500|lab-edge-1 hello|the demo answered 500, not 200'
+    'no-rate-limit||lab-edge-1 rate limit|none of its 11 requests was answered 429'
+    'burst-limited-only||lab-edge-1 rate limit|none of its 11 requests was answered 200'
+    'burst-status|503|lab-edge-1 rate limit|it was answered with 503 as well as 200 and 429'
+    'burst-short||lab-edge-1 rate limit|its answers could not be read as a status and a count of connections for each of its 11 requests'
+    'two-connections||lab-edge-1 rate limit|its 11 requests took 2 connections, not one'
+    'still-limited||lab-edge-1 after the limit|hello still answers 429 two seconds after the burst'
+    'page-after-burst|another page|lab-edge-1 after the limit|hello answered 200 two seconds after the burst with another page than its ConfigMap'
+  )
+  for condition in "${conditions[@]}"; do
+    IFS='|' read -r file content check why <<< "$condition"
+    echo "condition: $file $content"
+    find "$STATE" -mindepth 1 -delete
+    : > "$RECORD/argv"
+    printf '%s\n' "$content" > "$STATE/$file"
+
+    recipe
+
+    [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+    nothing_secret || { echo "$output"; return 1; }
+    [[ $(line_of "$check") == "FAIL  $check: "*"$why"* ]] || { echo "$output"; echo "not the reason expected"; return 1; }
+    if [[ $check == 'rate limit' ]]; then
+      [[ $(line_of 'lab-edge-1 rate limit') == "skip  lab-edge-1 rate limit: the rate limit line did not pass, so no burst is sent" ]] || { echo "$output"; return 1; }
+      [[ $(line_of 'lab-edge-1 after the limit') == "skip  lab-edge-1 after the limit: no burst was sent" ]] || { echo "$output"; return 1; }
+      [ -z "$(calls ' --parallel ')" ] && [ -z "$(calls '^sleep ')" ] || { echo "a burst was sent"; return 1; }
+    elif [[ $check == 'lab-edge-1 hello' ]]; then
+      [[ $(line_of 'lab-edge-1 rate limit') == "skip  lab-edge-1 rate limit: the demo did not answer 200 with its page, so a burst would show nothing of the limit" ]] || { echo "$output"; return 1; }
+      [[ $(line_of 'lab-edge-1 after the limit') == "skip  lab-edge-1 after the limit: no burst was sent" ]] || { echo "$output"; return 1; }
+      [ -z "$(calls ' --parallel ')" ] && [ -z "$(calls '^sleep ')" ] || { echo "a burst was sent"; return 1; }
+    fi
+  done
+
+  # An edge whose TLS does not verify gets no burst either.
+  find "$STATE" -mindepth 1 -delete
+  : > "$RECORD/argv"
+  : > "$STATE/untrusted"
+  recipe
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [ "$(line_of 'lab-edge-1 rate limit')" = "skip  lab-edge-1 rate limit: no verified TLS connection" ]
+  [ "$(line_of 'lab-edge-1 after the limit')" = "skip  lab-edge-1 after the limit: no verified TLS connection" ]
+  [ -z "$(calls ' --parallel ')" ]
+  [ -z "$(calls '^sleep ')" ]
 }

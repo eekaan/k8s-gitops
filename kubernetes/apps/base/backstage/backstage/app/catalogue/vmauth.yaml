@@ -1,0 +1,21 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/catalog-info.json
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: vmauth
+  description: vmauth, VictoriaMetrics' authenticating proxy in front of VictoriaLogs, which gives each client of the log store its own credential and its own paths.
+  links:
+    - url: https://github.com/eekaan/k8s-gitops/blob/main/docs/kubernetes.md#who-may-call-the-log-store
+      title: Documentation
+    - url: https://github.com/eekaan/k8s-gitops/tree/main/kubernetes/apps/base/monitoring/vmauth
+      title: Manifests
+spec:
+  type: service
+  lifecycle: production
+  owner: group:default/operators
+  system: observability
+  dependsOn:
+    - component:default/external-secrets
+    - resource:default/prometheus-operator-crds
+    - component:default/victoria-logs

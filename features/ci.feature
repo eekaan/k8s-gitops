@@ -52,6 +52,26 @@ Feature: Continuous integration
     When each part runs
     Then together they hand bats every test file once and none twice, without the hermetic tests, and bats runs a file's tests side by side
 
+  Scenario: The bats tests are split into groups by the time each file took, and no group takes much longer than another
+    Given the recorded time of every test file in tests/times.tsv and the parts of the bats tests the groups run
+    When each part hands its files to bats
+    Then every file goes to exactly one part, the parts holding more than one file are within 5% of each other by recorded time, and no part is recorded at more than 25 minutes
+
+  Scenario: A test file without a recorded time stops the tests, naming the command that records it
+    Given a copy of the justfile, scripts/ and tests/ with a new test file the record lacks, and a record line for a file that is gone
+    When each part of the bats tests the groups run, such as just test 1/8, runs with a recording bats
+    Then each ends non-zero, bats was never called, and the output names the new file with just test-time tests/<name>.bats and the gone file's line, saying to delete it or run just test-times-record
+
+  Scenario: Each test file prints how long it took, and the record is written from what a run printed
+    Given a copy of the justfile and scripts/ whose tests/ holds three test files and a line of tests/times.tsv for each under the record's header, and a stand-in bats that sleeps a known time for each file and fails the one that runs first
+    When just test 1/1 runs, and its output, put into the form of the fixture's CI log with each line again in the group's report, is read by scripts/test-times, once a test file was added with its line and a line was added for a file that is gone, which the log times too
+    Then every file has one line on standard output saying it took its sleep, or a second more, the run goes on past the failing file and ends non-zero naming it, and the record holds each timed file's seconds once, keeps the added file's line, drops the gone file's, saying so, and keeps its header, while a log with no timing line, and one with two times for one file, fail and leave the record byte for byte
+
+  Scenario: The record of the test files' times is written from the logs of a CI run
+    Given a copy of the justfile and scripts/ whose tests/ holds the test files whose times the fixture's job log prints and one more, and a stand-in gh that serves the run list, the run's jobs, one of them skipped, and the logs of those that ran from fixtures, refuses a log with terminal escapes unless asked to print them, and records its arguments
+    When just test-times-record 42 runs, and again with no run
+    Then the record is written from those logs each time, keeping the other file's line, the first call read the jobs of run 42 and the second those of the latest successful push run of ci on main, the skipped job's log was not asked for, and every recorded gh call is a read
+
   Scenario: The workflow's jobs are computed from the justfile
     Given the CI workflow
     When its jobs are read

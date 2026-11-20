@@ -1,14 +1,21 @@
 #!/usr/bin/env bash
 # Prints the cluster's logs that a LogsQL query matches, one line per record: its time, the
 # namespace and pod it came from or, for a Talos service's record, its node, and its message, the
-# oldest first. The query goes to VictoriaLogs' /select/logsql/query through the Kubernetes API's
-# service proxy, kubectl get --raw on the cluster's kubeconfig as scripts/cluster-env finds it, so
-# no port is forwarded and none is left behind. It changes nothing on the cluster and reads no
-# Secret. Of what kubectl prints, only the message of an error the API server or the store answered
-# with is shown, as kubectl words it or, for a query the store refuses, the store's own, without an
-# address or a control character; the rest, warnings and the error of a connection that failed
-# among it, can name the API server's address and is never shown: an API that does not answer is
-# reported with a reason of its own.
+# oldest first. The query goes to VictoriaLogs' /select/logsql/query through vmauth, as the user
+# operator (docs/kubernetes.md, Who may call the log store), through the cluster's kubeconfig as
+# scripts/cluster-env finds it: one kubectl get secret reads the key authorization of the Secret
+# vmauth-operator in monitoring, the Basic value of that user, into a variable; kubectl
+# port-forward forwards a port it chooses on 127.0.0.1 to vmauth's Service; and curl asks through
+# it, with the value as the header Authorization, given through a file descriptor. The value is
+# never printed, never written to a file and never an argument of a command, and the forward is
+# stopped on every exit. So the kubeconfig must be able to read that Secret and forward a port in
+# monitoring. It changes nothing on the cluster.
+#
+# Of what kubectl and curl print, only the message of an error is shown: the API server's for a
+# Secret it does not give, kubectl's for a forward that does not start, and vmauth's answer, which
+# for a query the store refuses is the store's own message, each without an address, a URL or a
+# control character; warnings and the errors of a connection that failed can name an address and
+# are never shown: an API, or a vmauth, that does not answer is reported with a reason of its own.
 # --since DURATION (a whole number with s, m, h, d or w; 15m when unset) is the window, ending now;
 # --limit N (200 when unset) is how many records at most.
 #
@@ -19,7 +26,7 @@
 # first the pipes give, in their order (app/vlselect/logsql/logsql.go, ProcessQueryRequest, in
 # VictoriaLogs v1.54.0). So the records are sorted here, oldest first. The answer is JSON lines, one
 # record each, with _time, _msg and _stream and the record's other fields beside them, and a refused
-# query is an HTTP error with the reason as its body.
+# query is an HTTP error with the reason as its body, which vmauth relays.
 #
 # The answer goes to a file, not through a pipe: a reader that closes early, as head or grep -q do,
 # ends its writer with SIGPIPE, which pipefail turns into a failure of a large answer that is fine.
@@ -67,7 +74,7 @@ fi
 . "$here/cluster-env" "$cluster"
 complete=1
 require_kubeconfig || complete=0
-require_commands kubectl jq date || complete=0
+require_commands kubectl curl base64 jq date || complete=0
 if [[ ! $since =~ ^([1-9][0-9]{0,8})([smhdw])$ ]]; then
   infra_error "--since is not a duration: a whole number with s, m, h, d or w, such as 90s or 2h"
   complete=0
@@ -87,66 +94,131 @@ if [[ ! $limit =~ ^[1-9][0-9]{0,8}$ ]]; then
 fi
 ((complete))
 
+namespace=monitoring
+secret=vmauth-operator
+service=vmauth
+service_port=8427
+
 # What is printed has its newlines made spaces and its other control characters left out, C0 and
 # C1, the escape of a terminal's colours and its single-character form among them, so that a record
 # or a message stays one line and cannot drive the operator's terminal.
 clean='def clean: gsub("[\r\n]+"; " ") | gsub("[\\x00-\\x08\\x0b-\\x1f\\x7f\u0080-\u009f]"; "");'
 
-work=$(mktemp -d -t logs.XXXXXXXXXX)
-# A failing script names the step it failed in, as in every cluster recipe, once the private
-# directory is gone.
+# shown TEXT: TEXT as a message may be shown: without a control character, then with every URL and
+# every address, IPv4 with its port, left out, in that order, so that no control character in an
+# address hides it, and without the whitespace it ends in.
+shown() {
+  jq -rn --arg text "$1" "$clean"' $text | clean | sub("\\s+$"; "")' |
+    sed -E -e 's#[A-Za-z][A-Za-z0-9+.-]*://[^[:space:]"'"'"')]+#<url>#g' \
+      -e 's/[0-9]{1,3}(\.[0-9]{1,3}){3}(:[0-9]+)?/<address>/g'
+}
+
+# kubectl_error FILE: the line of kubectl's error output in FILE that says why it failed, for an
+# answer the API server gave, one of those StandardErrorMessage in its cmd/util/helpers.go
+# (Kubernetes v1.37.1) makes: Error from server (<reason>): <message>, or Error from server:
+# <message> for a Status without a reason, error: You must be logged in to the server (<message>)
+# when the API server refuses the credentials, or Server returned an unexpected response:
+# <message>; and kubectl's own error: <message>. Nothing when there is none, as for a connection to
+# the API server that failed, whose message names its address.
+kubectl_error() {
+  grep -m1 -E '^(Error from server( \([A-Za-z]+\))?: |error: |Server returned an unexpected response: )' "$1" || true
+}
+
+work=$(umask 077 && mktemp -d -t logs.XXXXXXXXXX)
+forward_pid=''
+# On every exit the forward is stopped and the private directory goes; a failing script then names
+# the step it failed in, as in every cluster recipe. Ctrl-C, SIGTERM and SIGHUP end it so too.
 # shellcheck disable=SC2329 # It runs from the EXIT trap.
 finish() {
   local code=$1
+  trap '' INT TERM HUP
+  if [[ -n $forward_pid ]]; then
+    kill "$forward_pid" 2> /dev/null || true
+    wait "$forward_pid" 2> /dev/null || true
+  fi
   rm -rf -- "$work"
   failed_step "$code"
   exit "$code"
 }
 trap 'finish $?' EXIT
-step="asking the Kubernetes API for the logs"
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 
-start=$(date -u -d "@$(($(date -u +%s) - seconds))" +%Y-%m-%dT%H:%M:%SZ)
-encoded=$(jq -rn --arg q "$query" '$q | @uri')
-path="/api/v1/namespaces/monitoring/services/victoria-logs:9428/proxy/select/logsql/query"
-if ! kubectl get --raw "$path?query=$encoded&start=$start&limit=$limit" > "$work/answer" 2> "$work/error"; then
-  # For an answer the API server or the store gave, kubectl prints, after any warning lines, one of
-  # the lines StandardErrorMessage in its cmd/util/helpers.go (Kubernetes v1.37.1) makes: Error
-  # from server (<reason>): <message>, or Error from server: <message> for a Status without a
-  # reason, error: You must be logged in to the server (<message>) when the API server refuses the
-  # credentials, or Server returned an unexpected response: <message>. Any other failure is the
-  # connection to the API server, whose message names its address.
-  failure=$(grep -m1 -E '^(Error from server( \([A-Za-z]+\))?: |error: You must be logged in to the server \(|Server returned an unexpected response: )' \
-    "$work/error" || true)
+step="reading the Secret $secret in $namespace"
+if ! encoded=$(kubectl get secret "$secret" --namespace "$namespace" --output 'jsonpath={.data.authorization}' \
+  --request-timeout=30s 2> "$work/error"); then
+  failure=$(kubectl_error "$work/error")
   if [[ -n $failure ]]; then
-    message=${failure#*: } hint=''
+    message=${failure#*: }
+    hint='; the kubeconfig must be able to read it and forward a port in monitoring'
     [[ $failure != 'error: You must be logged in'* ]] || hint='; just cluster-kubeconfig fetches a current kubeconfig'
-    # The Kubernetes API relays the store's 400 with a plain-text body, which kubectl keeps out of
-    # its message ("the server rejected our request for an unknown reason"). It keeps the body's
-    # first 2048 bytes as the message of the cause, UnexpectedServerResponse, of the Status it makes
-    # of the answer, and logs that Status from -v=4 on, as indented JSON after "server response
-    # object: " up to a line that is "}" (newUnstructuredResponseError in client-go's
-    # rest/request.go, StandardErrorMessage in kubectl's cmd/util/helpers.go, Kubernetes v1.37.1).
-    # The query is read-only, so it is asked again to read that log, which is never shown, as its
-    # other lines can name the API server's address.
-    if [[ $failure == *'(BadRequest): the server rejected our request for an unknown reason' ]] \
-      && ! kubectl -v=4 get --raw "$path?query=$encoded&start=$start&limit=$limit" > /dev/null 2> "$work/verbose"; then
-      body=$(awk '/\] server response object: \{$/ { print "{"; inside = 1; next }
-        inside { print; if ($0 == "}") exit }' "$work/verbose" | jq -r '
-          [.details.causes[]? | select(.reason == "UnexpectedServerResponse") | .message // empty] | first // empty
-          | if utf8bytelength >= 2048 then . + " [kubectl keeps only the first 2048 bytes of the store'"'"'s answer]"
-            else . end' 2> /dev/null || true)
-      [[ -z $body ]] || message=$body
-    fi
-    # A control character or an address the message happens to carry is left out as well, in that
-    # order, so that no control character in an address hides it.
-    message=$(jq -rn --arg message "$message" "$clean"' $message | clean')
-    message=$(sed -E 's/[0-9]{1,3}(\.[0-9]{1,3}){3}(:[0-9]+)?/<address>/g' <<< "$message")
-    infra_error "VictoriaLogs or the Kubernetes API refused the query: $message$hint"
+    infra_error "cannot read the Secret $secret in $namespace: $(shown "$message")$hint"
   else
     infra_error "the Kubernetes API did not answer; check that the cluster is up and that just cluster-kubeconfig has fetched a current kubeconfig"
   fi
   exit 1
 fi
+authorization=$(printf '%s' "$encoded" | base64 -d 2> /dev/null) || authorization=''
+encoded=''
+if [[ -z $authorization ]]; then
+  infra_error "the Secret $secret in $namespace holds no authorization"
+  exit 1
+fi
+
+step="opening a port-forward to service/$service in $namespace"
+: > "$work/port-forward"
+# kubectl is the process whose id forward_pid holds, which a function would put one process below.
+(exec_tool kubectl port-forward --namespace "$namespace" "service/$service" ":$service_port" --address 127.0.0.1) \
+  > "$work/port-forward" 2>&1 &
+forward_pid=$!
+local_port=''
+forwarded='Forwarding from 127\.0\.0\.1:([0-9]+) ->'
+for ((attempt = 0; attempt < 150; attempt++)); do
+  if [[ $(< "$work/port-forward") =~ $forwarded ]]; then
+    local_port=${BASH_REMATCH[1]}
+    break
+  fi
+  if ! kill -0 "$forward_pid" 2> /dev/null; then
+    failure=$(kubectl_error "$work/port-forward")
+    infra_error "kubectl port-forward to service/$service in $namespace stopped before it forwarded a port${failure:+: $(shown "${failure#*: }")}"
+    exit 1
+  fi
+  sleep 0.1
+done
+if [[ -z $local_port ]]; then
+  infra_error "kubectl port-forward to service/$service in $namespace forwarded no port within 15 seconds"
+  exit 1
+fi
+
+step="asking vmauth for the logs"
+start=$(date -u -d "@$(($(date -u +%s) - seconds))" +%Y-%m-%dT%H:%M:%SZ)
+encoded_query=$(jq -rn --arg q "$query" '$q | @uri')
+if ! status=$(curl --silent --show-error --output "$work/answer" --write-out '%{http_code}' \
+  --header @<(printf 'Authorization: %s\n' "$authorization") \
+  "http://127.0.0.1:$local_port/select/logsql/query?query=$encoded_query&start=$start&limit=$limit" 2> "$work/curl-error"); then
+  infra_error "vmauth did not answer through the port-forward to service/$service in $namespace"
+  exit 1
+fi
+authorization=''
+case $status in
+  200) ;;
+  401)
+    infra_error "vmauth refused the credential of the Secret $secret in $namespace; vmauth reads it when it starts, so a Secret made again since needs vmauth restarted"
+    exit 1
+    ;;
+  400)
+    # The store answers a query it refuses with 400 and the reason as its body, and vmauth
+    # relays both; vmauth answers 400 itself, with its own reason, for a path it gives the user
+    # no route to.
+    infra_error "vmauth or VictoriaLogs refused the query: $(shown "$(< "$work/answer")")"
+    exit 1
+    ;;
+  *)
+    infra_error "vmauth answered ${status//[^0-9]/}: $(shown "$(< "$work/answer")")"
+    exit 1
+    ;;
+esac
 
 # shellcheck disable=SC2034 # failed_step in scripts/lib/cluster.sh names it
 step="reading the answer"

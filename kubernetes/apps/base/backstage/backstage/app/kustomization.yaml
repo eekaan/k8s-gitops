@@ -58,6 +58,7 @@ configMapGenerator:
       - catalogue/domain.yaml
       - catalogue/envoy-gateway-crds.yaml
       - catalogue/envoy-gateway.yaml
+      - catalogue/escape-canary.yaml
       - catalogue/etcd-snapshots.yaml
       - catalogue/external-dns-dashboard.yaml
       - catalogue/external-dns.yaml
@@ -86,6 +87,7 @@ configMapGenerator:
       - catalogue/linstor-cluster.yaml
       - catalogue/linstor-monitoring-dashboard.yaml
       - catalogue/linstor-monitoring.yaml
+      - catalogue/locust-route.yaml
       - catalogue/locust.yaml
       - catalogue/metrics-server.yaml
       - catalogue/n8n.yaml
@@ -103,6 +105,8 @@ configMapGenerator:
       - catalogue/prometheus-operator-crds.yaml
       - catalogue/reflector.yaml
       - catalogue/reloader.yaml
+      - catalogue/robot-ascender.yaml
+      - catalogue/robot.yaml
       - catalogue/runtime-classes.yaml
       - catalogue/silence-operator-dashboard.yaml
       - catalogue/silence-operator.yaml
@@ -112,6 +116,7 @@ configMapGenerator:
       - catalogue/vector.yaml
       - catalogue/victoria-logs-route.yaml
       - catalogue/victoria-logs.yaml
+      - catalogue/vmauth.yaml
       - catalogue/volsync-demo.yaml
       - catalogue/volsync.yaml
       - catalogue/vpa.yaml

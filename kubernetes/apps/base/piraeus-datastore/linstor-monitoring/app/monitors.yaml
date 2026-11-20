@@ -9,11 +9,15 @@
 # piraeus-operator-templates: v2.12.1
 #
 # The controller serves LINSTOR's own state at /metrics on its REST port, named api in
-# pkg/resources/cluster/controller/controller-service.yaml, over plain HTTP as the LinstorCluster sets
-# no TLS for it: linstor_node_state (2 for a satellite that is online), the storage pools' capacities
-# and the like (controller/src/main/java/com/linbit/linstor/prometheus/PrometheusBuilder.java of
-# linstor-server v1.35.3, which is the controller image of the operator's version). The job is the
-# Service's name. Tests: tests/rules/linstor-monitoring.yaml.
+# pkg/resources/cluster/controller/controller-service.yaml, over plain HTTP, which it keeps doing
+# while the LinstorCluster's apiTLS has its API take client certificates on the port secure-api
+# (controller/src/main/java/com/linbit/linstor/api/rest/v1/config/GrizzlyHttpService.java of
+# linstor-server v1.35.3 redirects /v1 and /ui of that port to HTTPS, and /metrics only when a
+# controller property the tree does not set says so): linstor_node_state (2 for a satellite that is
+# online), the storage pools' capacities and the like
+# (controller/src/main/java/com/linbit/linstor/prometheus/PrometheusBuilder.java of linstor-server
+# v1.35.3, which is the controller image of the operator's version). The job is the Service's name.
+# Tests: tests/rules/linstor-monitoring.yaml.
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
@@ -29,12 +33,14 @@ spec:
 ---
 # yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/podmonitor-monitoring-v1.json
 # The satellites' DRBD reactor, which runs beside each satellite and serves the state of each DRBD
-# resource and device on the port prometheus of the satellite's pod, 9942 on the pod's own address
+# resource and device on the port prometheus of the satellite's pod, 9942
 # (pkg/resources/satellite/satellite/config.yaml and daemonset.yaml of the operator, with enums on, so
 # a device's state is a series for each state): drbd_device_state, drbd_device_quorum and the like
-# (doc/prometheus.md and src/plugin/prometheus.rs of drbd-reactor v1.12.0). The satellites run on the
-# pod network, so no rule of the nodes' firewall is involved. DRBD's series carry no node, so the
-# monitor adds the worker the pod runs on, which is the name LINSTOR gives the node.
+# (doc/prometheus.md and src/plugin/prometheus.rs of drbd-reactor v1.12.0). The satellites run on
+# their node's network (linstor-cluster's host-network.yaml), so the reactor serves 9942 on the
+# node's address, which the rule drbd-reactor of the nodes' firewall admits from the nodes and the
+# pod range (talos/firewall.yaml), and a target's instance is the node's address. DRBD's series carry
+# no node, so the monitor adds the worker the pod runs on, which is the name LINSTOR gives the node.
 apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor
 metadata:
