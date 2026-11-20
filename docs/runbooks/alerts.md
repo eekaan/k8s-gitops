@@ -103,48 +103,72 @@ alert counts the others, which are lost.
 
 Look at first: the component named in the alert and the collector's own log,
 `kubectl --namespace monitoring logs <pod>`, which says why it drops: an event too large for the
-sink, or one the store refuses with a status Vector does not retry.
+sink, or one vmauth or the store refuses with a status Vector does not retry. For the sink
+`victoria_logs`, which status:
+`sum by (pod, status) (rate(vector_http_client_responses_total{component_id="victoria_logs"}[5m]))`.
 
 Usually: a record the store rejects, such as a line dated beyond the store's accepted time range; a
-change to the collector's configuration whose transform fails on lines it did not see before.
+change to the collector's configuration whose transform fails on lines it did not see before; or
+vmauth refusing the collector, with 401, every request of it, as the collector's credential is not
+the one vmauth holds. Each reads it from the Secret `vmauth-vector` when it starts, so the two
+disagree once the Secret was made again and only one of them has been restarted since ([Who may
+call the log store](../kubernetes.md#who-may-call-the-log-store)). It shows as 401 in the query
+above, as `sum by (reason) (rate(vmauth_http_request_errors_total{reason="invalid_auth_token"}[5m]))`
+rising in vmauth's metrics, and in when the Secret was made,
+`kubectl --namespace monitoring get secret vmauth-vector --output jsonpath='{.metadata.creationTimestamp}'`,
+against the age of vmauth's and the collector's pods, `kubectl --namespace monitoring get pods`;
+`kubectl --namespace monitoring get externalsecrets` shows whether each ExternalSecret is Ready. The
+fix: restart vmauth,
+`kubectl --namespace monitoring rollout restart deployment/vmauth`, and once both its pods are
+available every collector pod at once,
+`kubectl --namespace monitoring delete pods --selector app.kubernetes.io/name=vector`.
 
 ## LogCollectorSendFailing
 
-A collector's sink has sent requests to the store and had none accepted for 15 minutes: at each
-evaluation in that time, none of its requests of the 5 minutes before was accepted, each refused,
-answered with an error or left unanswered, and it tries a store that has failed it again within 30
-seconds. The lines wait in the disk buffer on the node, 256 MiB, and once it is full the
-collector stops reading on that node until the store takes lines again, and the lines of files
-rotated away meanwhile are lost ([Logs](../kubernetes.md#logs)). A store away for less than about 20
-minutes, the 5 minutes of the rate and the 15 of `for`, raises nothing. The alert is raised for each
-collector, one per node: on every node it points at the store, on one node at the path from that
-node to the store.
+A collector's sink has sent requests to the store, through vmauth, and had none accepted for 15
+minutes: at each evaluation in that time, none of its requests of the 5 minutes before was
+accepted, each refused, answered with an error or left unanswered, and it tries a store that has
+failed it again within 30 seconds. The lines wait in the disk buffer on the node, 256 MiB, and once
+it is full the collector stops reading on that node until the store takes lines again, and the
+lines of files rotated away meanwhile are lost ([Logs](../kubernetes.md#logs)). A store away for
+less than about 20 minutes, the 5 minutes of the rate and the 15 of `for`, raises nothing. The
+alert is raised for each collector, one per node: on every node it points at vmauth or the store,
+on one node at the path from that node to vmauth.
 
-Look at first: whether the store is up: `kubectl --namespace monitoring get pods`, and
-`just logs '*' --since 5m --limit 1`, which fails with the store's own message when it is away or
-read-only. Then how the requests fail, by a query in Grafana's Explore behind `just grafana` and by
-the lines in the collector's log, which the collector does not ship, so they are read with
+Look at first: whether vmauth and the store are up: `kubectl --namespace monitoring get pods`, and
+`just logs '*' --since 5m --limit 1`, which fails with vmauth's message when the store is away and
+with the store's own when it is read-only. Then how the requests fail, by a query in Grafana's
+Explore behind `just grafana` and by the lines in the collector's log, which the collector does not
+ship, so they are read with
 `kubectl --namespace monitoring logs <pod> | grep -E 'Endpoint is unhealthy|Retrying after|Request timed out'`:
 
 - `sum by (pod, error_kind) (rate(vector_http_client_errors_total{component_id="victoria_logs"}[5m]))`
   shows connections refused or a name that does not resolve, with `Retrying after error.` in the
-  log, and `Endpoint is unhealthy.` once, where the sink stopped sending until its next try: the
-  store is not running, or its Service has no ready endpoint.
+  log, and `Endpoint is unhealthy.` once, where the sink stopped sending until its next try: vmauth
+  is not running, or its Service has no ready endpoint.
 - `sum by (pod, status) (rate(vector_http_client_responses_total{component_id="victoria_logs"}[5m]))`
-  shows what the store answers: 429 while it is read-only, its `vl_storage_is_read_only` 1, with
-  `Retrying after response. reason=too many requests` in the log; a 5xx while it fails its inserts,
-  with `Retrying after response.` and, once, `Endpoint is unhealthy.`.
+  shows what vmauth answers: while the store does not answer it, as when the store is not running,
+  502 for a request whose body vmauth keeps to try again, with `all the 1 backends for the user
+  "vector" are unavailable` in vmauth's own log, and 503 for one whose body is larger than the
+  16 KiB it keeps for that (`-maxRequestBodySizeToRetry`), as a large batch is, with `cannot proxy
+  the request to` the store's address (`app/vmauth/main.go` of VictoriaMetrics v1.156.0); 429 while
+  the store is read-only, its `vl_storage_is_read_only` 1, with
+  `Retrying after response. reason=too many requests` in the log; another 5xx while the store fails
+  its inserts, with `Retrying after response.` and, once, `Endpoint is unhealthy.`; 401 while vmauth
+  refuses the collector's credential, below.
 - Neither, while requests are sent: they time out, with `Request timed out.` in the log, as when
   Cilium's tunnel between the nodes is down or the store hangs.
 
-A store that refuses every insert with another 4xx raises this alert together with
-[LogCollectorDiscardingEvents](#logcollectordiscardingevents), as the sink drops each request it is
-refused. A 2xx whose body reports errors counts as accepted here: it is that alert's, not this one's.
+vmauth refusing the collector, with 401, or the store refusing every insert with another 4xx, raises
+this alert together with [LogCollectorDiscardingEvents](#logcollectordiscardingevents), as the sink
+drops each request it is refused; that alert's section says how to see and mend the 401. A 2xx
+whose body reports errors counts as accepted here: it is that alert's, not this one's.
 
 Usually: the store not running for longer than a move to another worker takes, as when its volume
-cannot be attached there; the store's volume full, so it answers every insert with 429; or, on one
-node only, Cilium's tunnel between the collector's node and the store's down, which no recipe
-checks: the requests time out while the store's pod is Running.
+cannot be attached there; vmauth not running, as when its pods wait for a Secret that is missing,
+which `kubectl --namespace monitoring get externalsecrets` shows; the store's volume full, so it
+answers every insert with 429; or, on one node only, Cilium's tunnel between the collector's node
+and vmauth's down, which no recipe checks: the requests time out while vmauth's pods are Running.
 
 ## CertManagerCertificateNotReady
 

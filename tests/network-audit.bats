@@ -4,11 +4,12 @@
 # repository). The tests of the manifests build the application offline, with the placeholders of
 # the cluster's example key lists, and render the tree once for the file, its charts pulled from
 # their public registries: the Cilium chart's objects, Hubble Relay's among them, are read there.
-# The tests of the recipe run it from a copy of the scripts with a kubeconfig of its own and a
-# recording kubectl shaped like kubectl v1.37's output, so nothing reads this checkout's .env or
-# reaches a cluster.
+# The tests of the recipe run it from a copy of the scripts with a kubeconfig of its own, a
+# recording kubectl shaped like kubectl v1.37's output, which reads the operator's credential and
+# forwards a port to vmauth, and a recording curl that answers through that forward as vmauth relays
+# the store, so nothing reads this checkout's .env or reaches a cluster.
 #
-# The answer the recording kubectl gives for the store's query is the store's own.
+# The answer the recording curl gives for the store's query is the store's own.
 # fixtures/network-audit/answer.jsonl is what VictoriaLogs, of the release victoria-logs-answers
 # records below, the image the store's chart runs
 # (victoriametrics/victoria-logs@sha256:ee4e820cac3721f5f5d91641b950c22439593adc4224f9655e5333d5a84c1dfe),
@@ -55,6 +56,16 @@ setup_file() {
   export HELM_DATA_HOME="$BATS_FILE_TMPDIR/helm/data"
   export DOCKER_CONFIG="$BATS_FILE_TMPDIR/docker"
   mkdir -p "$DOCKER_CONFIG"
+}
+
+teardown() {
+  local pid
+  # A port-forward a failing recipe left behind is stopped here, so no test leaves one running.
+  if [ -f "$BATS_TEST_TMPDIR/state/forwards" ]; then
+    while read -r pid; do
+      kill "$pid" 2>/dev/null || true
+    done <"$BATS_TEST_TMPDIR/state/forwards"
+  fi
 }
 
 setup() {
@@ -580,17 +591,21 @@ turning_on() {
 
 # audit_copy: a copy of the repository's scripts, with a kubeconfig for the cluster lab-sto2, for
 # just network-audit to run in through the repository's justfile, against recording fakes: a mise
-# with nothing installed, which keeps the justfile from putting real tools in front of the fakes,
-# and a kubectl that records its arguments, the kubeconfig it was given and the names of its
+# with nothing installed, which keeps the justfile from putting real tools in front of the fakes;
+# a kubectl that records its arguments, the kubeconfig it was given and the names of its
 # environment, then acts as the files of $STATE say, each time after a warning naming the API
-# server's address on its error output, as kubectl v1.37 does.
+# server's address on its error output, as kubectl v1.37 does; and a curl that records its
+# arguments and each request, its URL and the headers it read from a file or file descriptor, and
+# answers as vmauth does in front of the store, through kubectl's forward alone.
 #
-# For the store's query, get --raw, as $STATE/store says: ok answers with the file $STATE/answer;
-# refuse fails as when the proxied store answers 400 with a plain-text body, which is what
-# VictoriaLogs sends for a query it refuses: the error output says only "the server rejected our
-# request for an unknown reason", and the body is the message of the cause of the Status kubectl
-# logs from -v=4 on; forbidden fails as when the API refuses the proxy; down fails as when the API
-# server does not answer, naming its address.
+# For the store's query, which just logs asks vmauth through a port-forward with the operator's
+# credential, as $STATE/store says: kubectl's get secret answers with the base64 of
+# $STATE/authorization, the Secret's key, and its port-forward with the line that names the local
+# port it forwards from, 41234, after which it runs until it is stopped, its process id in
+# $STATE/forwards; curl, through that forward, answers ok with the file $STATE/answer, and refuse
+# with 400 and the plain-text body VictoriaLogs sends for a query it refuses, which vmauth relays;
+# forbidden fails get secret as when the kubeconfig may not read the Secret; down fails it as when
+# the API server does not answer, naming its address.
 #
 # For the recorder's pods, get pods, as $STATE/pods says, with the time in $STATE/time: running
 # lists one pod whose container hubble has run since that time; replaced lists that pod and, before
@@ -600,7 +615,7 @@ turning_on() {
 # something that is no list; fail fails as when the API server does not answer, naming its address
 # on its error output and printing a line on its standard output. A listed pod carries addresses,
 # its own and its node's.
-# Sets COPY, BIN, RECORD, STATE and KUBECONFIG_FILE.
+# Sets COPY, BIN, RECORD, STATE and KUBECONFIG_FILE, and AUTHORIZATION, the Secret's value.
 audit_copy() {
   COPY="$BATS_TEST_TMPDIR/copy" BIN="$BATS_TEST_TMPDIR/bin"
   RECORD="$BATS_TEST_TMPDIR/record" STATE="$BATS_TEST_TMPDIR/state"
@@ -610,40 +625,34 @@ audit_copy() {
   echo 'not a real kubeconfig' >"$KUBECONFIG_FILE"
   echo ok >"$STATE/store"
   echo running >"$STATE/pods"
+  : >"$STATE/forwards"
   date -u -d '-3 days' +%Y-%m-%dT%H:%M:%SZ >"$STATE/time"
   cp "$FIXTURES/answer.jsonl" "$STATE/answer"
+  # The Basic value of the user operator, as vmauth-operator's ExternalSecret forms it.
+  AUTHORIZATION="Basic $(printf 'operator:%s' marker-operator-password | base64 -w0)"
+  printf '%s' "$AUTHORIZATION" >"$STATE/authorization"
   printf '#!/usr/bin/env bash\n' >"$BIN/mise"
   { printf '#!/usr/bin/env bash\nRECORD=%q STATE=%q\n' "$RECORD" "$STATE"; cat <<'EOF'; } >"$BIN/kubectl"
 printf '%s\n' "$*" >>"$RECORD/argv"
 printf '%s\n' "${KUBECONFIG-unset}" >>"$RECORD/kubeconfig"
 env | cut -d= -f1 >>"$RECORD/names"
-level=0
-for arg; do [[ $arg =~ ^-v=([0-9]+)$ ]] && level=${BASH_REMATCH[1]}; done
 echo 'W1114 12:00:00 request to https://192.0.2.10:6443 was slow' >&2
-if [[ " $* " == *" get --raw "* ]]; then
+if [[ " $* " == *" get secret vmauth-operator "* ]]; then
   case $(cat "$STATE/store") in
-    ok)
-      cat "$STATE/answer"
-      ;;
-    refuse)
-      if ((level >= 4)); then
-        jq -n '{metadata: {}, status: "Failure", message: "the server rejected our request for an unknown reason",
-            reason: "BadRequest", details: {causes: [{reason: "UnexpectedServerResponse",
-              message: "cannot parse `query` arg: cannot parse \"stats\" pipe at 192.0.2.77:9428: unexpected token"}]}, code: 400}' |
-          sed '1s/^/I1114 12:00:00.786612 3565636 helpers.go:247] server response object: /' >&2
-      fi
-      echo 'Error from server (BadRequest): the server rejected our request for an unknown reason' >&2
-      exit 1
-      ;;
     forbidden)
-      echo 'Error from server (Forbidden): services "victoria-logs:9428" is forbidden: User "operator" cannot get resource "services/proxy" in API group "" in the namespace "monitoring"' >&2
+      echo 'Error from server (Forbidden): secrets "vmauth-operator" is forbidden: User "operator" cannot get resource "secrets" in API group "" in the namespace "monitoring"' >&2
       exit 1
       ;;
     down)
       echo 'Unable to connect to the server: dial tcp 192.0.2.10:6443: connect: connection refused' >&2
       exit 1
       ;;
+    *) base64 -w0 <"$STATE/authorization" ;;
   esac
+elif [[ " $* " == *" port-forward "* ]]; then
+  echo "Forwarding from 127.0.0.1:41234 -> 8427"
+  echo "$$" >>"$STATE/forwards"
+  exec sleep 600
 elif [[ $1 == get && $2 == pods ]]; then
   at=$(cat "$STATE/time")
   leaving='[]'
@@ -710,7 +719,44 @@ else
   exit 64
 fi
 EOF
-  chmod +x "$BIN/mise" "$BIN/kubectl"
+  { printf '#!/usr/bin/env bash\nRECORD=%q STATE=%q\n' "$RECORD" "$STATE"; cat <<'EOF'; } >"$BIN/curl"
+printf '%s\n' "$*" >>"$RECORD/curl-argv"
+url="" output=/dev/stdout write_out="" headers=""
+args=("$@")
+for ((i = 0; i < ${#args[@]}; i++)); do
+  case ${args[i]} in
+    --header | -H)
+      header=${args[++i]}
+      if [[ $header == @* ]]; then headers+=$(cat "${header#@}")$'\n'; else headers+=$header$'\n'; fi
+      ;;
+    --output | -o) output=${args[++i]} ;;
+    --write-out | -w) write_out=${args[++i]} ;;
+    --max-time | -m | --connect-timeout) ((i++)) ;;
+    http://* | https://*) url=${args[i]} ;;
+  esac
+done
+running=0
+while read -r pid; do
+  if kill -0 "$pid" 2>/dev/null; then running=1; fi
+done <"$STATE/forwards"
+if [[ $url != http://127.0.0.1:41234/* ]] || ((!running)); then
+  echo "curl: (7) Failed to connect to ${url#http://} after 0 ms: Could not connect to server" >&2
+  exit 7
+fi
+jq -nc --arg url "$url" --arg headers "$headers" '{url: $url, headers: ($headers | split("\n") | map(select(. != "")))}' >>"$RECORD/requests"
+respond() {
+  cat >"$output"
+  if [[ -n $write_out ]]; then printf '%s' "$1"; fi
+  exit 0
+}
+case $(cat "$STATE/store") in
+  ok) respond 200 <"$STATE/answer" ;;
+  refuse)
+    printf '%s\n' 'cannot parse `query` arg: cannot parse "stats" pipe at 192.0.2.77:9428: unexpected token' | respond 400
+    ;;
+esac
+EOF
+  chmod +x "$BIN/mise" "$BIN/kubectl" "$BIN/curl"
 }
 
 # The secret variables the recipes read, which just network-audit must not pass on to kubectl.
@@ -735,18 +781,49 @@ audit_merged() {
     "$(command -v just)" --justfile "$REPO/justfile" --working-directory "$COPY" network-audit
 }
 
-# store_request: the one request for the store that kubectl recorded, as its path and decoded
-# parameters, in REQUEST_PATH, QUERY, START and LIMIT; fails unless there is exactly one.
+# store_request: the one request for the store that curl recorded, as its address, path and decoded
+# parameters, in REQUEST_ADDRESS, REQUEST_PATH, QUERY, START and LIMIT, and the value of the header
+# Authorization it sent in REQUEST_AUTHORIZATION; fails unless there is exactly one.
 store_request() {
-  local argv params
-  argv="$(grep -- '--raw ' "$RECORD/argv" || true)"
-  [ "$(grep -c . <<<"$argv")" -eq 1 ] || { echo "kubectl asked the store $(grep -c . <<<"$argv") times: $argv"; return 1; }
-  REQUEST_PATH="${argv#get --raw }"
+  local request url params
+  request="$(cat "$RECORD/requests" 2>/dev/null || true)"
+  [ "$(grep -c . <<<"$request")" -eq 1 ] || { echo "curl asked the store $(grep -c . <<<"$request") times: $request"; return 1; }
+  url="$(jq -r '.url' <<<"$request")"
+  REQUEST_ADDRESS="${url#http://}"
+  REQUEST_ADDRESS="${REQUEST_ADDRESS%%/*}"
+  REQUEST_PATH="/${url#http://*/}"
   params="${REQUEST_PATH#*\?}"
   REQUEST_PATH="${REQUEST_PATH%%\?*}"
   QUERY="$(jq -rn --arg p "$params" '$p | split("&") | map(select(startswith("query="))) | .[0] | .[6:] | @urid')"
   START="$(jq -rn --arg p "$params" '$p | split("&") | map(select(startswith("start="))) | .[0] // "" | .[6:] | @urid')"
   LIMIT="$(jq -rn --arg p "$params" '$p | split("&") | map(select(startswith("limit="))) | .[0] // "" | .[6:]')"
+  REQUEST_AUTHORIZATION="$(jq -r '[.headers[] | select(test("^authorization:"; "i")) | sub("^[^:]*: *"; "")] | if length == 1 then .[0] else "\(length) Authorization headers" end' <<<"$request")"
+}
+
+# forwards_closed: every port-forward the recipe started has stopped.
+forwards_closed() {
+  local pid left=""
+  while read -r pid; do
+    if kill -0 "$pid" 2>/dev/null; then left+=" $pid"; fi
+  done <"$STATE/forwards"
+  echo "port-forwards still running:${left:- none}"
+  [ -z "$left" ]
+}
+
+# no_credential OUTPUT STDERR: no recorded argument of kubectl or curl holds the Secret's value, its
+# base64 or the password inside it, and neither output of the recipe, OUTPUT and STDERR, does.
+no_credential() {
+  local value
+  for value in "$AUTHORIZATION" "$(base64 -w0 <"$STATE/authorization")" marker-operator-password "${AUTHORIZATION#Basic }"; do
+    if grep -qF -- "$value" "$RECORD/argv" "$RECORD/curl-argv" 2>/dev/null; then
+      echo "a recorded argument holds $value"
+      return 1
+    fi
+    if [[ $1 == *"$value"* || $2 == *"$value"* ]]; then
+      echo "the recipe printed $value"
+      return 1
+    fi
+  done
 }
 
 # no_address TEXT: fails when TEXT holds an address of the documentation ranges, as every address of
@@ -932,20 +1009,27 @@ TABLE='3 AUDIT demo ingress envoy-gateway-system/Deployment/envoy-public demo/De
   [[ $stderr == *"just logs '$RECORDER_LINES | unpack_json | filter flow.verdict:\"\"' --since 24h lab-sto2"* ]]
   [[ $stderr == *"network-audit: the recorder has run since $started, before the last 24h began"* ]]
   [[ $stderr != *"is cut"* && $stderr != *"is not running"* && $stderr != *"inside the last"* ]]
-  # It asks the store once, through the API's service proxy to the store's Service and port, with
-  # the one query whose answer the fixture is, for the last 24 hours and at most 10000 groups.
+  # It asks the store once, as just logs does, through a port-forward to vmauth's Service and port
+  # with the operator's credential from the Secret vmauth-operator, with the one query whose answer
+  # the fixture is, for the last 24 hours and at most 10000 groups.
   store_request
-  echo "request: $REQUEST_PATH; query: $QUERY; start: $START; limit: $LIMIT"
-  [ "$REQUEST_PATH" = /api/v1/namespaces/monitoring/services/victoria-logs:9428/proxy/select/logsql/query ]
+  echo "request: $REQUEST_ADDRESS $REQUEST_PATH; query: $QUERY; start: $START; limit: $LIMIT"
+  [ "$REQUEST_ADDRESS" = 127.0.0.1:41234 ]
+  [ "$REQUEST_PATH" = /select/logsql/query ]
+  [ "$REQUEST_AUTHORIZATION" = "$AUTHORIZATION" ]
   [ "$QUERY" = "$STORE_QUERY" ]
   [ "$LIMIT" = 10000 ]
   seconds=$(($(date -u +%s) - $(date -u -d "$START" +%s)))
   echo "the window starts $seconds seconds ago"
   ((seconds >= 86399 && seconds <= 86410))
+  grep -qx -- 'get secret vmauth-operator --namespace monitoring --output jsonpath={.data.authorization} --request-timeout=30s' "$RECORD/argv"
+  grep -qx -- 'port-forward --namespace monitoring service/vmauth :8427 --address 127.0.0.1' "$RECORD/argv"
+  no_credential "$output" "$stderr"
+  forwards_closed
   # And the pods once, by the recorder's label in its namespace, reading only.
   [ "$(grep -c '^get pods ' "$RECORD/argv")" -eq 1 ]
   grep -qx -- 'get pods --namespace security-system --selector app.kubernetes.io/name=network-audit --output json --request-timeout=10s' "$RECORD/argv"
-  [ "$(grep -c . "$RECORD/argv")" -eq 2 ]
+  [ "$(grep -c . "$RECORD/argv")" -eq 3 ]
   # kubectl is run with the cluster's kubeconfig and none of the secrets the recipes read.
   [ "$(sort -u "$RECORD/kubeconfig")" = "$KUBECONFIG_FILE" ]
   grep -qx KUBECONFIG "$RECORD/names"
@@ -955,7 +1039,7 @@ TABLE='3 AUDIT demo ingress envoy-gateway-system/Deployment/envoy-public demo/De
   done
 
   # A window and a cluster: the window is the store's and the one the recorder's start is held to.
-  rm "$RECORD/argv"
+  rm "$RECORD/argv" "$RECORD/requests"
   audit_recipe 90m lab-sto2
   echo "status $status; $output"
   echo "stderr: $stderr"
@@ -1047,7 +1131,7 @@ EOF
   # window: a start just inside is named and fails the run, and one just before it passes.
   at="$(date -u -d '-13 days' +%Y-%m-%dT%H:%M:%SZ)"
   echo "$at" >"$STATE/time"
-  rm "$RECORD/argv"
+  rm "$RECORD/argv" "$RECORD/requests"
   audit_recipe 2w
   echo "inside 2w: status $status; $stderr"
   [ "$status" -eq 1 ]
@@ -1062,7 +1146,7 @@ EOF
   [[ $stderr == *"before the last 2w began"* ]]
   at="$(date -u -d '-60 seconds' +%Y-%m-%dT%H:%M:%SZ)"
   echo "$at" >"$STATE/time"
-  rm "$RECORD/argv"
+  rm "$RECORD/argv" "$RECORD/requests"
   audit_recipe 90s
   echo "inside 90s: status $status; $stderr"
   [ "$status" -eq 1 ]
@@ -1186,7 +1270,7 @@ EOF
 
   # Each run lists the pods once, by the recorder's label in security-system.
   [ "$(sort -u <(grep '^get pods ' "$RECORD/argv"))" = 'get pods --namespace security-system --selector app.kubernetes.io/name=network-audit --output json --request-timeout=10s' ]
-  [ "$(grep -c '^get pods ' "$RECORD/argv")" -eq "$(grep -c -- '--raw ' "$RECORD/argv")" ]
+  [ "$(grep -c '^get pods ' "$RECORD/argv")" -eq "$(grep -c . "$RECORD/requests")" ]
 }
 
 @test "The audit recipe refuses a window that is not a duration and says why when the store does not answer" {
@@ -1223,22 +1307,27 @@ EOF
   [ "$status" -ne 0 ]
   [ -z "$output" ]
   # shellcheck disable=SC2016 # The backticks are the store's own.
-  [[ $stderr == *'logs: VictoriaLogs or the Kubernetes API refused the query: cannot parse `query` arg: cannot parse "stats" pipe at <address>: unexpected token'* ]]
+  [[ $stderr == *'logs: vmauth or VictoriaLogs refused the query: cannot parse `query` arg: cannot parse "stats" pipe at <address>: unexpected token'* ]]
   no_address "$stderr"
   while IFS= read -r line; do
     # shellcheck disable=SC2016 # The backticks are just's own.
     [[ $line == "logs: "* || $line == 'error: recipe `network-audit` failed '* ]] || { echo "not a line of just logs: $line"; return 1; }
   done <<<"$stderr"
   [ "$(grep -c '^get pods ' "$RECORD/argv" || true)" -eq 0 ]
+  no_credential "$output" "$stderr"
+  forwards_closed
 
-  # The API refusing the proxy is shown as kubectl words it.
+  # A kubeconfig that may not read the operator's credential is shown as kubectl words it, before
+  # any port is forwarded.
   echo forbidden >"$STATE/store"
+  rm -f "$RECORD/argv"
   audit_recipe
   echo "forbidden: status $status; $stderr"
   [ "$status" -ne 0 ]
   [ -z "$output" ]
-  [[ $stderr == *'logs: VictoriaLogs or the Kubernetes API refused the query: services "victoria-logs:9428" is forbidden'* ]]
+  [[ $stderr == *'logs: cannot read the Secret vmauth-operator in monitoring: secrets "vmauth-operator" is forbidden'* ]]
   [[ $stderr != *"network-audit:"* ]]
+  [ "$(grep -c 'port-forward' "$RECORD/argv" || true)" -eq 0 ]
 
   # An API that does not answer.
   echo down >"$STATE/store"

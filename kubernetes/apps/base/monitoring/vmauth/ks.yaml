@@ -1,0 +1,26 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/kustomization-kustomize-v1.json
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: vmauth
+  namespace: flux-system
+spec:
+  path: ./apps/base/monitoring/vmauth/app
+  targetNamespace: monitoring
+  # The Password generators and ExternalSecrets are External Secrets' kinds; vmauth sends to the
+  # store with the store's credential, which the store's application writes into
+  # victoria-logs-auth and waits for, and its pods do not start without it; its PodMonitor's kind
+  # exists once prometheus-operator-crds is Ready.
+  dependsOn:
+    - name: external-secrets
+    - name: victoria-logs
+    - name: prometheus-operator-crds
+  # Ready once both pods are available, which is once every Secret they read is in place: the
+  # collector and the route to the store's interface wait for it. That vmauth admits each of them
+  # rests on the Secret each shares with vmauth, written once, not on that order, which a change to
+  # both does not hold (vector's ks.yaml says why).
+  wait: true
+  sourceRef:
+    kind: ExternalArtifact
+    name: vmauth

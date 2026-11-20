@@ -670,7 +670,7 @@ once it is not, and the agents' rendered configuration agrees.
 | `external-dns` | listed | an application whose allows are not written, not a namespace that cannot have the posture. external-dns takes Prometheus' scrape and the kubelet's probes on 7979 and nothing else, and reaches the API server, the DNS provider's API on 443 and the resolver; the Jobs of `just cluster-dns-remove` reach only the provider's API and the resolver. Its token, scoped to zone read and DNS edit on the cluster's one zone, its name filter, a ClusterRole that only reads, Pod Security, node firewall ([DNS records](#dns-records)). |
 | `kube-system` | listed | Cilium's agent, its Envoy and its operator run in the host's network namespace; the resolver takes queries from every namespace; Hubble Relay takes the flow recorder of `security-system` on 4245; the pod-network workloads' other flows are not yet enumerated. Node firewall, the recorder's egress, which names Relay's pods on that port alone, Pod Security. |
 | `flux-system` | listed | the controllers' flows are not yet enumerated as allows; Flux's own network policies, which the operator makes at run time, and the operator's for its web interface, `flux-operator-web`, which the check reads and passes because the namespace is listed ([What the check refuses](#what-the-check-refuses)); Pod Security, node firewall. |
-| `monitoring` | listed | Prometheus scrapes every namespace and the nodes, the node exporter runs in the host's network namespace, the API server calls the operator's webhook, VictoriaLogs takes the proxies on 9428 for the route `logs`, Alertmanager reaches the resolver and, outside the cluster, each of its two destinations on the port of its URL, hosts that are deployment values and so are named by no policy ([Where alerts go](#where-alerts-go)), the blackbox exporter takes Prometheus on 9115 and reaches the resolver and the public Gateway's proxies on 10080 and 10443, the other flows are not yet enumerated. The proxies reach VictoriaLogs' 9428 alone there and forward only the route's reads, behind the cluster's sign-in, Pod Security, node firewall. |
+| `monitoring` | listed | Prometheus scrapes every namespace and the nodes, the node exporter runs in the host's network namespace, the API server calls the operator's webhook, vmauth takes the proxies on 8427 for the route `logs`, Alertmanager reaches the resolver and, outside the cluster, each of its two destinations on the port of its URL, hosts that are deployment values and so are named by no policy ([Where alerts go](#where-alerts-go)), the blackbox exporter takes Prometheus on 9115 and reaches the resolver and the public Gateway's proxies on 10080 and 10443, the other flows are not yet enumerated. The proxies reach vmauth's 8427 alone there and send it only the route's reads, behind the cluster's sign-in, which vmauth admits with the route's own credential and forwards to the store with the store's, Pod Security, node firewall. |
 | `openbao`, `external-secrets`, `cert-manager`, `cnpg-system`, `keda`, `volsync-system` | listed | flows not yet enumerated: webhooks and APIs the API server calls, the store's clients, scrapes, the PostgreSQL operator's calls to the Barman Cloud plugin. Each entry says which, and what covers it. |
 | `piraeus-datastore` | listed | the CSI node plugin and the satellites run in the host's network namespace, and DRBD replicates between the nodes' addresses; the other flows are not yet enumerated. LINSTOR's API, which takes only clients holding a certificate its own authority signs, and the controller and the satellites, which take only each other's certificates, from an authority of their own ([Who may call LINSTOR](#who-may-call-linstor)), Pod Security, node firewall. |
 | `cilium-secrets` | listed | holds no pod. |
@@ -695,8 +695,8 @@ once it is not, and the agents' rendered configuration agrees.
   while that carries `k8s-gitops/gateway: public`, on the container port the route sends to and no
   other: `hello` in `demo` on 8080, kromgo in `kromgo` on 8080, n8n on 5678 and Open WebUI on 8080
   in `ai-system`, dex on 5556 and oauth2-proxy on 4180 in `sso-system`, Backstage in `backstage` on
-  7007, Ascender's web pods in `ascender` on 8052, VictoriaLogs in `monitoring`
-  on 9428, and Locust's master in `locust` on 8089. oauth2-proxy's rule also carries the question
+  7007, Ascender's web pods in `ascender` on 8052, vmauth in `monitoring`
+  on 8427, and Locust's master in `locust` on 8089. oauth2-proxy's rule also carries the question
   the proxies ask it about each request of a route that opts in to sign-in ([Sign-in](#sign-in)),
   which is no route's backend but reaches the same pods and port. `tests/network-policy.bats` reads
   those ports from the render, from each route's backend through its Service's target port to the
@@ -710,8 +710,8 @@ once it is not, and the agents' rendered configuration agrees.
   listed and so has no pod in default deny, every pod takes them on every port, so
   the proxies' rules are what keep them from n8n's other ports, from every port of
   its database and from Open WebUI's other ports; PostgreSQL also authenticates every
-  client. So it is in `monitoring`, listed as well: the proxies' rule for VictoriaLogs is what keeps
-  them off Prometheus, Grafana, Alertmanager, the collector and the store's other ports. The
+  client. So it is in `monitoring`, listed as well: the proxies' rule for vmauth is what keeps
+  them off vmauth's internal port, the store, Prometheus, Grafana, Alertmanager and the collector. The
   controller takes the proxies on 18000 and 18002 and the kubelet on 8081, and reaches the resolver
   and the API server on 443 and 6443 (a Service's address is translated to the control plane's
   before policy applies), and, in a policy of its own with its reason, `envoy-gateway-registry`, the
@@ -1194,8 +1194,10 @@ builds.
   lost power, deleting the recorder's pod starts one, and the record is whole from then on.
 - **Reading it.** `just network-audit [since] [cluster]` prints the record of a window that ends
   now, 24 hours unless told otherwise (`since` is a whole number with `s`, `m`, `h`, `d` or `w`,
-  as `just logs --since` takes it), through the same path as `just logs`, the Kubernetes API's
-  service proxy to the store. The store does the counting: one query unpacks each of the
+  as `just logs --since` takes it), through the same path as `just logs`, a port-forward to vmauth
+  with the operator's credential ([Who may call the log store](#who-may-call-the-log-store)), so the
+  kubeconfig must be able to read the Secret `vmauth-operator` and forward a port in `monitoring`.
+  The store does the counting: one query unpacks each of the
   recorder's lines and counts them by verdict, direction, drop reason, port and the namespace, pod
   name, workloads and labels of each end, so the answer's limit, 10000, bounds groups and never
   flows. The recipe prints one line a group, with no header, the most frequent first:
@@ -2621,6 +2623,7 @@ monitors scrape is in Prometheus, where a query reads it:
 | `open-feature-operator` | The application's own PodMonitor, of the manager ([OpenFeature Operator](#openfeature-operator)); the operator's repository, under Apache-2.0, and its chart hold no Grafana dashboard at the pinned version |
 | `reloader` | Its chart's PodMonitor |
 | `spegel` | Its chart's ServiceMonitor |
+| `vmauth` | The application's own PodMonitor, of its internal port 8426 ([Who may call the log store](#who-may-call-the-log-store)) |
 | `vpa` | Its chart's PodMonitor, of the recommender |
 
 **Missing a scrape or an upstream.** Each of these has no dashboard, because it would show "No
@@ -3335,7 +3338,12 @@ runs VictoriaLogs, the store, from
 `oci://ghcr.io/victoriametrics/helm-charts/victoria-logs-single`, and `vector` runs Vector, the
 collector, from `oci://ghcr.io/vectordotdev/helm-charts/vector`, each its publisher's chart.
 Neither installs resource definitions. The store's ServiceMonitor and the collector's PodMonitor
-are on, and both applications name `prometheus-operator-crds` in `dependsOn`.
+are on, and both applications name `prometheus-operator-crds` in `dependsOn`. A third, `vmauth`,
+stands in front of the store: every client of the store reaches it through vmauth, with a
+credential of its own ([Who may call the log store](#who-may-call-the-log-store)). The collector
+names `vmauth` in `dependsOn` too, so on a new cluster it starts only once vmauth is Ready, after
+External Secrets, the Grafana operator and the store's release with its volume: the lines of a pod
+deleted before then go with its log files, uncollected.
 
 What is collected, by a collector on every node, control planes included, from files only:
 
@@ -3472,21 +3480,26 @@ raises nothing. A collector tries a store that has failed it again within 30 sec
 What listens, and where:
 
 - the store: port 9428 of its pod's address, plain HTTP, behind the headless Service
-  `victoria-logs`, for the collectors' inserts, its queries and its web interface, its deletion and
-  storage administration, and `/metrics`, which Prometheus scrapes through the ServiceMonitor, all on
-  that one port;
+  `victoria-logs`. Its clients are vmauth, which forwards to it, with the store's own credential,
+  what each client of the log store may send, and Prometheus, which scrapes its `/metrics` through
+  the ServiceMonitor with the same credential ([Who may call the log
+  store](#who-may-call-the-log-store));
+- vmauth: port 8427 of its pods' addresses, plain HTTP, behind the Service `vmauth`, the paths it
+  forwards to the store, for the collectors, Grafana, the route `logs` and `just logs`, each with a
+  credential of its own; and port 8426, its health, its metrics, which Prometheus scrapes through
+  its PodMonitor, and its `/flags`, `/debug/pprof` and `/-/reload`, each of which asks for a key;
+  the Service does not serve 8426;
 - the collector: port 9598 of its pod's address, plain HTTP, its own metrics only, which Prometheus
   scrapes through the PodMonitor. It uses neither the node's network nor a host port, so it reserves
   no port on the nodes.
 
-Cilium carries pod addresses between the nodes in its VXLAN tunnel, so both ports answer the
-cluster's pods and nodes, and no host outside the cluster has a route to them. Neither chart renders
-an ingress, a route or a Service of type LoadBalancer or NodePort, and the nodes' security group
-admits from outside the cluster only the Talos and Kubernetes APIs. Through the public Gateway,
-behind the cluster's sign-in, the store's interface and its queries are reached and nothing else of
-it, by the route of an application of their own, `victoria-logs-route`
-([The log store's interface](#the-log-stores-interface)); the Kubernetes API's service proxy, which
-`just logs` uses, reaches all of it with the cluster's kubeconfig.
+Cilium carries pod addresses between the nodes in its VXLAN tunnel, and no host outside the cluster
+has a route to them. Neither chart, nor vmauth's application, renders an ingress, a route or a
+Service of type LoadBalancer or NodePort, and the nodes' security group admits from outside the
+cluster only the Talos and Kubernetes APIs. Through the public Gateway, behind the cluster's sign-in,
+the store's interface and its queries are reached and nothing else of it, by the route of an
+application of their own, `victoria-logs-route`, through vmauth ([The log store's
+interface](#the-log-stores-interface)).
 
 Reading the logs, in a browser at `https://logs.<domain>/` once signed in
 ([The log store's interface](#the-log-stores-interface)), or with the cluster's kubeconfig:
@@ -3495,68 +3508,244 @@ Reading the logs, in a browser at `https://logs.<domain>/` once signed in
   matches, from the last 15 minutes and at most 200 unless told otherwise (`--since` is a whole
   number with `s`, `m`, `h`, `d` or `w`), one line each, the oldest first: the time, the namespace
   and pod, or the node for a Talos service's record, and the message, with its newlines made spaces
-  and its control characters, C0 and C1, left out. It asks the Kubernetes API for VictoriaLogs'
-  `/select/logsql/query` through the API's service proxy to the Service `victoria-logs`, so no port
-  is forwarded and none is left behind. Of what kubectl prints it shows only the message of an error
-  the API server or the store answered with, without an address; its warnings and the error of a
-  connection that failed can name the API server's address and are never shown. A query the store
-  refuses fails with the store's own message: kubectl keeps the body of a 400 out of its error, so
-  the recipe asks again with `-v=4` and reads the body from the Status kubectl logs, in a file it
-  never shows. kubectl keeps only a body's first 2048 bytes, and the recipe says so after a message
-  that long. Any other error the store or the API answers with, a store that is away or not ready,
-  a request the cluster's access rules deny or a Status without a reason, shows kubectl's message
-  for it; credentials the API server refuses also point to `just cluster-kubeconfig`. An API that
-  does not answer fails with that said. The query is LogsQL, such as `talos_service:kubelet`,
-  `kubernetes.pod_namespace:monitoring error` or `node:node-1 talos_service:kernel`; a query that
-  ends in a `stats` pipe prints its records as JSON. With the limit, VictoriaLogs answers with the
-  newest records, newest first, unless the query's pipes change the records' order, as `sort` and
-  `stats` do: then with the first the pipes give, in their order. The recipe sorts what it gets by
-  time, oldest first.
+  and its control characters, C0 and C1, left out. It asks VictoriaLogs' `/select/logsql/query`
+  through vmauth as the user `operator`: one `kubectl get secret` reads the key `authorization` of
+  the Secret `vmauth-operator` in `monitoring`, that user's Basic value, into a variable; `kubectl
+  port-forward` forwards a port it chooses on 127.0.0.1 to the Service `vmauth`; and curl asks
+  through it with the value as the header `Authorization`, given through a file descriptor. The
+  value is never printed, never written to a file and never an argument of a command, and the
+  forward is stopped on every exit, Ctrl-C included. So the kubeconfig must be able to read that
+  Secret and forward a port in `monitoring`. A query the store refuses fails with the store's own
+  message, which vmauth relays in its answer's body, whole; a credential vmauth refuses fails
+  saying so and naming the Secret; any other answer vmauth gives, as when the store is away, shows
+  its status and vmauth's message. A Secret the kubeconfig may not read or that is missing, a
+  forward that does not start and a vmauth that does not answer through it each fail with a reason
+  of their own; credentials the API server refuses also point to `just cluster-kubeconfig`, and an
+  API that does not answer fails with that said. Of what kubectl and curl print it shows only those
+  messages, without an address, a URL or a control character; their warnings and the errors of a
+  connection that failed can name an address and are never shown. The query is LogsQL, such as
+  `talos_service:kubelet`, `kubernetes.pod_namespace:monitoring error` or
+  `node:node-1 talos_service:kernel`; a query that ends in a `stats` pipe prints its records as
+  JSON. With the limit, VictoriaLogs answers with the newest records, newest first, unless the
+  query's pipes change the records' order, as `sort` and `stats` do: then with the first the pipes
+  give, in their order. The recipe sorts what it gets by time, oldest first.
 - In Grafana, behind `just grafana`, the datasource VictoriaLogs and the dashboard Logs, in the
   folder Logs: the volume of logs by namespace and by node, and a logs panel for the namespaces and
   pods chosen in the two variables above it. The datasource is the `GrafanaDatasource`
-  `victoria-logs`, of the plugin's type, to the Service's port 9428 through Grafana's server, with
-  the plugin pinned as [Grafana](#grafana) says. The dashboard's JSON is
-  `grafana/app/dashboards/logs.json`, which kustomize makes the ConfigMap the `GrafanaDashboard`
-  `logs` loads.
+  `victoria-logs`, of the plugin's type, to vmauth's Service on 8427 through Grafana's server, as
+  the user `grafana` with the password of the Secret `vmauth-grafana`, with the plugin pinned as
+  [Grafana](#grafana) says. While that Secret is missing, as on a new cluster until vmauth's
+  application writes it, the Grafana operator cannot build the datasource and tries again after a
+  wait that doubles each time, up to about 17 minutes, controller-runtime's default, as its watch of
+  Secrets does not see this one; so on a new cluster the datasource can come that long after the
+  Secret. The dashboard's JSON is `grafana/app/dashboards/logs.json`, which
+  kustomize makes the ConfigMap the `GrafanaDashboard` `logs` loads.
 
-`tests/logs.bats` builds both applications as Flux applies them, renders their pinned charts and
+`tests/logs.bats` builds the applications as Flux applies them, renders their pinned charts and
 checks each of these. `just vector-check` renders the collector's configuration with
-`scripts/vector-config` and has Vector itself, in the image the collector runs, validate it and run
-its unit tests, `tests/vector/talos-lines.yaml`, which hold a line of each format above from each
-service named with it, and one of udevd's, a kernel audit line, the records of one event of the
-node's audit log and a pod's record with many labels, and many of its node's. Vector's unit tests
-cannot see a sink, so `tests/logs.bats` checks that each source reaches a sink along one path only,
-the store's through the transforms the unit tests run, that each scenario's unit test starts at the
-first transform on its path and watches the last, whichever transform that is, and that the unit
-tests find a line of each of those services at the last transform on Talos's path and none of the
-audit log's. `just logs` runs in `tests/logs.bats` against a
-recording kubectl shaped like kubectl v1.37's output. The image
+`scripts/vector-config` and has Vector itself, in the image the collector runs and with the
+environment its DaemonSet gives it, validate it and, with the collector's credential left out of
+that environment, refuse it as a configuration error naming `VMAUTH_PASSWORD`, which shows that
+this Vector fills the sink's placeholder from its environment; the module of `just ci` runs the
+validation and the unit tests, not that refusal, so a person runs `just vector-check` before
+merging an update of the collector's chart. The unit tests are
+`tests/vector/talos-lines.yaml`, which hold a line of each format above from each service named
+with it, and one of udevd's, a kernel audit line, the records of one event of the node's audit log
+and a pod's record with many labels, and many of its node's. Vector's unit tests cannot see a sink,
+so `tests/logs.bats` checks that each source reaches a sink along one path only, the store's
+through the transforms the unit tests run, that each scenario's unit test starts at the first
+transform on its path and watches the last, whichever transform that is, and that the unit tests
+find a line of each of those services at the last transform on Talos's path and none of the audit
+log's. `just logs` runs in `tests/logs.bats` against a recording kubectl shaped like kubectl v1.37's
+output, which reads the Secret and forwards a port, and a recording curl that answers through that
+forward alone, as vmauth does. The image
 is `vector_image` in the justfile, pinned by the digest of its image index under a
 `# renovate: datasource=docker depName=…` comment: Renovate's custom manager for the justfile moves
 its tag and digest, in the same pull request as the chart, and `tests/logs.bats` fails, saying what
 to set, while it is not the image the chart runs.
+
+### Who may call the log store
+
+VictoriaMetrics' guidance for VictoriaLogs is to keep the store on a trusted network and to put
+vmauth in front of it, which authenticates each client, with a credential of its own, and routes it
+by path ([Security and load balancing](https://docs.victoriametrics.com/victorialogs/security-and-lb/),
+[vmauth](https://docs.victoriametrics.com/victoriametrics/vmauth/)). The application `vmauth`
+(`apps/base/monitoring/vmauth/`) does that: vmauth v1.156.0, of VictoriaMetrics, the release
+VictoriaLogs v1.54.0 builds on, its Alpine image pinned by tag and digest, as a Deployment of two
+replicas on different nodes, replaced one at a time with neither down, and a disruption budget that
+keeps one running while a drain evicts the other: every client reaches the store only through
+vmauth, so one pod serves while the other is replaced by a rollout, a restart after a rotation or a
+drain. Its pods meet the restricted
+level, as user and group 65534 with a read-only root, no capability and no token for the API
+server; in a local run of the image, read-only, offline and as that user, it wrote nothing and took
+about 12 MiB serving 200 requests, from which its requests and memory limit are set, not measured on
+the cluster. Its configuration is `app/auth.yml`, which kustomize makes a ConfigMap whose name
+changes with its content, so a change rolls the pods.
+
+What vmauth calls on its own is the store alone. Each call it can make, by the flag or setting that
+turns it on (`app/vmauth/auth_config.go`, `lib/pushmetrics/pushmetrics.go` and
+`lib/flagutil/password.go` of VictoriaMetrics v1.156.0), and its state:
+
+| Call | Variable | State |
+| --- | --- | --- |
+| The store, for each request vmauth forwards, by its Service's name, looked up as a connection opens | `url_prefix` of each entry of `auth.yml` | on: its one backend |
+| The backends' addresses, looked up again every 10 seconds | `-discoverBackendIPs` | off, its default |
+| Its configuration, read from an address | `-auth.config` | a file of the ConfigMap |
+| Its keys, read from an address | `-flagsAuthKey`, `-pprofAuthKey`, `-reloadAuthKey` | files of the Secret `vmauth-keys` |
+| Its metrics, pushed to an address | `-pushmetrics.url` | not set |
+
+The pinned binary ran offline with these arguments and configuration, in a network namespace with
+nothing but a loopback, whose resolver was a listener that logged each query. Through its start, 20
+seconds idle, its health, its metrics, its flags without their key, a request without a credential
+and one on a path its user has no route to, the listener logged no query; each request vmauth then
+forwarded logged a lookup of the store's Service, the call the probe was shown to catch. A person
+loses nothing to what is off: vmauth has no interface of its own.
+
+Every client of the store sends to vmauth's Service, `vmauth` on 8427, with Basic Auth, and vmauth
+forwards to the store's Service, `victoria-logs` on 9428, only the paths it gives that client:
+
+- **Who may insert.** The collector, as the user `vector`, on `/insert/elasticsearch/_bulk` alone,
+  the bulk API its sink sends to.
+- **Who may query.** Grafana, as `grafana`; the route `logs`, as `logs-route`, the credential Envoy
+  Gateway puts in each request the route sends on ([The log store's
+  interface](#the-log-stores-interface)); and `just logs`, and with it `just network-audit`, as
+  `operator`. Each on the interface and its files, `/select/vmui` and the paths under
+  `/select/vmui/`, the query handlers, `/select/logsql/<name>`, the build information,
+  `/select/buildinfo`, and the tenants, `/select/tenant_ids`: what the route sends on, the Grafana
+  plugin asks and `just logs` uses. The store answers `/select/tenant_ids` with 403 for a request
+  that names a tenant, which every request vmauth forwards does (`ProcessTenantIDsRequest` in
+  `app/vlselect/logsql/logsql.go` of VictoriaLogs v1.54.0), so the interface offers fields for a
+  tenant in place of a list of them, and the Grafana plugin gets the store's refusal in place of a
+  list; whatever tenant either names, vmauth sends the default one.
+- **Nothing else, for anyone.** vmauth sends nothing to deletion, storage administration, the
+  internal paths of a cluster of stores or the store's own endpoints, its metrics, flags, profiles
+  and health, nor a writer for a reader or a read for the collector. It matches a path whole, once
+  it has removed dot segments and doubled slashes from it, against each of the user's patterns
+  (`app/vmauth/auth_config.go` and `target_url.go`). It answers an `OPTIONS` request, a browser's
+  CORS preflight, itself, with 204 and nothing forwarded (`lib/httpserver/httpserver.go`); it
+  refuses any other request without a credential with 401, and one with a credential it does not
+  know with 401 after a wait of two to three seconds; it
+  answers a known client on a path it gives that client no route to with 400, a missing route
+  (`app/vmauth/main.go`). There is no user without a credential.
+- **What it sends on.** With every request it forwards, vmauth sets the header `Authorization` to
+  the store's own credential, in place of the client's, and `AccountID` and `ProjectID` to 0, the
+  default tenant, in place of any the client sets, so no client picks a tenant. Prometheus presents
+  the same credential when it scrapes the store, through the ServiceMonitor's `basicAuth`.
+- **Its own endpoints.** On 8426, which the Service does not serve: `/health`, which its probes
+  ask, and `/metrics`, which its PodMonitor scrapes, need no credential; `/flags`, `/debug/pprof/…`
+  and `/-/reload` each ask for their key, a file of the Secret `vmauth-keys`. On 8427 none of them is
+  served, and a request for one is a path like any other.
+- **What it logs and counts.** One JSON line for each request it refuses as a missing route or
+  cannot forward to the store, with the client's address and the path and query it asked, and never
+  a credential; a request it refuses with 401 it does not log, as it does not log the tokens it
+  refuses (`-logInvalidAuthTokens` is off), and its configuration dumps no request and keeps no
+  access log. Its metrics count each user's requests, `vmauth_user_requests_total{username}`, and
+  what it refused, by reason, `vmauth_http_request_errors_total{reason}`: `invalid_auth_token` for a
+  credential it does not know, `missing_route` for a known one on another path.
+- **When a pod goes.** Kubernetes takes a pod out of the Service's ready endpoints as soon as its
+  deletion starts and sends it TERM at the same time; vmauth keeps serving on 8427 for 5 seconds
+  after TERM, `-http.shutdownDelay`, so a request sent before every node has the change still finds
+  it, and then has 7 seconds for what it holds. The delay leaves `/health` of 8426 at 200, so the
+  probes take no part in it.
+
+| Credential | Who makes it | Where it lives | Who reads it, and how | Once its Secret is made again |
+|------------|--------------|----------------|-----------------------|-------------------------------|
+| The collector's, user `vector` | External Secrets' `Password` generator, once, in the cluster; no person | the Secret `vmauth-vector`, key `password`; nothing in the secret store | vmauth and the collector's pods, each from its environment, when they start | restart vmauth, then the collector |
+| Grafana's, user `grafana` | the same | the Secret `vmauth-grafana`, key `password` | vmauth, from its environment when it starts; the Grafana operator, which puts it into the datasource each time it applies it, every minute | restart vmauth; the datasource follows within a minute |
+| The route's, user `logs-route` | the same | the Secret `vmauth-logs-route`, keys `password` and `credential`, its Basic value | vmauth, `password`, from its environment when it starts; Envoy Gateway, `credential`, which it puts in each request the route sends on | restart vmauth; the proxies follow by themselves |
+| The operator's, user `operator` | the same | the Secret `vmauth-operator`, keys `password` and `authorization`, its Basic value | vmauth, `password`, from its environment when it starts; `just logs`, `authorization`, through the kubeconfig at each run | restart vmauth |
+| The store's, user `victoria-logs` | the same | the Secret `victoria-logs-auth`, keys `username`, `password` and `authorization`, its Basic value | vmauth, `authorization`, from its environment when it starts; Prometheus, `username` and `password`, from the configuration the Prometheus operator writes | restart vmauth; the scrape follows by itself |
+| vmauth's keys | the same | the Secret `vmauth-keys`, keys `flags`, `pprof` and `reload` | vmauth, from files it reads again while it runs | nothing to do |
+
+Each value is 32 characters hex-encoded into 64 hexadecimal digits, so none can be read as YAML or
+as one of vmauth's placeholders, and the Basic values are formed by each ExternalSecret's template
+from the generated password, which the template keeps beside them. None is in a ConfigMap, a values
+file, a command line, a Flux variable or the secret store: vmauth's configuration holds a
+placeholder for each, which vmauth fills from its environment, and the Deployment sets each from
+its Secret's key, never optional, so a pod does not start without them; the collector's sink names
+`${VMAUTH_PASSWORD}`, which Vector fills from its environment, with interpolation allowed, which it
+is not by default; Grafana's datasource names `${password}`, which the operator fills from the
+Secret and which the object keeps past Flux's own substitution by opting out of it.
+`tests/log-store-access.bats` builds and renders the five applications and fails on a Secret, a
+value that is not a placeholder or a template, or an argument that carries a credential.
+
+A credential is made once: each ExternalSecret has `refreshPolicy: CreatedOnce`, so External
+Secrets writes its Secret on the first sync and not on a schedule, and writes it again, with a new
+value, only when the Secret is changed or deleted or the ExternalSecret is made again
+(`docs/api/externalsecret.md` of External Secrets v2.15.0). So a credential is rotated by deleting
+its Secret, `kubectl --namespace monitoring delete secret <name>`, and then:
+
+- vmauth and the collector read theirs from their environment when they start, so an operator
+  restarts them: `kubectl --namespace monitoring rollout restart deployment/vmauth`, and
+  `daemonset/vector` for the collector's;
+- the others follow the Secret by themselves: the Grafana operator applies the datasource again
+  every minute, its `resyncPeriod`, reading the Secret each time, as its watch of Secrets sees only
+  those labelled for it, which this one is not (`main.go` of grafana-operator v5.25.0, at its default
+  `ENFORCE_CACHE_LABELS`); Envoy Gateway follows each Secret an `HTTPRouteFilter` names
+  (`internal/provider/kubernetes/predicates.go` of v1.10.0); the Prometheus operator writes
+  Prometheus' configuration again when a Secret of Prometheus' own namespace changes
+  (`pkg/operator/informers.go` of v0.95.2); `just logs` reads its Secret at each run; and vmauth
+  reads its keys' files again while it runs.
+
+Reloader does not apply: it restarts a workload when a Secret's data changes, not when the Secret
+is made ([The kube-system baseline](#the-kube-system-baseline)), and none of these workloads is
+annotated for it. Until both sides of a user's credential hold the new value, vmauth refuses that
+user with 401. For a reader that is a refused request. For the collector's credential it loses lines:
+the sink does not retry a 401, so the lines of each request vmauth refuses are dropped, and counted
+in `vector_component_discarded_events_total` with `intentional="false"`, which
+`LogCollectorDiscardingEvents` reads. The window is shortest when vmauth is restarted first and,
+once both its pods are available, every collector pod is deleted at once, `kubectl --namespace
+monitoring delete pods --selector app.kubernetes.io/name=vector`, so that the DaemonSet starts them
+all again together, where a rollout restart replaces them node after node; a collector that is not
+running loses nothing, as its lines wait in the files.
+
+`tests/log-store-access.bats` builds vmauth, the store, the collector, Grafana and the route as Flux
+applies them and renders their charts, and checks each of these: each client's address and
+credential, the configuration parsed, each user's patterns evaluated anchored, as vmauth matches
+them, against the paths each may and may not reach, the credentials, the pod, and the store's scrape
+and pod. Where a docker daemon answers, it also runs the store and vmauth beside it, each from the
+image the render and the build name, without network and with fresh credentials formed as the
+ExternalSecrets form them, and sends each client's requests to vmauth: what each may do is served
+and the rest refused, as vmauth's metrics count it. Without docker, as under `just ci` and in CI,
+that proof skips, so CI does not show that a newer vmauth or store still serves each client its own
+paths and refuses the rest; `bats tests/log-store-access.bats` where a docker daemon answers does,
+and a person runs it before merging an update of vmauth's image or of the store's chart.
 
 ### The log store's interface
 
 VictoriaLogs' own query interface is at `https://logs.<domain>/`, on the public Gateway's `https`
 listener, behind the cluster's sign-in ([Sign-in](#sign-in)). The application `victoria-logs-route`
 (`apps/base/monitoring/victoria-logs-route/`) holds it, shaped as `demo/hello-sso`: its `app/` holds
-the one `HTTPRoute` `logs` and its `Probe` ([Probes](#probes)), and its `ks.yaml` adds
-`components/sso` with `SSO_ROUTE` and `SSO_HOSTNAME` both `logs`, so the component makes the
-`SecurityPolicy` `logs`, which asks oauth2-proxy about each request of the route and does not fail
-open, and the route `logs-oauth2`, which sends `/oauth2/` on the same host to oauth2-proxy. Its
-`targetNamespace` is `monitoring`, the store's, which carries `k8s-gitops/gateway: public`, and the
-`ReferenceGrant` `oauth2-proxy` names `monitoring`. It names `gateway-public`, `victoria-logs`,
-`oauth2-proxy` and `blackbox-exporter` in `dependsOn` and waits; `victoria-logs` waits for its
-release, so the route is applied once the store answers. Its own Ready says that its objects are applied, not that the Gateway took them: an HTTPRoute and a
-SecurityPolicy report their state per parent, where Flux's wait does not read it, so
-`just gateway-check`, which counts the routes the Gateway accepted and names the DNS record of each
-host, is what shows it. The proxies' egress allows the store's pod on 9428 and no other pod or port
-of `monitoring` ([What the namespaces let through](#what-the-namespaces-let-through)), which holds
-once the agents enforce the policies rather than audit them ([Service addresses](#service-addresses)
-says which they do); the route sends nothing else there either way. external-dns publishes the name
-as for every route on the Gateway ([DNS records](#dns-records)).
+the one `HTTPRoute` `logs`, its `HTTPRouteFilter` `logs` and its `Probe` ([Probes](#probes)), and
+its `ks.yaml` adds `components/sso` with `SSO_ROUTE` and `SSO_HOSTNAME` both `logs`, so the component
+makes the `SecurityPolicy` `logs`, which asks oauth2-proxy about each request of the route and does
+not fail open, and the route `logs-oauth2`, which sends `/oauth2/` on the same host to oauth2-proxy.
+Its `targetNamespace` is `monitoring`, the store's, which carries `k8s-gitops/gateway: public`, and
+the `ReferenceGrant` `oauth2-proxy` names `monitoring`. The route sends what it admits to vmauth's
+Service on 8427, through the filter, which puts the value of the key `credential` of the Secret
+`vmauth-logs-route`, the Basic value of vmauth's user `logs-route`, in the header `Authorization` in
+place of any the client sent; Envoy Gateway runs the filter after the sign-in's external
+authorisation, so it has the last word on that header (`internal/xds/translator/httpfilters.go` of
+Envoy Gateway v1.10.0). vmauth admits that user on the interface's and the query paths alone, and
+sends them to the store with the store's own credential ([Who may call the log
+store](#who-may-call-the-log-store)). Without the Secret or its key the filter is invalid, and the
+rule answers 500 and sends nothing on (`internal/gatewayapi/filters.go`). It names `gateway-public`,
+`vmauth`, `oauth2-proxy` and `blackbox-exporter` in `dependsOn` and waits; `vmauth` waits for its
+pods, which start only with every Secret they read, the route's among them. That vmauth admits the
+route's credential rests on that Secret, which the filter and vmauth read alike and which is
+written once, and not on the order: an application's files reach Flux in an artifact of their own
+and its Kustomization, `dependsOn` included, through `cluster`, so a change to both can apply
+either first, and Flux compares a dependency's revision only between Kustomizations of one source
+(`checkDependencies` in kustomize-controller). The collector is in the same case with
+`vmauth-vector`. The route's own Ready says that its objects are applied, not that the
+Gateway took them: an HTTPRoute and a SecurityPolicy report their state per parent, where Flux's
+wait does not read it, so `just gateway-check`, which counts the routes the Gateway accepted and
+names the DNS record of each host, is what shows it. The proxies' egress allows vmauth's pods on
+8427 and no other pod or port of `monitoring` ([What the namespaces let
+through](#what-the-namespaces-let-through)), which holds once the agents enforce the policies rather
+than audit them ([Service addresses](#service-addresses) says which they do); the route sends
+nothing else there either way. external-dns publishes the name as for every route on the Gateway
+([DNS records](#dns-records)).
 
 - **Reaching it.** The first visit signs in through dex and GitHub, as for every route that opts in
   ([Putting a route behind it](#putting-a-route-behind-it)). oauth2-proxy returns the person to
@@ -3570,16 +3759,20 @@ as for every route on the Gateway ([DNS records](#dns-records)).
 - **What is routed, and why each path reads.** The route has two rules, which `tests/logs.bats`
   pins in full. `/`, exactly, is redirected with 302 to `/select/vmui/` and sent nowhere: it is the
   store's help page, which links its metrics and its flags. The other rule sends to the Service
-  `victoria-logs` on 9428, with no filter and no method match, the paths that are, by whole
+  `vmauth` on 8427, through the filter `logs` and with no method match, the paths that are, by whole
   segments, under `/select/vmui` or `/select/logsql`, or exactly `/select/buildinfo` or
-  `/select/tenant_ids`. The store dispatches on the path, with each `//` made `/`, by the same
+  `/select/tenant_ids`; vmauth forwards them to the store, the same paths it gives the user
+  `logs-route`. The store dispatches on the path, with each `//` made `/`, by the same
   literal prefixes and exact paths, and each handler under them only reads, whatever the method,
   the queries taking their arguments from the query string or the form body: `/select/vmui`
   redirects to `/select/vmui/`, under which the store serves the interface's files embedded in it;
   under `/select/logsql/` it runs the queries `query`, `hits`, `facets`, `field_names`,
   `field_values`, `stats_query`, `stats_query_range`, `stream_field_names`, `stream_field_values`,
   `stream_ids`, `streams`, `query_time_range` and `tail`, and answers any other name with an error;
-  `/select/buildinfo` gives its version and `/select/tenant_ids` the tenants that hold logs. A path
+  `/select/buildinfo` gives its version and `/select/tenant_ids` the tenants that hold logs, to a
+  request that names no tenant, where vmauth names the default one, so here the store refuses it,
+  403, and the interface offers fields for a tenant in place of a list ([Who may call the log
+  store](#who-may-call-the-log-store)). A path
   under these that ends in `/favicon.ico` gets the HTTP server's icon. The pinned release's
   interface works out its server from its own address, `window.location.href` with `/select/vmui/…`
   cut off, so it calls its own origin, and it asks only `/select/logsql/…`, with `POST`,
@@ -3608,6 +3801,8 @@ as for every route on the Gateway ([DNS records](#dns-records)).
 
   A path that differs from a routed one in letter case, by a suffix such as `/select/vmuix`, or by
   a trailing slash or more after an exact one, such as `/select/buildinfo/`, matches nothing either.
+  vmauth refuses each of these paths a second time: it gives the user `logs-route` none of them,
+  and answers one as a missing route ([Who may call the log store](#who-may-call-the-log-store)).
 - **Why normalisation cannot turn a routed path into a writer.** The pinned Envoy Gateway, v1.10.0,
   normalises the path before routing on every listener, as RFC 3986 says, removing dot segments
   (`internal/xds/translator/listener.go`), and with the ClientTrafficPolicy's defaults, which the
@@ -3615,8 +3810,10 @@ as for every route on the Gateway ([DNS records](#dns-records)).
   with an escaped slash, `%2F` or `%5C`, with a redirect to the path unescaped, which comes back
   through the Gateway and is normalised and matched again (`escapedSlashesAction:
   UnescapeAndRedirect`, `internal/gatewayapi/listener.go`). The route matches the normalised path,
-  and that is the path the store receives: one that starts with the literal characters of a routed
-  prefix or is a routed exact path. The store resolves no dot segment and dispatches on the same
+  and that is the path vmauth receives, cleans of dot segments and doubled slashes again, matches
+  against the user `logs-route`'s patterns and sends on, so the path the store receives is one that
+  starts with the literal characters of a routed prefix or is a routed exact path. The store
+  resolves no dot segment and dispatches on the same
   literal prefixes, the writers' first, so a path that starts `/select/` never reaches an insert,
   delete or storage handler, whose prefixes it cannot have, and is read or refused.
 - **What a forged cross-site request can do.** oauth2-proxy's session cookie is `Secure`, `HttpOnly`
@@ -3641,9 +3838,11 @@ as for every route on the Gateway ([DNS records](#dns-records)).
   for a route applies: 15 seconds from the end of the request to the end of the answer. A query that
   runs longer, and a live tail, which the store keeps open for as long as the client stays, end at
   the Gateway after 15 seconds, while the store allows a query 30 (`-search.maxQueryDuration`, its
-  default). `just logs` and Grafana do not pass the Gateway.
-- **The other ways in.** `just logs` and Grafana's Logs dashboard, behind `just grafana`, remain,
-  need no sign-in, only the cluster's kubeconfig, and read the store as above.
+  default) and vmauth waits 5 minutes for the store's answer (`-responseTimeout`, its default).
+  `just logs` and Grafana do not pass the Gateway.
+- **The other ways in.** `just logs` and Grafana's Logs dashboard, behind `just grafana`, remain and
+  need no sign-in, only the cluster's kubeconfig; each reads the store through vmauth with a
+  credential of its own, on the same paths ([Who may call the log store](#who-may-call-the-log-store)).
 - **Until the owner has seeded the sign-in** (dex's GitHub client and oauth2-proxy's list, [What the
   owner does, in order](#what-the-owner-does-in-order)), `oauth2-proxy` is not Ready, so
   `victoria-logs-route`, which waits for it, is not applied: there is no route and no DNS record,
@@ -3656,9 +3855,11 @@ as for every route on the Gateway ([DNS records](#dns-records)).
 whole spec, the sign-in route, the grant and the host following the domain; both rules in full, and,
 as Gateway API matches a route, that the interface's requests are sent on and the writers, the
 administration and the server's own paths are not; that no route the tree builds or its charts
-render, and no Grafana, reaches the store past the sign-in, and that no grant of `monitoring` lets
-another namespace's route refer to its Services, as one could through a second Service that selects
-the store's pod; the overlay entry and the refusals without the store, the Gateway or the sign-in;
+render, and no Grafana, reaches the store's or vmauth's Service past the sign-in, that no filter but
+`logs` injects the route's credential, and that no grant of `monitoring` lets another namespace
+refer to its Services or Secrets, as a route could through a second Service that selects the
+store's or vmauth's pods, or a filter take the route's credential; the overlay entry and the
+refusals without vmauth, the Gateway or the sign-in;
 and that the route's header records, in `# victoria-logs-paths:` beside its `Source:` line, the
 release its paths were read from, which must be the `appVersion` of the store's pinned chart. A new
 chart therefore fails it, saying what to read again and what to set, and `.renovate/by-hand.tsv`

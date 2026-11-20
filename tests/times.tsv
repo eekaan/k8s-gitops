@@ -51,6 +51,7 @@ tests/kromgo.bats	232
 tests/kubernetes-check.bats	196
 tests/kubernetes-validate.bats	469
 tests/locust.bats	129
+tests/log-store-access.bats	49
 tests/logs.bats	151
 tests/monitoring.bats	10
 tests/network-audit.bats	147

@@ -81,10 +81,13 @@ type Ci {
       .withMountedDirectory("/usr/src/app", source)
       .withWorkdir("/usr/src/app")
     # The configuration the log collector runs with and Vector's unit tests of it, as
-    # scripts/vector-config writes them with the pinned tools, where vector-check reads them.
+    # scripts/vector-config writes them with the pinned tools, where vector-check reads them, with
+    # the environment the DaemonSet gives Vector, as the justfile's vector-check gives it.
     let collector = container
       .from(vectorImage)
       .withEnvVariable("VECTOR_SELF_NODE_NAME", "node-1")
+      .withEnvVariable("VECTOR_DANGEROUSLY_ALLOW_ENV_VAR_INTERPOLATION", "true")
+      .withEnvVariable("VMAUTH_PASSWORD", "vector-check")
       .withMountedDirectory("/check", checkout.withExec(["scripts/vector-config", "/tmp/vector-check"]).directory("/tmp/vector-check"))
     # One line per group: its name, then its checks as just takes them on its command line, each
     # recipe followed by its arguments.
